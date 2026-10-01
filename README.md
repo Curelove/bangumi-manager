@@ -50,7 +50,7 @@ https://github.com/Curelove/bangumi-manager
 
 ### 手动安装
 
-1.打开 GitHub 仓库的“Releases”。
+1. 打开 GitHub 仓库的“Releases”。
 
 2. 下载本仓库中最新版本的插件文件。
 
