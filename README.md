@@ -29,11 +29,8 @@ Bangumi 追番管理器是一款面向 Obsidian 桌面版的动画管理插件�
 ### 通过 BRAT 安装
 
 1. 在 Obsidian 中安装并启用 BRAT 插件。
-
 2. 打开 BRAT 设置。
-
 3. 点击“Beta 插件列表”右侧的“＋”符号。
-
 4. 在弹出的窗口里找到右侧的仓库地址输入框，粘贴以下 GitHub 仓库地址：
 
 ```text
@@ -41,41 +38,35 @@ https://github.com/Curelove/bangumi-manager
 ```
 
 5. 在版本选择下拉框里选择“最新版本”。
-
 6. 勾选“安装后启用此插件”。
-
 7. 点击右侧的“添加插件”。
-
 8. 等待 BRAT 下载完成。
 
 ### 手动安装
 
 1. 打开 GitHub 仓库的“Releases”。
-
 2. 下载本仓库中最新版本的插件文件。
-
 3. 在 Obsidian 仓库中打开：
 
 ```text
 .obsidian/plugins/
 ```
 
-3. 新建文件夹：
+4. 新建文件夹：
 
 ```text
 bangumi-manager
 ```
 
-4. 将以下文件放入该文件夹：
+5. 将以下文件放入该文件夹：
 
 ```text
 manifest.json
 main.js
 ```
 
-5. 重新打开 Obsidian。
-
-6. 在“设置 → 第三方插件”中启用插件。
+6. 重新打开 Obsidian。
+7. 在“设置 → 第三方插件”中启用插件。
 
 ## 首次使用
 
