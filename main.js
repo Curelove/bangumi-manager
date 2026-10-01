@@ -2038,21 +2038,40 @@ var BangumiManagerPlugin = class extends Plugin {
       )
     );
   }
-  getCurrentSeasonName() {
-    const now = /* @__PURE__ */ new Date();
-    const year = String(now.getFullYear());
-    const month = now.getMonth() + 1;
-    if (month === 12 || month === 1 || month === 2) {
-      return year + "\u5E7401\u6708\u65B0\u756A";
-    }
-    if (month === 3 || month === 4 || month === 5) {
-      return year + "\u5E7404\u6708\u65B0\u756A";
-    }
-    if (month === 6 || month === 7 || month === 8) {
-      return year + "\u5E7407\u6708\u65B0\u756A";
-    }
-    return year + "\u5E7410\u6708\u65B0\u756A";
+getCurrentSeasonName() {
+  const now = /* @__PURE__ */ new Date();
+  const month = now.getMonth() + 1;
+  let year = now.getFullYear();
+
+  if (month === 12) {
+    year += 1;
+    return year + "\u5E7401\u6708\u65B0\u756A";
   }
+
+  if (month === 1 || month === 2) {
+    return year + "\u5E7401\u6708\u65B0\u756A";
+  }
+
+  if (month === 3 || month === 4 || month === 5) {
+    return year + "\u5E7404\u6708\u65B0\u756A";
+  }
+
+  if (month === 6 || month === 7 || month === 8) {
+    return year + "\u5E7407\u6708\u65B0\u756A";
+  }
+
+  return year + "\u5E7410\u6708\u65B0\u756A";
+}
+  async runTemporarySeasonMode(mode) {
+  const oldMode = this.settings.seasonViewMode;
+  this.settings.seasonViewMode = mode;
+
+  try {
+    await this.generateSeasonViews(true);
+  } finally {
+    this.settings.seasonViewMode = oldMode;
+  }
+}
   async initializeMissingFiles() {
     await this.ensureVaultFolder(
       this.settings.noteRootFolder
@@ -2241,16 +2260,13 @@ views:
     if (!actualBaseFile) {
       return;
     }
-    const seasons = await this.collectSeasonNames();
-    let seasonList = [...seasons];
-    if (this.settings.seasonViewMode === "current") {
-      const currentSeason = this.getCurrentSeasonName();
-      seasonList = seasonList.filter(
-        (name) => {
-          return name === currentSeason;
-        }
-      );
-    }
+const seasons = await this.collectSeasonNames();
+let seasonList = [...seasons];
+
+if (this.settings.seasonViewMode === "current") {
+  const currentSeason = this.getCurrentSeasonName();
+  seasonList = [currentSeason];
+}
     let baseContent = await this.app.vault.read(
       actualBaseFile
     );
@@ -3294,9 +3310,9 @@ var BangumiManagerSettingTab = class extends PluginSettingTab {
       "\u751F\u6210\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE",
       "\u53EA\u65B0\u589E\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE\uFF0C\u4E0D\u5220\u9664\u65E7\u5B63\u5EA6\u89C6\u56FE\u3002",
       async () => {
-        await this.runTemporarySeasonMode(
-          "current"
-        );
+await this.plugin.runTemporarySeasonMode(
+  "current"
+);
       }
     );
     this.addAction(
@@ -3383,9 +3399,9 @@ var BangumiManagerSettingTab = class extends PluginSettingTab {
       "\u751F\u6210\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE",
       "\u6309\u7167\u7535\u8111\u5F53\u524D\u65E5\u671F\u5224\u65AD\u5B63\u5EA6\uFF0C\u53EA\u65B0\u589E\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE\u3002",
       async () => {
-        await this.runTemporarySeasonMode(
-          "current"
-        );
+await this.plugin.runTemporarySeasonMode(
+  "current"
+);
       }
     );
     this.addAction(
@@ -3431,14 +3447,6 @@ var BangumiManagerSettingTab = class extends PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-  }
-  async runTemporarySeasonMode(mode) {
-    const old = this.plugin.settings.seasonViewMode;
-    this.plugin.settings.seasonViewMode = mode;
-    await this.plugin.generateSeasonViews(
-      true
-    );
-    this.plugin.settings.seasonViewMode = old;
   }
 };
 function cleanValue(value) {
