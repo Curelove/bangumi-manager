@@ -45,7 +45,9 @@ https://github.com/Curelove/bangumi-manager
 ### 手动安装
 
 1.打开 GitHub 仓库的“Releases”。
+
 2. 下载本仓库中最新版本的插件文件。
+
 3. 在 Obsidian 仓库中打开：
 
 ```text
@@ -66,6 +68,7 @@ main.js
 ```
 
 5. 重新打开 Obsidian。
+
 6. 在“设置 → 第三方插件”中启用插件。
 
 ## 首次使用
