@@ -18,29 +18,27 @@
 
 4. 选择安装并启用插件。
 
-BRAT 使用仓库根目录中的：
-
-- `main.js`
-- `manifest.json`
-
 ### 手动安装
 
-1. 下载 Release 中提供的插件安装包。
-2. 解压得到 `bangumi-manager` 文件夹。
-3. 将该文件夹放入目标仓库的 `.obsidian/plugins/` 目录。
-4. 确认最终路径为：
+1. 下载最新 Release 附件中的：
+   - `main.js`
+   - `manifest.json`
+2. 在 Obsidian 仓库中创建目录：
 
    `.obsidian/plugins/bangumi-manager/`
 
-5. 确认目录中至少包含：
+3. 将下载的两个文件放入该目录。
+4. 在 Obsidian 的“设置 -> 第三方插件”中启用“Bangumi 追番管理器”。
 
-   - `main.js`
-   - `manifest.json`
+最终目录结构如下：
 
-6. 重启 Obsidian，或在“设置 -> 第三方插件”中重新加载插件。
-7. 在第三方插件列表中启用“Bangumi 追番管理器”。
-
-GitHub 自动提供的 `Source code (zip)` 和 `Source code (tar.gz)` 是源码快照，不是推荐的安装包。
+```text
+.obsidian/
+└── plugins/
+    └── bangumi-manager/
+        ├── main.js
+        └── manifest.json
+```
 
 ## 首次使用
 
@@ -345,8 +343,8 @@ Netaba 页面是外部网页嵌入内容。插件不会控制网页内部的所�
 - 需要能够访问 Bangumi 网站；
 - Bangumi 页面结构变化时，搜索、详情读取或批量导入可能需要更新；
 - 批量导入速度受网络状况和请求间隔影响；
-- 本地视频检查需要在笔记中填写有效的下载路径；
-- 精确评分依赖 Bangumi 页面能够提供评分分布数据；
+- 本地视频检查需要在笔记中填写有效的本地下载路径；
+- 精确评分依赖 Bangumi 页面提供评分分布数据；
 - Markdown 仪表盘需要在阅读模式或实时预览模式中显示；
 - 本地动画文件夹创建功能依赖系统文件路径权限。
 
