@@ -1,0 +1,9 @@
+{
+  "id": "bangumi-manager",
+  "name": "Bangumi 追番管理器",
+  "version": "0.3.0",
+  "minAppVersion": "1.4.0",
+  "description": "管理 Bangumi 动画笔记、本地视频状态和动画库季度视图。",
+  "author": "苦惹爱",
+  "isDesktopOnly": true
+}

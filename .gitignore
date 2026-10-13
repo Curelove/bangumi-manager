@@ -1,0 +1,35 @@
+# Node.js dependencies
+node_modules/
+
+# Rebuildable build output
+dist/
+
+# Local release staging
+release-package/
+
+# Local backups created during maintenance
+_backup-*/
+
+# Test harnesses, sandboxes, and logs
+.bangumi-ci/
+测试仓库/
+测试 Vault/
+
+# Temporary files and logs
+*.log
+*.tmp
+
+# Release archives
+*.zip
+
+# Operating system files
+.DS_Store
+Thumbs.db
+# Local archives and maintenance folders
+archive/
+backups/
+bangumi-manager-legacy-vib/
+build.js.before-cleanup-stage1
+build-release.cmd
+CHANGELOG.md
+NOTICE.md
