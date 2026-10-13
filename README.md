@@ -350,40 +350,6 @@ Netaba 页面是外部网页嵌入内容。插件不会控制网页内部的所�
 - Markdown 仪表盘需要在阅读模式或实时预览模式中显示；
 - 本地动画文件夹创建功能依赖系统文件路径权限。
 
-## 开发构建
-
-需要 Node.js 18 或更高版本。
-
-安装依赖：
-
-```bash
-npm ci
-```
-
-生成开发构建：
-
-```bash
-npm run build
-```
-
-生成压缩发布构建：
-
-```bash
-npm run release
-```
-
-构建产物位于：
-
-- `dist/main.js`
-- `dist/manifest.json`
-
-发布前应确认以下文件与 `dist` 中的构建产物一致：
-
-- 根目录 `main.js`
-- 根目录 `manifest.json`
-- `release-package/bangumi-manager/main.js`
-- `release-package/bangumi-manager/manifest.json`
-
 ## 许可证
 
 本项目原创代码采用 MIT License，详见 [LICENSE](LICENSE)。
