@@ -153,7 +153,11 @@ class RatingSyncProgressModal extends Modal {
       text: stats.join("，")
     });
 
-    if (task.stopRequested && task.running) {
+    if (task.pauseRequested && task.running) {
+      contentEl.createEl("p", {
+        text: "已暂停后续请求，等待停止决定。"
+      });
+    } else if (task.stopRequested && task.running) {
       contentEl.createEl("p", {
         text: task.stopMode === "commit"
           ? "正在保存已获取结果并停止。"
@@ -304,6 +308,8 @@ class RatingSyncStopModal extends Modal {
   }
 
   onOpen() {
+    this.plugin.ratingSync.pauseForDecision();
+
     const { contentEl } = this;
 
     contentEl.empty();
@@ -336,6 +342,7 @@ class RatingSyncStopModal extends Modal {
 
     continueButton.onclick = () => {
       this.resolved = true;
+      this.plugin.ratingSync.resumeAfterDecision();
       this.close();
       this.onContinue();
     };
@@ -356,6 +363,7 @@ class RatingSyncStopModal extends Modal {
   onClose() {
     if (!this.resolved) {
       this.resolved = true;
+      this.plugin.ratingSync.resumeAfterDecision();
       this.onContinue();
     }
 

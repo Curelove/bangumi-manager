@@ -126,6 +126,9 @@ class RatingSyncManager {
       running: true,
       stopRequested: false,
       stopMode: "",
+      pauseRequested: false,
+      pausedPhase: "",
+      pauseWaiters: [],
       wasStopped: false,
       discarded: false,
       hadFatalError: false,
@@ -164,6 +167,56 @@ class RatingSyncManager {
     };
   }
 
+  releasePauseWaiters(task) {
+    const waiters = task.pauseWaiters.splice(0);
+
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }
+
+  pauseForDecision() {
+    if (!this.isRunning() || this.task.stopRequested) {
+      return false;
+    }
+
+    if (this.task.pauseRequested) {
+      return true;
+    }
+
+    this.task.pauseRequested = true;
+    this.task.pausedPhase = this.task.phase;
+    this.task.phase = "等待停止决定";
+    this.task.currentName =
+      "已暂停后续请求，等待停止决定";
+    this.emit();
+
+    return true;
+  }
+
+  resumeAfterDecision() {
+    if (!this.isRunning() || !this.task.pauseRequested) {
+      return false;
+    }
+
+    this.task.pauseRequested = false;
+    this.task.phase =
+      this.task.pausedPhase || PHASES.SCAN;
+    this.task.pausedPhase = "";
+    this.releasePauseWaiters(this.task);
+    this.emit();
+
+    return true;
+  }
+
+  async waitWhilePaused(task) {
+    while (task.pauseRequested && !task.stopRequested) {
+      await new Promise((resolve) => {
+        task.pauseWaiters.push(resolve);
+      });
+    }
+  }
+
   requestStop(mode) {
     if (!this.isRunning()) {
       return false;
@@ -175,11 +228,13 @@ class RatingSyncManager {
 
     this.task.stopRequested = true;
     this.task.stopMode = mode;
+    this.task.pauseRequested = false;
+    this.task.pausedPhase = "";
+    this.releasePauseWaiters(this.task);
     this.emit();
 
     return true;
   }
-
   async start(options = {}) {
     if (this.isRunning()) {
       return this.task;
@@ -216,6 +271,8 @@ class RatingSyncManager {
 
     task.total = task.items.length;
 
+    await this.waitWhilePaused(task);
+
     if (!task.items.length || task.stopRequested) {
       return;
     }
@@ -228,12 +285,18 @@ class RatingSyncManager {
       await this.readUserRatings(task);
     }
 
+    await this.waitWhilePaused(task);
+
     if (!task.stopRequested) {
       await this.readDetails(task);
     }
 
-    task.phase = PHASES.READY;
-    this.emit();
+    await this.waitWhilePaused(task);
+
+    if (!task.stopRequested) {
+      task.phase = PHASES.READY;
+      this.emit();
+    }
   }
 
   async collectItems(task, targets) {
@@ -243,6 +306,8 @@ class RatingSyncManager {
     const items = [];
 
     for (const file of files) {
+      await this.waitWhilePaused(task);
+
       if (task.stopRequested) {
         break;
       }
@@ -327,6 +392,7 @@ class RatingSyncManager {
               400
             ),
             shouldStop: () => task.stopRequested,
+            waitIfPaused: () => this.waitWhilePaused(task),
             onProgress: (progress) => {
               task.userListPages += 1;
               task.currentName =
@@ -454,6 +520,7 @@ class RatingSyncManager {
             2
           ),
           shouldStop: () => task.stopRequested,
+          waitIfPaused: () => this.waitWhilePaused(task),
           onProgress: (progress) => {
             const stats = progress.stats || {};
 

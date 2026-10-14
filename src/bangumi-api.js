@@ -510,6 +510,11 @@ async function getUserRatingsForSubjects(
       ? options.shouldStop
       : () => false;
 
+  const waitIfPaused =
+    typeof options.waitIfPaused === "function"
+      ? options.waitIfPaused
+      : async () => {};
+
   const onProgress =
     typeof options.onProgress === "function"
       ? options.onProgress
@@ -537,6 +542,8 @@ async function getUserRatingsForSubjects(
   ];
 
   for (const listPath of paths) {
+    await waitIfPaused();
+
     if (shouldStop()) {
       return ratings;
     }
@@ -544,6 +551,8 @@ async function getUserRatingsForSubjects(
     let page = 1;
 
     while (page <= 100) {
+      await waitIfPaused();
+
       if (shouldStop()) {
         return ratings;
       }
@@ -937,6 +946,11 @@ async function getScoreDetailsForSubjects(
       ? options.shouldStop
       : () => false;
 
+  const waitIfPaused =
+    typeof options.waitIfPaused === "function"
+      ? options.waitIfPaused
+      : async () => {};
+
   const onProgress =
     typeof options.onProgress === "function"
       ? options.onProgress
@@ -977,6 +991,8 @@ async function getScoreDetailsForSubjects(
       attempt <= retryCount;
       attempt += 1
     ) {
+      await waitIfPaused();
+
       if (shouldStop()) {
         stats.stopped = true;
         record.error = "已停止";
@@ -987,6 +1003,8 @@ async function getScoreDetailsForSubjects(
         stats.retried += 1;
         await delay(attempt === 1 ? 1000 : 2000);
 
+        await waitIfPaused();
+
         if (shouldStop()) {
           stats.stopped = true;
           record.error = "已停止";
@@ -995,6 +1013,8 @@ async function getScoreDetailsForSubjects(
       }
 
       const launchedAt = await launch();
+
+      await waitIfPaused();
 
       if (shouldStop()) {
         stats.stopped = true;
@@ -1091,6 +1111,8 @@ async function getScoreDetailsForSubjects(
 
   async function worker() {
     while (true) {
+      await waitIfPaused();
+
       if (shouldStop()) {
         stats.stopped = true;
         return;
