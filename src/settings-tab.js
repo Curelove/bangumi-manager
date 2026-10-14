@@ -79,6 +79,381 @@ var ScoreDataRefreshPromptModal = class extends Modal {
     this.contentEl.empty();
   }
 };
+class RatingSyncProgressModal extends Modal {
+  constructor(app, plugin, onCloseRequest) {
+    super(app);
+    this.plugin = plugin;
+    this.onCloseRequest = onCloseRequest;
+    this.unsubscribe = null;
+    this.closeRequested = false;
+    this.allowClose = false;
+  }
+
+  onOpen() {
+    this.render();
+
+    if (
+      this.plugin.ratingSync &&
+      typeof this.plugin.ratingSync.subscribe === "function"
+    ) {
+      this.unsubscribe =
+        this.plugin.ratingSync.subscribe(() => {
+          this.render();
+        });
+    }
+  }
+
+  getTask() {
+    return this.plugin.ratingSync
+      ? this.plugin.ratingSync.getTask()
+      : null;
+  }
+
+  render() {
+    const task = this.getTask();
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "评分同步进度"
+    });
+
+    if (!task) {
+      contentEl.createEl("p", {
+        text: "没有正在运行的评分同步任务。"
+      });
+      return;
+    }
+
+    contentEl.createEl("p", {
+      text: task.phase || "正在准备"
+    });
+
+    const current = task.currentName
+      ? "当前：" + task.currentName
+      : "";
+
+    if (current) {
+      contentEl.createEl("p", {
+        text: current
+      });
+    }
+
+    const stats = [
+      "扫描笔记：" + task.scanned,
+      "详情请求：" + task.requested,
+      "已完成：" + task.completed,
+      "失败：" + task.failed,
+      "超时：" + task.timedOut,
+      "无数据：" + task.noData
+    ];
+
+    contentEl.createEl("p", {
+      text: stats.join("，")
+    });
+
+    if (task.stopRequested && task.running) {
+      contentEl.createEl("p", {
+        text: task.stopMode === "commit"
+          ? "正在保存已获取结果并停止。"
+          : "正在停止并放弃本次结果。"
+      });
+    }
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.justifyContent = "flex-end";
+
+    if (task.running) {
+      const stopButton = actions.createEl("button", {
+        text: "停止同步"
+      });
+
+      stopButton.onclick = () => {
+        if (this.closeRequested) {
+          return;
+        }
+
+        new RatingSyncStopModal(
+          this.app,
+          this.plugin,
+          () => {
+            this.closeRequested = true;
+            this.allowClose = true;
+            this.close();
+          },
+          () => {
+            this.render();
+          }
+        ).open();
+      };
+    } else {
+      const closeButton = actions.createEl("button", {
+        text: "关闭"
+      });
+
+      closeButton.onclick = () => {
+        this.allowClose = true;
+        this.close();
+      };
+    }
+  }
+
+  onClose() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+
+    const task = this.getTask();
+
+    if (
+      task &&
+      task.running &&
+      !this.allowClose &&
+      !this.closeRequested &&
+      typeof this.onCloseRequest === "function"
+    ) {
+      this.closeRequested = true;
+      this.onCloseRequest();
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+class RatingSyncCloseModal extends Modal {
+  constructor(app, plugin, onBackground, onStop) {
+    super(app);
+    this.plugin = plugin;
+    this.onBackground = onBackground;
+    this.onStop = onStop;
+    this.resolved = false;
+  }
+
+  resolve(action) {
+    if (this.resolved) {
+      return;
+    }
+
+    this.resolved = true;
+
+    if (action === "background") {
+      this.onBackground();
+    } else {
+      this.onStop();
+    }
+
+    this.close();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "关闭评分同步进度"
+    });
+
+    contentEl.createEl("p", {
+      text: "同步任务仍在运行。请选择关闭窗口后的处理方式。"
+    });
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.justifyContent = "flex-end";
+
+    const backgroundButton = actions.createEl("button", {
+      text: "关闭窗口，后台继续"
+    });
+
+    const stopButton = actions.createEl("button", {
+      text: "停止后续同步"
+    });
+
+    backgroundButton.onclick = () => {
+      this.resolve("background");
+    };
+
+    stopButton.onclick = () => {
+      this.resolve("stop");
+    };
+  }
+
+  onClose() {
+    if (!this.resolved) {
+      this.resolve("background");
+      return;
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+class RatingSyncStopModal extends Modal {
+  constructor(app, plugin, onClose, onContinue) {
+    super(app);
+    this.plugin = plugin;
+    this.onCloseCallback = onClose;
+    this.onContinue = onContinue;
+    this.resolved = false;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "停止评分同步"
+    });
+
+    contentEl.createEl("p", {
+      text: "停止后，已经取得的网络结果可以保存，也可以全部放弃。"
+    });
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.flexWrap = "wrap";
+    actions.style.justifyContent = "flex-end";
+
+    const continueButton = actions.createEl("button", {
+      text: "继续同步"
+    });
+
+    const saveButton = actions.createEl("button", {
+      text: "保存已获取结果并停止"
+    });
+
+    const discardButton = actions.createEl("button", {
+      text: "放弃本次结果并停止"
+    });
+
+    continueButton.onclick = () => {
+      this.resolved = true;
+      this.close();
+      this.onContinue();
+    };
+
+    saveButton.onclick = () => {
+      this.resolved = true;
+      this.plugin.ratingSync.requestStop("commit");
+      this.close();
+    };
+
+    discardButton.onclick = () => {
+      this.resolved = true;
+      this.plugin.ratingSync.requestStop("discard");
+      this.close();
+    };
+  }
+
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.onContinue();
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+function openRatingSyncProgress(plugin, app) {
+  const existing = plugin.ratingSync &&
+    plugin.ratingSync.getTask();
+
+  if (existing && existing.running) {
+    new RatingSyncProgressModal(
+      app,
+      plugin,
+      () => {
+        new RatingSyncCloseModal(
+          app,
+          plugin,
+          () => {},
+          () => {
+            new RatingSyncStopModal(
+              app,
+              plugin,
+              () => {
+                new RatingSyncProgressModal(
+                  app,
+                  plugin,
+                  () => {}
+                ).open();
+              },
+              () => {
+                new RatingSyncProgressModal(
+                  app,
+                  plugin,
+                  () => {}
+                ).open();
+              }
+            ).open();
+          }
+        ).open();
+      }
+    ).open();
+
+    return;
+  }
+
+  const progress = new RatingSyncProgressModal(
+    app,
+    plugin,
+    () => {
+      new RatingSyncCloseModal(
+        app,
+        plugin,
+        () => {},
+        () => {
+          new RatingSyncStopModal(
+            app,
+            plugin,
+            () => {
+              new RatingSyncProgressModal(
+                app,
+                plugin,
+                () => {}
+              ).open();
+            },
+            () => {
+              new RatingSyncProgressModal(
+                app,
+                plugin,
+                () => {}
+              ).open();
+            }
+          ).open();
+        }
+      ).open();
+    }
+  );
+
+  progress.open();
+
+  plugin.ratingSync.start({
+    forceRefresh: true,
+    mode: "standard"
+  }).then((task) => {
+    new Notice(
+      plugin.ratingSync.buildSummary(task),
+      10000
+    );
+  }).catch((error) => {
+    console.error("评分同步失败:", error);
+
+    new Notice(
+      "评分同步失败，请查看控制台日志。",
+      7000
+    );
+  });
+}
 module.exports = function createSettingsTabClass({
   PluginSettingTab,
   Setting,
@@ -1160,62 +1535,46 @@ await this.saveAndRefreshDashboard();
     new Setting(container)
       .setName("立即更新评分数据")
       .setDesc(
-        "立刻读取普通 BGM评分、BGM 用户评分，以及当前启用的精确评分和仪表盘排名数据。接口无数据或请求失败时保留当前笔记内容。"
+        "读取普通 BGM评分、BGM 用户评分，以及当前启用的精确评分。同步过程中可以关闭窗口并让任务在后台继续。"
       )
       .addButton((button) => {
         button.setButtonText("立即更新");
 
-        button.onClick(async () => {
-          button.setDisabled(true);
-
-          try {
-            const previousMonitorState =
-              this.plugin.settings.ratingMonitorEnabled;
-
-            this.plugin.settings.ratingMonitorEnabled =
-              true;
-
-            await this.plugin.refreshBangumiRatingsSilently();
-
-            const summary =
-              await this.plugin.refreshPreciseRatingsSilently(
-                true
-              );
-
-            this.plugin.settings.ratingMonitorEnabled =
-              previousMonitorState;
-
-            await this.plugin.saveSettings();
-
-            new Notice(
-              "评分数据更新完成：扫描 " +
-              summary.scanned +
-              " 篇，请求 " +
-              summary.requested +
-              " 篇， 精确评分更新 " + summary.preciseUpdated + " 篇，写入笔记 " + summary.notesUpdated +
-              " 篇，无数据 " +
-              summary.noData +
-              " 篇，失败 " +
-              summary.failed +
-              " 篇。",
-              9000
-            );
-          } catch (error) {
-            console.error(
-              "手动更新评分数据失败:",
-              error
-            );
-
-            new Notice(
-              "更新评分数据失败，请检查网络或稍后重试。",
-              6000
-            );
-          } finally {
-            button.setDisabled(false);
-          }
+        button.onClick(() => {
+          openRatingSyncProgress(
+            this.plugin,
+            this.app
+          );
         });
       });
 
+    new Setting(container)
+      .setName("查看评分同步状态")
+      .setDesc(
+        "重新打开当前评分同步任务的进度窗口。没有运行中的任务时不会执行操作。"
+      )
+      .addButton((button) => {
+        button.setButtonText("查看状态");
+
+        button.onClick(() => {
+          const task =
+            this.plugin.ratingSync &&
+            this.plugin.ratingSync.getTask();
+
+          if (!task || !task.running) {
+            new Notice(
+              "当前没有正在运行的评分同步任务。",
+              5000
+            );
+            return;
+          }
+
+          openRatingSyncProgress(
+            this.plugin,
+            this.app
+          );
+        });
+      });
     new Setting(container)
       .setName("刷新笔记中的评分显示")
       .setDesc(
