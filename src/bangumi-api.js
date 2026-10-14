@@ -494,8 +494,27 @@ function getRatingFromEntry(entry) {
 
 async function getUserRatingsForSubjects(
   userId,
-  subjectIds
+  subjectIds,
+  options = {}
 ) {
+  const pageIntervalMs = Math.min(
+    500,
+    Math.max(
+      350,
+      Number(options.pageIntervalMs) || 400
+    )
+  );
+
+  const shouldStop =
+    typeof options.shouldStop === "function"
+      ? options.shouldStop
+      : () => false;
+
+  const onProgress =
+    typeof options.onProgress === "function"
+      ? options.onProgress
+      : () => {};
+
   const targetIds = new Set(
     (subjectIds || []).map((value) => {
       return String(value);
@@ -518,9 +537,17 @@ async function getUserRatingsForSubjects(
   ];
 
   for (const listPath of paths) {
+    if (shouldStop()) {
+      return ratings;
+    }
+
     let page = 1;
 
     while (page <= 100) {
+      if (shouldStop()) {
+        return ratings;
+      }
+
       const url =
         "https://bgm.tv/anime/list/" +
         userId +
@@ -564,6 +591,13 @@ async function getUserRatingsForSubjects(
         );
       }
 
+      onProgress({
+        path: listPath,
+        page,
+        found: ratings.size,
+        total: targetIds.size
+      });
+
       if (ratings.size >= targetIds.size) {
         return ratings;
       }
@@ -592,7 +626,7 @@ async function getUserRatingsForSubjects(
       }
 
       page += 1;
-      await delay(350);
+      await delay(pageIntervalMs);
     }
   }
 
@@ -749,6 +783,358 @@ async function getPreciseRatingsForSubjects(
 
   return ratings;
 }
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value);
+
+  return Math.min(
+    max,
+    Math.max(
+      min,
+      Number.isFinite(parsed)
+        ? parsed
+        : fallback
+    )
+  );
+}
+
+function readPublicScoreFromDoc(doc) {
+  const value = cleanText(
+    doc.querySelector(
+      "span[property='v:average']"
+    )?.textContent
+  );
+
+  const score = Number(value);
+
+  return Number.isFinite(score) &&
+    score > 0 &&
+    score <= 10
+    ? score
+    : null;
+}
+
+function readVotesFromDoc(doc) {
+  const value = cleanText(
+    doc.querySelector(
+      "span[property='v:votes']"
+    )?.textContent
+  );
+
+  const votes = Number(
+    value.replace(/[^\d]/g, "")
+  );
+
+  return Number.isFinite(votes) && votes >= 0
+    ? votes
+    : null;
+}
+
+function createLaunchGate(intervalMs) {
+  let queue = Promise.resolve();
+  let nextLaunchAt = 0;
+
+  return async () => {
+    const scheduled = queue.then(async () => {
+      const waitMs = Math.max(
+        0,
+        nextLaunchAt - Date.now()
+      );
+
+      if (waitMs > 0) {
+        await delay(waitMs);
+      }
+
+      const launchedAt = Date.now();
+      nextLaunchAt = launchedAt + intervalMs;
+
+      return launchedAt;
+    });
+
+    queue = scheduled.catch(() => {});
+    return await scheduled;
+  };
+}
+
+async function requestHtmlWithTimeout(url, timeoutMs) {
+  let timeoutId = null;
+  const requestPromise = requestHtml(url);
+
+  // A requestUrl call cannot be reliably aborted. Keep its rejection handled
+  // after the logical timeout so a late failure never becomes unhandled.
+  requestPromise.catch(() => {});
+
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve({
+        timedOut: true,
+        html: ""
+      });
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      requestPromise.then((html) => {
+        return {
+          timedOut: false,
+          html: html || ""
+        };
+      }),
+      timeoutPromise
+    ]);
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function getScoreDetailsForSubjects(
+  subjectIds,
+  options = {}
+) {
+  const uniqueIds = [
+    ...new Set(
+      (subjectIds || []).map((value) => {
+        return String(value);
+      })
+    )
+  ].filter((value) => /^\d+$/.test(value));
+
+  const concurrency = clampNumber(
+    options.concurrency,
+    1,
+    4,
+    3
+  );
+
+  const intervalMs = clampNumber(
+    options.intervalMs,
+    200,
+    1000,
+    300
+  );
+
+  const timeoutMs = clampNumber(
+    options.timeoutMs,
+    3000,
+    60000,
+    15000
+  );
+
+  const retryCount = clampNumber(
+    options.retryCount,
+    0,
+    2,
+    2
+  );
+
+  const needPrecise =
+    options.needPrecise === true;
+
+  const shouldStop =
+    typeof options.shouldStop === "function"
+      ? options.shouldStop
+      : () => false;
+
+  const onProgress =
+    typeof options.onProgress === "function"
+      ? options.onProgress
+      : () => {};
+
+  const launch = createLaunchGate(intervalMs);
+  const results = new Map();
+  const stats = {
+    requested: uniqueIds.length,
+    launched: 0,
+    completed: 0,
+    failed: 0,
+    timedOut: 0,
+    retried: 0,
+    stopped: false,
+    maxConcurrent: 0,
+    minLaunchGapMs: null
+  };
+
+  let nextIndex = 0;
+  let activeRequests = 0;
+  let lastLaunchAt = 0;
+
+  async function fetchOne(subjectId) {
+    const record = {
+      subjectId,
+      publicScore: null,
+      preciseScore: null,
+      votes: null,
+      noData: false,
+      error: "",
+      timedOut: false,
+      attempts: 0
+    };
+
+    for (
+      let attempt = 0;
+      attempt <= retryCount;
+      attempt += 1
+    ) {
+      if (shouldStop()) {
+        stats.stopped = true;
+        record.error = "已停止";
+        return record;
+      }
+
+      if (attempt > 0) {
+        stats.retried += 1;
+        await delay(attempt === 1 ? 1000 : 2000);
+
+        if (shouldStop()) {
+          stats.stopped = true;
+          record.error = "已停止";
+          return record;
+        }
+      }
+
+      const launchedAt = await launch();
+
+      if (shouldStop()) {
+        stats.stopped = true;
+        record.error = "已停止";
+        return record;
+      }
+
+      if (lastLaunchAt > 0) {
+        const gap = launchedAt - lastLaunchAt;
+
+        stats.minLaunchGapMs =
+          stats.minLaunchGapMs === null
+            ? gap
+            : Math.min(stats.minLaunchGapMs, gap);
+      }
+
+      lastLaunchAt = launchedAt;
+      activeRequests += 1;
+      stats.launched += 1;
+      stats.maxConcurrent = Math.max(
+        stats.maxConcurrent,
+        activeRequests
+      );
+
+      onProgress({
+        type: "launched",
+        subjectId,
+        attempt: attempt + 1,
+        stats: Object.assign({}, stats)
+      });
+
+      let response;
+
+      try {
+        response = await requestHtmlWithTimeout(
+          "https://bgm.tv/subject/" + subjectId,
+          timeoutMs
+        );
+      } catch (error) {
+        response = {
+          timedOut: false,
+          html: "",
+          error: error && error.message
+            ? error.message
+            : String(error)
+        };
+      } finally {
+        activeRequests = Math.max(
+          0,
+          activeRequests - 1
+        );
+      }
+
+      record.attempts = attempt + 1;
+
+      if (response.timedOut) {
+        stats.timedOut += 1;
+        record.timedOut = true;
+        record.error =
+          "请求超时（" + timeoutMs + " ms）";
+      } else if (response.error) {
+        record.error = response.error;
+      } else if (!response.html) {
+        record.error = "没有返回页面内容";
+      } else {
+        const doc = parseHtml(response.html);
+
+        record.publicScore =
+          readPublicScoreFromDoc(doc);
+
+        record.votes = readVotesFromDoc(doc);
+
+        record.preciseScore = needPrecise
+          ? calculatePreciseRating(doc)
+          : null;
+
+        record.noData =
+          record.publicScore === null &&
+          record.votes === null &&
+          (!needPrecise ||
+            record.preciseScore === null);
+
+        record.error = "";
+        return record;
+      }
+
+      if (attempt === retryCount) {
+        stats.failed += 1;
+      }
+    }
+
+    return record;
+  }
+
+  async function worker() {
+    while (true) {
+      if (shouldStop()) {
+        stats.stopped = true;
+        return;
+      }
+
+      const index = nextIndex;
+      nextIndex += 1;
+
+      if (index >= uniqueIds.length) {
+        return;
+      }
+
+      const subjectId = uniqueIds[index];
+      const record = await fetchOne(subjectId);
+
+      results.set(subjectId, record);
+      stats.completed += 1;
+
+      onProgress({
+        type: "completed",
+        subjectId,
+        record,
+        stats: Object.assign({}, stats)
+      });
+    }
+  }
+
+  const workers = [];
+
+  for (
+    let index = 0;
+    index < Math.min(concurrency, uniqueIds.length);
+    index += 1
+  ) {
+    workers.push(worker());
+  }
+
+  await Promise.all(workers);
+
+  return {
+    results,
+    stats
+  };
+}
 module.exports = {
   requestHtml,
   parseHtml,
@@ -760,6 +1146,7 @@ module.exports = {
   getPublicRatingsForSubjects,
   getPreciseRatingForSubject,
   getPreciseRatingsForSubjects,
+  getScoreDetailsForSubjects,
   getSubjectId,
   getNetabaUrl,
   cleanText,
