@@ -698,53 +698,62 @@ class RatingSyncManager {
     task.wasStopped =
       task.wasStopped || task.stopRequested;
 
-    if (this.shouldCommit(task)) {
-      await this.commit(task);
+    try {
+      if (this.shouldCommit(task)) {
+        await this.commit(task);
 
-      this.plugin.settings.lastRatingMonitorAt =
-        Date.now();
-
-      try {
-        await this.plugin.saveSettings();
-        task.settingsSaved += 1;
-      } catch (error) {
-        task.failed += 1;
-        console.warn("保存评分缓存失败:", error);
-      }
-
-      if (task.notesUpdated > 0) {
-        task.phase = PHASES.DASHBOARD;
-        this.emit();
+        this.plugin.settings.lastRatingMonitorAt =
+          Date.now();
 
         try {
-          await this.plugin.refreshScoreDashboard(false);
-          task.dashboardRefreshes += 1;
+          await this.plugin.saveSettings();
+          task.settingsSaved += 1;
         } catch (error) {
           task.failed += 1;
-          console.warn("刷新评分仪表盘失败:", error);
+          console.warn("保存评分缓存失败:", error);
         }
+
+        if (task.notesUpdated > 0) {
+          task.phase = PHASES.DASHBOARD;
+          this.emit();
+
+          try {
+            await this.plugin.refreshScoreDashboard(false);
+            task.dashboardRefreshes += 1;
+          } catch (error) {
+            task.failed += 1;
+            console.warn("刷新评分仪表盘失败:", error);
+          }
+        }
+      } else if (task.stopRequested) {
+        task.discarded = true;
       }
-    } else if (task.stopRequested) {
-      task.discarded = true;
+    } catch (error) {
+      task.hadFatalError = true;
+      task.failed += 1;
+      task.lastError =
+        error && error.message
+          ? error.message
+          : String(error);
+      console.error("评分同步收尾失败:", error);
+    } finally {
+      task.running = false;
+      task.finishedAt = Date.now();
+      task.elapsed = task.finishedAt - task.startedAt;
+
+      if (task.hadFatalError) {
+        task.phase = PHASES.FAILED;
+      } else if (task.discarded) {
+        task.phase = PHASES.DISCARDED;
+      } else if (task.wasStopped) {
+        task.phase = PHASES.STOPPED;
+      } else {
+        task.phase = PHASES.DONE;
+      }
+
+      this.emit();
     }
-
-    task.running = false;
-    task.finishedAt = Date.now();
-    task.elapsed = task.finishedAt - task.startedAt;
-
-    if (task.hadFatalError) {
-      task.phase = PHASES.FAILED;
-    } else if (task.discarded) {
-      task.phase = PHASES.DISCARDED;
-    } else if (task.wasStopped) {
-      task.phase = PHASES.STOPPED;
-    } else {
-      task.phase = PHASES.DONE;
-    }
-
-    this.emit();
   }
-
   buildSummary(task) {
     if (!task) {
       return "";

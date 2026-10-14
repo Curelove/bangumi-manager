@@ -43,6 +43,7 @@ const importManager = require("./import-manager.js");
 const batchImportManager = require("./batch-import-manager.js");
 const createSettingsTabClass = require("./settings-tab.js");
 const noteUtils = require("./note-utils.js");
+const { RatingSyncManager } = require("./rating-sync-manager.js");
 const createNetabaModals = require("./netaba-modals.js");
 
 var DEFAULT_SETTINGS = {
@@ -69,6 +70,15 @@ var DEFAULT_SETTINGS = {
   bangumiPreciseRatingCache: {},
 
   personalRatingCache: {},
+  ratingCacheTtlSeconds: 86400,
+  ratingDetailRequestConcurrency: 3,
+  ratingDetailRequestIntervalMs: 300,
+  ratingRequestTimeoutMs: 15000,
+  ratingRequestRetryCount: 2,
+  ratingUserListPageIntervalMs: 400,
+  bangumiRatingCacheMeta: {},
+  bangumiPublicRatingCacheMeta: {},
+  bangumiPreciseRatingCacheMeta: {},
   netabaUserId: "",
   netabaUserIdManuallySet: false,
   netabaCompareUrl: "",
@@ -291,6 +301,8 @@ var BangumiManagerPlugin = class extends Plugin {
       "/动画库.base";
 
     await this.saveData(this.settings);
+    this.ratingSync = new RatingSyncManager(this);
+
     const netabaModals =
       createNetabaModals({
         Modal,
@@ -449,6 +461,14 @@ this.addSettingTab(
           if (!this.settings.checkOnSave || !this.isTargetNote(file)) {
             return;
           }
+
+          if (
+            this.ratingSync &&
+            this.ratingSync.isSelfWrite(file.path)
+          ) {
+            return;
+          }
+
           clearTimeout(
             this.saveCheckTimer
           );
@@ -790,230 +810,18 @@ views:
     return count;
   }
     async refreshBangumiRatingsSilently() {
-    if (
-      this.settings.ratingMonitorEnabled === false
-    ) {
-      return;
+    if (this.settings.ratingMonitorEnabled === false) {
+      return {
+        skipped: true,
+        reason: "自动更新已关闭"
+      };
     }
 
-    if (this.ratingRefreshRunning) {
-      return;
-    }
-
-    const userId = String(
-      this.settings.bangumiUserId || ""
-    ).trim();
-
-    const shouldMonitorUserScore =
-      /^\d+$/.test(userId);
-
-    const shouldMonitorPublicScore = true;
-
-    if (
-      !shouldMonitorUserScore &&
-      !shouldMonitorPublicScore
-    ) {
-      return;
-    }
-
-    this.ratingRefreshRunning = true;
-
-    try {
-      const items = [];
-
-      for (
-        const file of this.app.vault.getMarkdownFiles()
-      ) {
-        if (!this.isTargetNote(file)) {
-          continue;
-        }
-
-        const content = await this.app.vault.read(
-          file
-        );
-
-        const parsed = parseFrontmatter(content);
-
-        if (!parsed) {
-          continue;
-        }
-
-        const tags = String(
-          parsed.fields.tags || ""
-        );
-
-        if (!tags.includes("bangumi")) {
-          continue;
-        }
-
-        const subjectId = bangumiApi.getSubjectId(
-          cleanValue(
-            parsed.fields.BGM链接
-          )
-        );
-
-        if (!subjectId) {
-          continue;
-        }
-
-        items.push({
-          file,
-          content,
-          parsed,
-          subjectId
-        });
-      }
-
-      if (!items.length) {
-        return;
-      }
-
-      const subjectIds = items.map((item) => {
-        return item.subjectId;
-      });
-
-      let userRatings = new Map();
-      let publicRatings = new Map();
-
-      if (
-        shouldMonitorUserScore &&
-        /^\d+$/.test(userId)
-      ) {
-        try {
-          userRatings =
-            await bangumiApi.getUserRatingsForSubjects(
-              userId,
-              subjectIds
-            );
-        } catch (error) {
-          console.error(
-            "后台读取 BGM 用户评分失败:",
-            error
-          );
-        }
-      }
-
-      if (shouldMonitorPublicScore) {
-        try {
-          publicRatings =
-            await bangumiApi.getPublicRatingsForSubjects(
-              subjectIds,
-              450
-            );
-        } catch (error) {
-          console.error(
-            "后台读取 BGM 公共评分失败:",
-            error
-          );
-        }
-      }
-
-      const ratingCache = Object.assign(
-        {},
-        this.settings.bangumiRatingCache || {}
-      );
-
-      const publicRatingCache = Object.assign(
-        {},
-        this.settings.bangumiPublicRatingCache || {}
-      );
-
-      let updated = 0;
-
-      for (const item of items) {
-        let newContent = item.content;
-        const userScore =
-          userRatings.get(item.subjectId);
-
-        const publicScore =
-          publicRatings.get(item.subjectId);
-
-        if (
-          userScore !== undefined &&
-          userScore !== null
-        ) {
-          const scoreText = String(userScore);
-
-          ratingCache[item.subjectId] =
-            scoreText;
-
-          newContent = updateScoreFields(
-            newContent,
-            this.settings.showBangumiUserScore !==
-            false
-              ? scoreText
-              : null,
-            this.settings.showPersonalScore !==
-            false
-              ? (
-                  cleanValue(
-                    item.parsed.fields.我的评分
-                  ) || "未评分"
-                )
-              : null
-          );
-        }
-
-        if (
-          publicScore !== undefined &&
-          publicScore !== null
-        ) {
-          publicRatingCache[item.subjectId] =
-            String(publicScore);
-
-          const displayedScore =
-            this.settings.showBangumiPreciseScore ===
-            true
-              ? this.getDisplayedBangumiScore(
-                  item.subjectId,
-                  item.parsed.fields
-                )
-              : String(publicScore);
-
-          newContent =
-            synchronizeBangumiScoreFields(
-              newContent,
-              this.getScoreDisplayOptions(),
-              {
-                bangumiScore: displayedScore
-              }
-            );
-        }
-
-        if (newContent !== item.content) {
-          await this.app.vault.modify(
-            item.file,
-            newContent
-          );
-
-          updated += 1;
-        }
-      }
-
-      this.settings.bangumiRatingCache =
-        ratingCache;
-
-      this.settings.bangumiPublicRatingCache =
-        publicRatingCache;
-
-      this.settings.lastRatingMonitorAt =
-        Date.now();
-
-      await this.saveSettings();
-      await this.refreshScoreDashboard(false);
-
-      if (updated > 0) {
-        console.log(
-          "BGM 评分监测完成，更新 " +
-          updated +
-          " 篇动画笔记。"
-        );
-      }
-    } finally {
-      this.ratingRefreshRunning = false;
-    }
+    return await this.ratingSync.start({
+      forceRefresh: false,
+      mode: "standard"
+    });
   }
-
   getScoreDisplayOptions() {
     return {
       useBangumiPreciseScore:
@@ -1222,191 +1030,46 @@ views:
   async refreshPreciseRatingsSilently(
     manual = false
   ) {
-    if (
-      !manual &&
-      this.settings.ratingMonitorEnabled === false
-    ) {
-      return {
-        scanned: 0,
-        requested: 0,
-        preciseUpdated: 0,
-        notesUpdated: 0,
-        noData: 0,
-        failed: 0,
-        skipped: true
-      };
-    }
+    const preciseEnabled =
+      this.settings.showBangumiPreciseScore === true ||
+      this.settings.dashboardShowPreciseRank === true;
 
-    const shouldUpdatePreciseScore =
-      this.settings.showBangumiPreciseScore ===
-        true ||
-      this.settings.dashboardShowPreciseRank ===
-        true;
-
-    const summary = {
+    const skippedSummary = {
       scanned: 0,
       requested: 0,
       preciseUpdated: 0,
       notesUpdated: 0,
       noData: 0,
       failed: 0,
-      skipped: false
+      skipped: true
     };
 
-    if (!shouldUpdatePreciseScore) {
-      summary.skipped = true;
-      return summary;
+    if (!preciseEnabled) {
+      return skippedSummary;
     }
 
-    if (this.preciseRefreshRunning) {
-      summary.skipped = true;
-      return summary;
+    if (
+      !manual &&
+      this.settings.ratingMonitorEnabled === false
+    ) {
+      return skippedSummary;
     }
 
-    this.preciseRefreshRunning = true;
+    const task = await this.ratingSync.start({
+      forceRefresh: false,
+      mode: "preciseOnly"
+    });
 
-    try {
-      const items = [];
-
-      for (
-        const file of this.app.vault.getMarkdownFiles()
-      ) {
-        if (!this.isTargetNote(file)) {
-          continue;
-        }
-
-        const content = await this.app.vault.read(
-          file
-        );
-
-        const parsed = parseFrontmatter(content);
-
-        if (
-          !parsed ||
-          !String(
-            parsed.fields.tags || ""
-          ).includes("bangumi")
-        ) {
-          continue;
-        }
-
-        const subjectId = bangumiApi.getSubjectId(
-          cleanValue(
-            parsed.fields.BGM链接
-          )
-        );
-
-        if (!subjectId) {
-          continue;
-        }
-
-        items.push({
-          file,
-          content,
-          parsed,
-          subjectId
-        });
-      }
-
-      summary.scanned = items.length;
-
-      const preciseCache = Object.assign(
-        {},
-        this.settings.bangumiPreciseRatingCache || {}
-      );
-
-      const subjectIds = [
-        ...new Set(
-          items.map((item) => item.subjectId)
-        )
-      ];
-
-      summary.requested = subjectIds.length;
-
-      let preciseRatings = new Map();
-
-      try {
-        preciseRatings =
-          await bangumiApi.getPreciseRatingsForSubjects(
-            subjectIds,
-            450
-          );
-      } catch (error) {
-        console.error(
-          "读取 BGM 精确评分失败:",
-          error
-        );
-        summary.failed = subjectIds.length;
-      }
-
-      for (const item of items) {
-        const preciseScore =
-          preciseRatings.get(item.subjectId);
-
-        if (
-          preciseScore === undefined ||
-          preciseScore === null
-        ) {
-          summary.noData += 1;
-          continue;
-        }
-
-        preciseCache[item.subjectId] =
-          String(preciseScore);
-
-        summary.preciseUpdated += 1;
-
-        const displayedScore =
-          this.settings.showBangumiPreciseScore ===
-          true
-            ? String(preciseScore)
-            : cleanValue(
-                item.parsed.fields.BGM评分
-              );
-
-        const newContent =
-          synchronizeBangumiScoreFields(
-            item.content,
-            this.getScoreDisplayOptions(),
-            {
-              bangumiScore: displayedScore
-            }
-          );
-
-        if (newContent !== item.content) {
-          await this.app.vault.modify(
-            item.file,
-            newContent
-          );
-
-          summary.notesUpdated += 1;
-        }
-      }
-
-      this.settings.bangumiPreciseRatingCache =
-        preciseCache;
-
-      if (summary.requested > 0) {
-        this.settings.lastRatingMonitorAt =
-          Date.now();
-
-        await this.saveSettings();
-      }
-
-      if (summary.notesUpdated > 0) {
-        await this.refreshScoreDashboard(false);
-
-        console.log(
-          "BGM 精确评分更新完成：更新 " +
-          summary.notesUpdated +
-          " 篇动画笔记。"
-        );
-      }
-
-      return summary;
-    } finally {
-      this.preciseRefreshRunning = false;
-    }
+    return {
+      scanned: task.scanned,
+      requested: task.requested,
+      preciseUpdated: task.preciseRatingsUpdated,
+      notesUpdated: task.notesUpdated,
+      noData: task.noData,
+      failed: task.failed,
+      skipped: false,
+      wasStopped: task.wasStopped === true
+    };
   }
   async refreshScoreFields() {
     const files = this.app.vault.getMarkdownFiles();
