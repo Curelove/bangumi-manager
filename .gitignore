@@ -33,3 +33,5 @@ build.js.before-cleanup-stage1
 build-release.cmd
 CHANGELOG.md
 NOTICE.md
+bangumi-manager-v0.3.1/
+stage report/
