@@ -1224,6 +1224,60 @@ module.exports = function createSettingsTabClass({
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(container)
+      .setName("自定义查询分区")
+      .setDesc("根据标签、状态、评分门槛及年代创建个性化的动态聚合分区。")
+      .addButton((btn) => {
+        btn
+          .setButtonText("+ 新建查询分区")
+          .setCta()
+          .onClick(() => {
+            this.plugin.openCustomQuerySectionModal(null, () => {
+              this.display();
+            });
+          });
+      });
+
+    const customSections = Array.isArray(this.plugin.settings.customQuerySections)
+      ? this.plugin.settings.customQuerySections
+      : [];
+
+    if (customSections.length > 0) {
+      for (const section of customSections) {
+        const descParts = [];
+        if (section.tag) descParts.push(`标签: ${section.tag}`);
+        if (section.watchStatus && section.watchStatus !== "all") descParts.push(`状态: ${section.watchStatus}`);
+        if (section.minMyScore) descParts.push(`个人评分≥${section.minMyScore}`);
+        if (section.minBgmScore) descParts.push(`BGM评分≥${section.minBgmScore}`);
+        if (section.year) descParts.push(`年份: ${section.year}`);
+        if (section.season) descParts.push(`季度: ${section.season}`);
+        descParts.push(section.displayMode === "grid" ? "海报网格" : "榜单列表");
+        const limitText = Number(section.limit) > 0 ? `${section.limit}部` : "全部";
+        descParts.push(`上限: ${limitText}`);
+
+        new Setting(container)
+          .setName(section.title)
+          .setDesc(descParts.join(" | "))
+          .addButton((btn) => {
+            btn.setButtonText("编辑").onClick(() => {
+              this.plugin.openCustomQuerySectionModal(section, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn
+              .setButtonText("删除")
+              .setWarning()
+              .onClick(() => {
+                this.plugin.confirmDeleteCustomQuerySection(section, () => {
+                  this.display();
+                });
+              });
+          });
+      }
+    }
   }
 
   async promptForScoreDataRefresh() {

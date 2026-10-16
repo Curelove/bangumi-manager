@@ -114,7 +114,8 @@ var DEFAULT_SETTINGS = {
   bangumiPreciseScoreDisplayDigits: 4,
   dashboardSectionOrder: [],
   dashboardSectionCollapsed: {},
-  dashboardSectionHidden: {}
+  dashboardSectionHidden: {},
+  customQuerySections: []
 };
 
 var WATCH_STATES = [
@@ -163,6 +164,11 @@ var BangumiScoreDashboardView = class extends ItemView {
       "bangumi-dashboard-view-controls"
     );
 
+    const addSectionButton = controls.createEl("button", {
+      text: "+ 新建查询分区",
+      cls: "mod-cta"
+    });
+
     const refreshButton = controls.createEl("button", {
       text: "刷新"
     });
@@ -178,6 +184,15 @@ var BangumiScoreDashboardView = class extends ItemView {
     const dashboard = this.contentEl.createDiv(
       "bangumi-score-dashboard"
     );
+
+    addSectionButton.onclick = () => {
+      this.plugin.openCustomQuerySectionModal(null, async () => {
+        await this.plugin.renderScoreDashboard(
+          dashboard,
+          { isMarkdown: false }
+        );
+      });
+    };
 
     refreshButton.onclick = async () => {
       refreshButton.disabled = true;
@@ -312,6 +327,10 @@ var BangumiManagerPlugin = class extends Plugin {
     this.settings.baseFilePath =
       this.settings.baseFolderPath +
       "/动画库.base";
+
+    if (!Array.isArray(this.settings.customQuerySections)) {
+      this.settings.customQuerySections = [];
+    }
 
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
@@ -1713,11 +1732,22 @@ if (this.settings.seasonViewMode === "current") {
         continue;
       }
 
-      const tags = String(
-        parsed.fields.tags || ""
-      );
+      let rawTags = cleanValue(parsed.fields.tags || "");
 
-      if (!tags.includes("bangumi")) {
+      if (this.app.metadataCache) {
+        const cache = this.app.metadataCache.getFileCache(file);
+        if (cache && cache.frontmatter && cache.frontmatter.tags) {
+          const cacheTags = cache.frontmatter.tags;
+          if (Array.isArray(cacheTags)) {
+            const joined = cacheTags.join(", ");
+            rawTags = rawTags ? `${rawTags}, ${joined}` : joined;
+          } else if (typeof cacheTags === "string" && cacheTags) {
+            rawTags = rawTags ? `${rawTags}, ${cacheTags}` : cacheTags;
+          }
+        }
+      }
+
+      if (!String(rawTags).includes("bangumi")) {
         continue;
       }
 
@@ -1726,6 +1756,8 @@ if (this.settings.seasonViewMode === "current") {
         name: cleanValue(
           parsed.fields.中文名
         ) || file.basename,
+        japaneseName: cleanValue(parsed.fields.日文名),
+        cover: cleanValue(parsed.fields.cover),
         state: cleanValue(
           parsed.fields.观看状态
         ) || "未设置",
@@ -1746,7 +1778,10 @@ if (this.settings.seasonViewMode === "current") {
             )
           ] || parsed.fields.BGM精确评分
         ),
-
+        year: cleanValue(parsed.fields.开播年份),
+        season: cleanValue(parsed.fields.开播季度),
+        tags: rawTags,
+        totalEpisodes: cleanValue(parsed.fields.总集数)
       });
     }
 
@@ -2101,12 +2136,380 @@ if (this.settings.seasonViewMode === "current") {
     this.renderWatchStateCards(section, items);
   }
 
+  getCoverResourceUrl(coverPath, sourcePath = "") {
+    if (!coverPath) {
+      return "";
+    }
+
+    let cleanPath = String(coverPath)
+      .trim()
+      .replace(/^!\[\[|\]\]$/g, "")
+      .replace(/^\[\[|\]\]$/g, "");
+
+    if (/^https?:\/\//i.test(cleanPath)) {
+      return cleanPath;
+    }
+
+    cleanPath = cleanPath.replace(/^\/+/, "");
+
+    let tFile = null;
+    if (this.app && this.app.vault && typeof this.app.vault.getAbstractFileByPath === "function") {
+      tFile = this.app.vault.getAbstractFileByPath(cleanPath);
+    }
+    if (!tFile && this.app && this.app.metadataCache && typeof this.app.metadataCache.getFirstLinkpathDest === "function") {
+      tFile = this.app.metadataCache.getFirstLinkpathDest(cleanPath, sourcePath || "");
+    }
+
+    if (tFile && this.app && this.app.vault && typeof this.app.vault.getResourcePath === "function") {
+      return this.app.vault.getResourcePath(tFile);
+    }
+
+    if (
+      this.app &&
+      this.app.vault &&
+      this.app.vault.adapter &&
+      typeof this.app.vault.adapter.getResourcePath === "function"
+    ) {
+      try {
+        return this.app.vault.adapter.getResourcePath(cleanPath);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    return cleanPath;
+  }
+
+  filterCustomQueryItems(items, config) {
+    if (!Array.isArray(items) || !config) {
+      return [];
+    }
+
+    const targetTag = String(config.tag || "")
+      .trim()
+      .replace(/^#/, "")
+      .toLowerCase();
+    const targetStatus = String(config.watchStatus || "").trim();
+    const minMyScore = Number(config.minMyScore) || 0;
+    const minBgmScore = Number(config.minBgmScore) || 0;
+    const targetYear = String(config.year || "").trim();
+    const targetSeason = String(config.season || "").trim();
+
+    return items.filter((item) => {
+      if (targetTag) {
+        const itemTags = String(item.tags || "").toLowerCase();
+        const tokens = itemTags.split(/[,;\s#\[\]"']+/).filter(Boolean);
+        const hasTag = tokens.some((t) => t === targetTag) || itemTags.includes(targetTag);
+        if (!hasTag) {
+          return false;
+        }
+      }
+
+      if (targetStatus && targetStatus !== "all" && targetStatus !== "全部") {
+        if (item.state !== targetStatus) {
+          return false;
+        }
+      }
+
+      if (minMyScore > 0) {
+        if (item.personalScore === null || item.personalScore < minMyScore) {
+          return false;
+        }
+      }
+
+      if (minBgmScore > 0) {
+        const score = item.bangumiScore !== null
+          ? item.bangumiScore
+          : (item.preciseScore !== null ? item.preciseScore : null);
+        if (score === null || score < minBgmScore) {
+          return false;
+        }
+      }
+
+      if (targetYear) {
+        if (!item.year || !String(item.year).includes(targetYear)) {
+          return false;
+        }
+      }
+
+      if (targetSeason) {
+        if (!item.season || !String(item.season).includes(targetSeason)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }
+
+  sortCustomQueryItems(items, sortBy = "myScore_desc") {
+    const list = [...items];
+
+    switch (sortBy) {
+      case "bgmScore_desc":
+        list.sort((a, b) => {
+          const scoreA = a.bangumiScore !== null ? a.bangumiScore : (a.preciseScore !== null ? a.preciseScore : -1);
+          const scoreB = b.bangumiScore !== null ? b.bangumiScore : (b.preciseScore !== null ? b.preciseScore : -1);
+          if (scoreB !== scoreA) {
+            return scoreB - scoreA;
+          }
+          return a.name.localeCompare(b.name, "zh-CN");
+        });
+        break;
+
+      case "year_desc":
+        list.sort((a, b) => {
+          const yearA = parseInt(a.year, 10) || 0;
+          const yearB = parseInt(b.year, 10) || 0;
+          if (yearB !== yearA) {
+            return yearB - yearA;
+          }
+          const seasonA = String(a.season || "");
+          const seasonB = String(b.season || "");
+          if (seasonB !== seasonA) {
+            return seasonB.localeCompare(seasonA, "zh-CN");
+          }
+          return a.name.localeCompare(b.name, "zh-CN");
+        });
+        break;
+
+      case "title_asc":
+        list.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+        break;
+
+      case "myScore_desc":
+      default:
+        list.sort((a, b) => {
+          const scoreA = a.personalScore !== null ? a.personalScore : -1;
+          const scoreB = b.personalScore !== null ? b.personalScore : -1;
+          if (scoreB !== scoreA) {
+            return scoreB - scoreA;
+          }
+          return a.name.localeCompare(b.name, "zh-CN");
+        });
+        break;
+    }
+
+    return list;
+  }
+
+  renderCustomGrid(container, items, config) {
+    if (!items.length) {
+      container.createDiv({
+        cls: "bangumi-dashboard-empty",
+        text: "暂无符合筛选条件的动画记录。"
+      });
+      return;
+    }
+
+    const grid = container.createDiv("bangumi-dashboard-custom-grid");
+
+    for (const item of items) {
+      const card = grid.createDiv("bangumi-grid-card");
+
+      card.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const leaf = this.app.workspace.getLeaf(true);
+        await leaf.openFile(item.file);
+      };
+
+      const posterWrap = card.createDiv("bangumi-grid-poster-wrap");
+
+      if (item.state && item.state !== "未设置") {
+        posterWrap.createDiv({
+          cls: `bangumi-grid-state-badge is-${item.state}`,
+          text: item.state
+        });
+      }
+
+      let scoreBadgeText = "";
+      if (item.personalScore !== null) {
+        scoreBadgeText = `★ ${item.personalScore.toFixed(1)}`;
+      } else if (item.bangumiScore !== null) {
+        scoreBadgeText = `BGM ${item.bangumiScore.toFixed(1)}`;
+      } else if (item.preciseScore !== null) {
+        scoreBadgeText = `BGM ${item.preciseScore.toFixed(1)}`;
+      }
+
+      if (scoreBadgeText) {
+        posterWrap.createDiv({
+          cls: "bangumi-grid-score-badge",
+          text: scoreBadgeText
+        });
+      }
+
+      const coverUrl = this.getCoverResourceUrl(item.cover, item.file.path);
+      if (coverUrl) {
+        const img = posterWrap.createEl("img", {
+          cls: "bangumi-grid-poster"
+        });
+        img.alt = item.name;
+        img.loading = "lazy";
+        img.src = coverUrl;
+
+        img.onerror = () => {
+          img.remove();
+          this.renderPosterPlaceholder(posterWrap, item);
+        };
+      } else {
+        this.renderPosterPlaceholder(posterWrap, item);
+      }
+
+      const info = card.createDiv("bangumi-grid-info");
+      const title = info.createDiv({
+        cls: "bangumi-grid-title",
+        text: item.name
+      });
+      title.title = item.name;
+
+      const metaParts = [];
+      if (item.year) metaParts.push(item.year);
+      if (item.season) metaParts.push(item.season);
+      if (metaParts.length === 0 && item.tags) {
+        metaParts.push(String(item.tags).split(/[,;]/)[0].trim());
+      }
+
+      info.createDiv({
+        cls: "bangumi-grid-meta",
+        text: metaParts.join(" · ") || " "
+      });
+    }
+  }
+
+  renderPosterPlaceholder(container, item) {
+    const ph = container.createDiv("bangumi-grid-poster-placeholder");
+    ph.createDiv({
+      cls: "bangumi-grid-poster-icon",
+      text: "🎬"
+    });
+    ph.createDiv({
+      cls: "bangumi-grid-poster-text",
+      text: item.name
+    });
+  }
+
+  renderCustomList(container, items, config) {
+    if (!items.length) {
+      container.createDiv({
+        cls: "bangumi-dashboard-empty",
+        text: "暂无符合筛选条件的动画记录。"
+      });
+      return;
+    }
+
+    const list = container.createDiv("bangumi-dashboard-rank-list");
+    const isBgmSort = config && config.sortBy === "bgmScore_desc";
+    const primaryKey = isBgmSort ? "bangumiScore" : "personalScore";
+    const secondaryKey = isBgmSort ? "personalScore" : "bangumiScore";
+
+    items.forEach((item, index) => {
+      const row = list.createDiv("bangumi-dashboard-rank-row");
+
+      row.createDiv({
+        text: String(index + 1),
+        cls: "bangumi-dashboard-rank-index"
+      });
+
+      const content = row.createDiv("bangumi-dashboard-rank-content");
+      const titleRow = content.createDiv("bangumi-dashboard-rank-title-row");
+
+      const title = titleRow.createEl("a", {
+        text: item.name,
+        cls: "internal-link"
+      });
+      title.dataset.href = item.file.path;
+      title.setAttribute("data-type", "file");
+      title.onclick = async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const leaf = this.app.workspace.getLeaf(true);
+        await leaf.openFile(item.file);
+      };
+
+      const primaryScore = item[primaryKey] !== null
+        ? item[primaryKey]
+        : (isBgmSort && item.preciseScore !== null ? item.preciseScore : null);
+
+      if (primaryScore !== null) {
+        titleRow.createDiv({
+          text: primaryScore.toFixed(1),
+          cls: "bangumi-dashboard-score"
+        });
+
+        const track = content.createDiv("bangumi-dashboard-bar-track");
+        const bar = track.createDiv("bangumi-dashboard-bar");
+        bar.style.width = Math.min(100, Math.max(0, (primaryScore / 10) * 100)) + "%";
+      } else {
+        titleRow.createDiv({
+          text: "未评分",
+          cls: "bangumi-dashboard-score bangumi-dashboard-score-none"
+        });
+      }
+
+      const metaParts = [];
+      const secondaryScore = item[secondaryKey] !== null
+        ? item[secondaryKey]
+        : (!isBgmSort && item.preciseScore !== null ? item.preciseScore : null);
+
+      if (secondaryScore !== null) {
+        metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + secondaryScore.toFixed(1));
+      } else {
+        metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + "未评分");
+      }
+
+      if (item.state && item.state !== "未设置") {
+        metaParts.push(`状态：${item.state}`);
+      }
+      if (item.year || item.season) {
+        metaParts.push([item.year, item.season].filter(Boolean).join(" "));
+      }
+
+      content.createDiv({
+        text: metaParts.join(" | "),
+        cls: "bangumi-dashboard-rank-meta"
+      });
+    });
+  }
+
+  openCustomQuerySectionModal(existingConfig, onSave) {
+    new CustomQuerySectionModal(this.app, this, existingConfig, onSave).open();
+  }
+
+  confirmDeleteCustomQuerySection(section, onDeleted) {
+    new ConfirmDeleteSectionModal(this.app, section.title, async () => {
+      this.settings.customQuerySections = (this.settings.customQuerySections || []).filter(
+        (s) => s.id !== section.id
+      );
+
+      if (Array.isArray(this.settings.dashboardSectionOrder)) {
+        this.settings.dashboardSectionOrder = this.settings.dashboardSectionOrder.filter(
+          (id) => id !== section.id
+        );
+      }
+      if (this.settings.dashboardSectionCollapsed) {
+        delete this.settings.dashboardSectionCollapsed[section.id];
+      }
+      if (this.settings.dashboardSectionHidden) {
+        delete this.settings.dashboardSectionHidden[section.id];
+      }
+
+      await this.saveSettings();
+      if (typeof onDeleted === "function") {
+        await onDeleted();
+      }
+      new Notice(`已删除自定义分区“${section.title}”。`);
+    }).open();
+  }
+
   createDashboardSection(parentContainer, {
     def,
     isCollapsed,
     onToggleCollapse,
     onHide,
-    onReorder
+    onReorder,
+    onEdit,
+    onDelete
   }) {
     const hasData = def.hasData;
     const sectionEl = parentContainer.createDiv({
@@ -2192,6 +2595,33 @@ if (this.settings.seasonViewMode === "current") {
     }
 
     const rightEl = headerEl.createDiv("bangumi-dashboard-section-header-right");
+
+    if (def.isCustom) {
+      const editBtn = rightEl.createEl("button", {
+        cls: "bangumi-dashboard-action-btn",
+        text: "编辑"
+      });
+      editBtn.title = "编辑此自定义查询分区";
+      editBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof onEdit === "function") {
+          onEdit();
+        }
+      };
+
+      const deleteBtn = rightEl.createEl("button", {
+        cls: "bangumi-dashboard-action-btn",
+        text: "删除"
+      });
+      deleteBtn.title = "删除此自定义查询分区";
+      deleteBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof onDelete === "function") {
+          onDelete();
+        }
+      };
+    }
+
     const hideBtn = rightEl.createEl("button", {
       cls: "bangumi-dashboard-action-btn",
       text: "隐藏"
@@ -2203,7 +2633,7 @@ if (this.settings.seasonViewMode === "current") {
     };
 
     headerEl.onclick = (e) => {
-      if (e.target === hideBtn || e.target === dragHandle) {
+      if (e.target.closest("button") || e.target === dragHandle) {
         return;
       }
       if (hasData) {
@@ -2291,14 +2721,28 @@ if (this.settings.seasonViewMode === "current") {
       "bangumi-dashboard-header"
     );
 
-    header.createEl("h1", {
+    const headerMain = header.createDiv("bangumi-dashboard-header-main");
+
+    headerMain.createEl("h1", {
       text: "动画评分仪表盘"
     });
 
-    header.createDiv({
+    headerMain.createDiv({
       text: "数据来自当前动画笔记；打开页面时自动重新统计。",
       cls: "bangumi-dashboard-subtitle"
     });
+
+    const headerActions = header.createDiv("bangumi-dashboard-header-actions");
+    const addQueryBtn = headerActions.createEl("button", {
+      cls: "bangumi-dashboard-header-btn",
+      text: "+ 新建查询分区"
+    });
+
+    addQueryBtn.onclick = () => {
+      this.openCustomQuerySectionModal(null, async () => {
+        await this.renderScoreDashboard(container, options);
+      });
+    };
 
     if (isMarkdown) {
       const banner = container.createDiv(
@@ -2474,6 +2918,35 @@ if (this.settings.seasonViewMode === "current") {
       }
     ];
 
+    const customConfigs = Array.isArray(this.settings.customQuerySections)
+      ? this.settings.customQuerySections
+      : [];
+
+    for (const customConfig of customConfigs) {
+      const filtered = this.filterCustomQueryItems(items, customConfig);
+      const sorted = this.sortCustomQueryItems(filtered, customConfig.sortBy);
+      const limit = Number(customConfig.limit) || 0;
+      const displayItems = limit > 0 ? sorted.slice(0, limit) : sorted;
+
+      sectionDefs.push({
+        id: customConfig.id,
+        title: customConfig.title || "自定义查询",
+        badgeText: filtered.length ? `${filtered.length} 部` : "",
+        hasData: filtered.length > 0,
+        emptyText: "暂无匹配的动画记录",
+        spanFull: true,
+        isCustom: true,
+        config: customConfig,
+        renderBody: (body) => {
+          if (customConfig.displayMode === "grid") {
+            this.renderCustomGrid(body, displayItems, customConfig);
+          } else {
+            this.renderCustomList(body, displayItems, customConfig);
+          }
+        }
+      });
+    }
+
     const hiddenMap = this.settings.dashboardSectionHidden || {};
 
     const isSectionHidden = (id) => {
@@ -2584,7 +3057,21 @@ if (this.settings.seasonViewMode === "current") {
             await this.renderScoreDashboard(container, options);
             new Notice("已更新分区排序。");
           }
-        }
+        },
+        onEdit: def.isCustom
+          ? async () => {
+              this.openCustomQuerySectionModal(def.config, async () => {
+                await this.renderScoreDashboard(container, options);
+              });
+            }
+          : null,
+        onDelete: def.isCustom
+          ? async () => {
+              this.confirmDeleteCustomQuerySection(def.config, async () => {
+                await this.renderScoreDashboard(container, options);
+              });
+            }
+          : null
       });
     }
 
@@ -2702,9 +3189,13 @@ if (this.settings.seasonViewMode === "current") {
 
     style.textContent = [
       ".bangumi-score-dashboard{max-width:1180px;margin:0 auto;padding:8px 0 28px;}",
-      ".bangumi-dashboard-header{margin:8px 0 18px;padding:20px 22px;border:1px solid var(--background-modifier-border);border-radius:16px;background:linear-gradient(135deg,var(--background-secondary),var(--background-primary));}",
+      ".bangumi-dashboard-header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:8px 0 18px;padding:20px 22px;border:1px solid var(--background-modifier-border);border-radius:16px;background:linear-gradient(135deg,var(--background-secondary),var(--background-primary));}",
+      ".bangumi-dashboard-header-main{flex:1;min-width:240px;}",
       ".bangumi-dashboard-header h1{margin:0 0 6px;font-size:1.65em;}",
       ".bangumi-dashboard-subtitle{color:var(--text-muted);font-size:.9em;}",
+      ".bangumi-dashboard-header-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}",
+      ".bangumi-dashboard-header-btn{cursor:pointer;padding:6px 14px;font-size:.88em;font-weight:600;border-radius:8px;border:1px solid var(--interactive-accent);background:var(--interactive-accent);color:var(--text-on-accent);transition:opacity .15s ease;}",
+      ".bangumi-dashboard-header-btn:hover{opacity:.9;}",
       ".bangumi-dashboard-compat-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;margin:0 0 16px;border-radius:10px;border:1px solid color-mix(in srgb,var(--interactive-accent) 25%,var(--background-modifier-border));background:color-mix(in srgb,var(--interactive-accent) 6%,var(--background-secondary));font-size:.84em;color:var(--text-normal);}",
       ".bangumi-dashboard-compat-text{flex:1;min-width:0;}",
       ".bangumi-dashboard-compat-actions{display:flex;gap:8px;flex-shrink:0;}",
@@ -2752,6 +3243,7 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-dashboard-rank-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}",
       ".bangumi-dashboard-rank-title-row a{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}",
       ".bangumi-dashboard-score{flex:0 0 auto;color:var(--interactive-accent);font-weight:700;font-variant-numeric:tabular-nums;}",
+      ".bangumi-dashboard-score-none{color:var(--text-muted);font-weight:normal;}",
       ".bangumi-dashboard-bar-track{height:7px;overflow:hidden;margin:8px 0 6px;border-radius:999px;background:var(--background-modifier-border);}",
       ".bangumi-dashboard-bar{height:100%;min-width:2px;border-radius:inherit;background:linear-gradient(90deg,var(--interactive-accent),var(--color-accent-2));}",
       ".bangumi-dashboard-rank-meta{color:var(--text-muted);font-size:.8em;}",
@@ -2765,12 +3257,30 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-dashboard-state-card{padding:13px;border-radius:10px;background:var(--background-secondary);}",
       ".bangumi-dashboard-state-label{color:var(--text-muted);font-size:.84em;margin-bottom:5px;}",
       ".bangumi-dashboard-state-value{font-size:1.35em;font-weight:700;font-variant-numeric:tabular-nums;}",
+      ".bangumi-dashboard-custom-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(136px,1fr));gap:14px;padding:4px 0;}",
+      ".bangumi-grid-card{position:relative;display:flex;flex-direction:column;border-radius:10px;overflow:hidden;background:var(--background-secondary);border:1px solid var(--background-modifier-border);cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;}",
+      ".bangumi-grid-card:hover{transform:translateY(-3px);box-shadow:0 6px 16px rgba(0,0,0,.15);border-color:var(--interactive-accent);}",
+      ".bangumi-grid-poster-wrap{position:relative;width:100%;aspect-ratio:2/3;background:var(--background-secondary-alt);overflow:hidden;display:flex;align-items:center;justify-content:center;}",
+      ".bangumi-grid-poster{width:100%;height:100%;object-fit:cover;display:block;}",
+      ".bangumi-grid-poster-placeholder{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px 8px;text-align:center;background:var(--background-secondary-alt);color:var(--text-faint);user-select:none;}",
+      ".bangumi-grid-poster-icon{font-size:24px;margin-bottom:4px;opacity:.7;}",
+      ".bangumi-grid-poster-text{font-size:.76em;line-height:1.25;max-height:3em;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}",
+      ".bangumi-grid-state-badge{position:absolute;top:6px;left:6px;padding:2px 6px;font-size:.72em;font-weight:600;border-radius:4px;background:rgba(0,0,0,.68);color:#fff;backdrop-filter:blur(4px);z-index:2;pointer-events:none;}",
+      ".bangumi-grid-state-badge.is-已看{background:rgba(40,167,69,.8);}",
+      ".bangumi-grid-state-badge.is-在看{background:rgba(0,123,255,.8);}",
+      ".bangumi-grid-state-badge.is-想看{background:rgba(255,153,0,.8);}",
+      ".bangumi-grid-state-badge.is-抛弃{background:rgba(108,117,125,.8);}",
+      ".bangumi-grid-score-badge{position:absolute;top:6px;right:6px;padding:2px 6px;font-size:.75em;font-weight:700;border-radius:4px;background:var(--interactive-accent);color:var(--text-on-accent);box-shadow:0 2px 4px rgba(0,0,0,.2);z-index:2;pointer-events:none;font-variant-numeric:tabular-nums;}",
+      ".bangumi-grid-info{padding:8px 10px 10px;display:flex;flex-direction:column;min-width:0;}",
+      ".bangumi-grid-title{font-size:.88em;font-weight:600;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35;}",
+      ".bangumi-grid-meta{font-size:.76em;color:var(--text-muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+      ".bangumi-custom-query-modal .setting-item{padding:10px 0;}",
       ".bangumi-score-dashboard-view{padding:0 18px 24px;overflow:auto;}",
       ".bangumi-dashboard-view-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 0 10px;}",
       ".bangumi-dashboard-view-toolbar h2{margin:0;font-size:1.15em;}",
       ".bangumi-dashboard-view-controls{display:flex;gap:8px;flex-wrap:wrap;}",
-      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}}",
-      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}}"
+      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}}",
+      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}}"
     ].join("");
 
     document.head.appendChild(style);
@@ -3758,5 +4268,283 @@ var ManagerRibbonModal = class extends Modal {
     this.contentEl.empty();
   }
 };
+
+var ConfirmDeleteSectionModal = class extends Modal {
+  constructor(app, sectionTitle, onConfirm) {
+    super(app);
+    this.sectionTitle = sectionTitle;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "确认删除自定义分区" });
+    contentEl.createEl("p", {
+      text: `确定要删除自定义分区“${this.sectionTitle}”吗？此操作仅移除分区配置，不会修改任何动画笔记或数据。`
+    });
+
+    const actions = contentEl.createDiv("bangumi-modal-actions");
+    actions.style.display = "flex";
+    actions.style.justifyContent = "flex-end";
+    actions.style.gap = "8px";
+    actions.style.marginTop = "16px";
+
+    const cancelBtn = actions.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const confirmBtn = actions.createEl("button", {
+      text: "删除",
+      cls: "mod-warning"
+    });
+    confirmBtn.onclick = async () => {
+      this.close();
+      if (typeof this.onConfirm === "function") {
+        await this.onConfirm();
+      }
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var CustomQuerySectionModal = class extends Modal {
+  constructor(app, plugin, existingConfig, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.existingConfig = existingConfig;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bangumi-custom-query-modal");
+
+    const isEdit = Boolean(this.existingConfig);
+    contentEl.createEl("h2", {
+      text: isEdit ? "编辑自定义查询分区" : "新建自定义查询分区"
+    });
+
+    const formData = Object.assign(
+      {
+        id: "custom_" + Date.now(),
+        title: "",
+        tag: "",
+        watchStatus: "all",
+        minMyScore: 0,
+        minBgmScore: 0,
+        year: "",
+        season: "",
+        displayMode: "grid",
+        sortBy: "myScore_desc",
+        limit: 12
+      },
+      this.existingConfig || {}
+    );
+
+    new Setting(contentEl)
+      .setName("分区名称")
+      .setDesc("为该查询分区起一个清晰的标题")
+      .addText((text) => {
+        text
+          .setPlaceholder("如：我最喜爱的百合动画、2025在看佳作")
+          .setValue(formData.title)
+          .onChange((val) => {
+            formData.title = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("标签筛选 (tags)")
+      .setDesc("必须包含的标签，如“百合”或“原创”（留空表示不限标签）")
+      .addText((text) => {
+        text
+          .setPlaceholder("如：百合（留空不限）")
+          .setValue(formData.tag || "")
+          .onChange((val) => {
+            formData.tag = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("观看状态")
+      .setDesc("按动画观看状态进行筛选")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("all", "全部")
+          .addOption("想看", "想看")
+          .addOption("在看", "在看")
+          .addOption("已看", "已看")
+          .addOption("抛弃", "抛弃")
+          .setValue(formData.watchStatus || "all")
+          .onChange((val) => {
+            formData.watchStatus = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("个人评分下限")
+      .setDesc("筛选“我的评分”达到指定分数的作品")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("0", "无限制")
+          .addOption("6", "6 分以上")
+          .addOption("7", "7 分以上")
+          .addOption("8", "8 分以上")
+          .addOption("9", "9 分以上")
+          .setValue(String(formData.minMyScore || 0))
+          .onChange((val) => {
+            formData.minMyScore = Number(val) || 0;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("BGM 评分下限")
+      .setDesc("筛选 Bangumi 评分达到指定分数的作品")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("0", "无限制")
+          .addOption("6", "6 分以上")
+          .addOption("7", "7 分以上")
+          .addOption("7.5", "7.5 分以上")
+          .addOption("8", "8 分以上")
+          .setValue(String(formData.minBgmScore || 0))
+          .onChange((val) => {
+            formData.minBgmScore = Number(val) || 0;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("开播年份")
+      .setDesc("指定四位年份（如 2025，留空表示不限年份）")
+      .addText((text) => {
+        text
+          .setPlaceholder("如：2025（留空不限）")
+          .setValue(formData.year || "")
+          .onChange((val) => {
+            formData.year = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("开播季度")
+      .setDesc("指定开播季度（留空表示不限季度）")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("", "全部季度（留空不限）")
+          .addOption("01月新番", "01月新番 (冬季)")
+          .addOption("04月新番", "04月新番 (春季)")
+          .addOption("07月新番", "07月新番 (夏季)")
+          .addOption("10月新番", "10月新番 (秋季)")
+          .setValue(formData.season || "")
+          .onChange((val) => {
+            formData.season = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("展示形态")
+      .setDesc("选择分区在仪表盘上的展现方式")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("grid", "响应式封面海报网格 (Cover Grid)")
+          .addOption("list", "紧凑榜单列表 (Compact List)")
+          .setValue(formData.displayMode || "grid")
+          .onChange((val) => {
+            formData.displayMode = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("排序依据")
+      .setDesc("选择分区内部作品的排序规则")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("myScore_desc", "按个人评分降序")
+          .addOption("bgmScore_desc", "按 BGM 评分降序")
+          .addOption("year_desc", "按开播年份降序")
+          .addOption("title_asc", "按作品名称升序")
+          .setValue(formData.sortBy || "myScore_desc")
+          .onChange((val) => {
+            formData.sortBy = val;
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("显示数量上限")
+      .setDesc("控制该分区最多显示的作品数量")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("6", "6 部")
+          .addOption("12", "12 部")
+          .addOption("18", "18 部")
+          .addOption("24", "24 部")
+          .addOption("0", "全部显示")
+          .setValue(String(formData.limit !== undefined ? formData.limit : 12))
+          .onChange((val) => {
+            formData.limit = Number(val);
+          });
+      });
+
+    const footer = contentEl.createDiv("bangumi-modal-footer");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "20px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const saveBtn = footer.createEl("button", {
+      text: isEdit ? "保存修改" : "创建分区",
+      cls: "mod-cta"
+    });
+
+    saveBtn.onclick = async () => {
+      const cleanTitle = String(formData.title || "").trim();
+      if (!cleanTitle) {
+        new Notice("请输入分区名称！");
+        return;
+      }
+      formData.title = cleanTitle;
+      formData.tag = String(formData.tag || "").trim();
+      formData.year = String(formData.year || "").trim();
+      formData.season = String(formData.season || "").trim();
+
+      const customSections = Array.isArray(this.plugin.settings.customQuerySections)
+        ? [...this.plugin.settings.customQuerySections]
+        : [];
+
+      if (isEdit) {
+        const idx = customSections.findIndex((s) => s.id === formData.id);
+        if (idx >= 0) {
+          customSections[idx] = formData;
+        } else {
+          customSections.push(formData);
+        }
+      } else {
+        customSections.push(formData);
+      }
+
+      this.plugin.settings.customQuerySections = customSections;
+      await this.plugin.saveSettings();
+      this.close();
+
+      if (typeof this.onSave === "function") {
+        await this.onSave(formData);
+      }
+
+      new Notice(isEdit ? `已更新分区“${formData.title}”。` : `已创建分区“${formData.title}”。`);
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 module.exports = BangumiManagerPlugin;
 
