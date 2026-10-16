@@ -122,6 +122,21 @@ var DEFAULT_SETTINGS = {
   customQuerySections: []
 };
 
+var DEFAULT_PRESET_QUERY_SECTION = {
+  id: "preset_currently_watching",
+  title: "正在追番",
+  tag: "",
+  watchStatus: "在看",
+  minMyScore: 0,
+  minBgmScore: 0,
+  year: "",
+  season: "",
+  displayMode: "grid",
+  sortBy: "year_desc",
+  limit: 0
+};
+DEFAULT_SETTINGS.customQuerySections = [DEFAULT_PRESET_QUERY_SECTION];
+
 var WATCH_STATES = [
   "\u5DF2\u770B",
   "\u5728\u770B",
@@ -143,7 +158,7 @@ var BangumiScoreDashboardView = class extends ItemView {
   }
 
   getDisplayText() {
-    return "动画评分仪表盘";
+    return "动画仪表盘";
   }
 
   getIcon() {
@@ -161,7 +176,7 @@ var BangumiScoreDashboardView = class extends ItemView {
     );
 
     toolbar.createEl("h2", {
-      text: "动画评分仪表盘"
+      text: "动画仪表盘"
     });
 
     const controls = toolbar.createDiv(
@@ -337,6 +352,9 @@ var BangumiManagerPlugin = class extends Plugin {
     if (!Array.isArray(this.settings.customQuerySections)) {
       this.settings.customQuerySections = [];
     }
+    if (this.settings.customQuerySections.length === 0) {
+      this.settings.customQuerySections = [Object.assign({}, DEFAULT_PRESET_QUERY_SECTION)];
+    }
 
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
@@ -432,7 +450,7 @@ var BangumiManagerPlugin = class extends Plugin {
     );
     this.addCommand({
       id: "open-score-dashboard",
-      name: "打开动画评分仪表盘",
+      name: "打开动画仪表盘",
       callback: async () => {
         await this.openScoreDashboardView();
       }
@@ -535,6 +553,20 @@ var BangumiManagerPlugin = class extends Plugin {
           );
         }
       )
+    );
+    this.registerEvent(
+      this.app.metadataCache.on("changed", (file) => {
+        if (!this.isTargetNote(file)) {
+          return;
+        }
+        if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) {
+          return;
+        }
+        clearTimeout(this.dashboardAutoRefreshTimer);
+        this.dashboardAutoRefreshTimer = setTimeout(async () => {
+          await this.refreshOpenDashboardViews();
+        }, 800);
+      })
     );
     if (this.settings.checkOnStartup) {
       this.startupTimer = window.setTimeout(
@@ -664,7 +696,7 @@ var BangumiManagerPlugin = class extends Plugin {
 
     this.dashboardRibbon = this.addRibbonIcon(
       "chart-no-axes-combined",
-      "打开动画评分仪表盘",
+      "打开动画仪表盘",
       async () => {
         await this.openScoreDashboardView();
       }
@@ -1622,8 +1654,15 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   getDefaultDashboardPath() {
-    return this.getDefaultManagerFolderPath() +
-      "/动画评分仪表盘.md";
+    const base = this.getDefaultManagerFolderPath();
+    const oldPath = base + "/动画评分仪表盘.md";
+    if (this.app && this.app.vault) {
+      const oldFile = this.app.vault.getAbstractFileByPath(oldPath);
+      if (oldFile) {
+        return oldPath;
+      }
+    }
+    return base + "/动画仪表盘.md";
   }
   getDashboardPath() {
     const configuredPath =
@@ -1647,7 +1686,7 @@ if (this.settings.seasonViewMode === "current") {
       "  - bangumi-dashboard",
       "---",
       "",
-      "# 动画评分仪表盘",
+      "# 动画仪表盘",
       "",
       "<div class=\"bangumi-score-dashboard\" data-bangumi-dashboard=\"true\"></div>",
       ""
@@ -2331,6 +2370,7 @@ if (this.settings.seasonViewMode === "current") {
 
     for (const item of items) {
       const card = grid.createDiv("bangumi-grid-card");
+      card.dataset.filePath = item.file.path;
 
       card.onclick = async (e) => {
         e.preventDefault();
@@ -2438,14 +2478,9 @@ if (this.settings.seasonViewMode === "current") {
         e.preventDefault();
         e.stopPropagation();
         const current = Number(item.watchedEpisodes) || 0;
-        const total = Number(item.totalEpisodes) || 0;
         const next = current + 1;
         const updates = { watchedEpisodes: next };
         let msg = `《${item.name}》已看集数递增至：${next} 话`;
-        if (total > 0 && next >= total && item.state !== "已看") {
-          updates.state = "已看";
-          msg += `（全部看完，已自动设为“已看”）`;
-        }
         await this.quickUpdateAnimeNote(item, updates);
         new Notice(msg);
       };
@@ -2531,6 +2566,7 @@ if (this.settings.seasonViewMode === "current") {
 
     items.forEach((item, index) => {
       const row = list.createDiv("bangumi-dashboard-rank-row");
+      row.dataset.filePath = item.file.path;
 
       row.createDiv({
         text: String(index + 1),
@@ -2632,14 +2668,9 @@ if (this.settings.seasonViewMode === "current") {
         e.preventDefault();
         e.stopPropagation();
         const current = Number(item.watchedEpisodes) || 0;
-        const total = Number(item.totalEpisodes) || 0;
         const next = current + 1;
         const updates = { watchedEpisodes: next };
         let msg = `《${item.name}》已看集数递增至：${next} 话`;
-        if (total > 0 && next >= total && item.state !== "已看") {
-          updates.state = "已看";
-          msg += `（全部看完，已自动设为“已看”）`;
-        }
         await this.quickUpdateAnimeNote(item, updates);
         new Notice(msg);
       };
@@ -2747,6 +2778,33 @@ if (this.settings.seasonViewMode === "current") {
         const parsedAfter = parseFrontmatter(newContent);
         if (parsedAfter) {
           item.tags = cleanValue(parsedAfter.fields.tags);
+        }
+      }
+
+      if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+        try {
+          const escapedPath = (CSS && typeof CSS.escape === "function")
+            ? CSS.escape(file.path)
+            : file.path.replace(/["\\]/g, "\\$&");
+          const domNodes = document.querySelectorAll(`[data-file-path="${escapedPath}"]`);
+          for (const node of domNodes) {
+            if (updates.watchedEpisodes !== undefined) {
+              const epLabel = node.querySelector(".bangumi-grid-ep-label, .bangumi-list-ep-label");
+              if (epLabel) {
+                const totalNum = Number(item.totalEpisodes);
+                epLabel.textContent = totalNum > 0 ? `${updates.watchedEpisodes}/${totalNum}话` : `${updates.watchedEpisodes}话`;
+              }
+            }
+            if (updates.state !== undefined) {
+              const badge = node.querySelector(".bangumi-grid-state-badge, .bangumi-list-state-pill");
+              if (badge) {
+                badge.textContent = updates.state;
+                badge.className = badge.className.replace(/is-\S+/g, "").trim() + ` is-${updates.state}`;
+              }
+            }
+          }
+        } catch (domErr) {
+          // ignore
         }
       }
 
@@ -3014,14 +3072,58 @@ if (this.settings.seasonViewMode === "current") {
     this.settings.dashboardSectionOrder = [];
     this.settings.dashboardSectionCollapsed = {};
     this.settings.dashboardSectionHidden = {};
+    if (!Array.isArray(this.settings.customQuerySections) || this.settings.customQuerySections.length === 0) {
+      this.settings.customQuerySections = [Object.assign({}, DEFAULT_PRESET_QUERY_SECTION)];
+    }
     await this.saveSettings();
     if (container) {
       await this.renderScoreDashboard(container, options);
     }
-    new Notice("已恢复评分仪表盘默认布局。");
+    new Notice("已恢复动画仪表盘默认布局。");
+  }
+
+  getDashboardScrollParent(el) {
+    if (!el) return null;
+    let curr = el.parentElement;
+    while (curr) {
+      if (
+        curr.classList &&
+        (curr.classList.contains("bangumi-score-dashboard-view") ||
+          curr.classList.contains("view-content") ||
+          curr.classList.contains("markdown-preview-view") ||
+          curr.classList.contains("cm-scroller"))
+      ) {
+        return curr;
+      }
+      try {
+        if (typeof window !== "undefined" && window.getComputedStyle) {
+          const style = window.getComputedStyle(curr);
+          const overflowY = style.overflowY;
+          if (
+            (overflowY === "auto" || overflowY === "scroll") &&
+            curr.scrollHeight > curr.clientHeight
+          ) {
+            return curr;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+      curr = curr.parentElement;
+    }
+    return el.ownerDocument ? (el.ownerDocument.scrollingElement || el.ownerDocument.documentElement) : null;
   }
 
   async renderScoreDashboard(container, options = {}) {
+    const scrollParent = this.getDashboardScrollParent(container);
+    const savedScrollTop = scrollParent ? scrollParent.scrollTop : 0;
+    const prevHeight = (container.getBoundingClientRect && typeof container.getBoundingClientRect === "function")
+      ? container.getBoundingClientRect().height
+      : 0;
+    if (prevHeight > 0) {
+      container.style.minHeight = prevHeight + "px";
+    }
+
     container.empty();
     const isMarkdown = Boolean(options && options.isMarkdown);
     if (isMarkdown) {
@@ -3091,7 +3193,7 @@ if (this.settings.seasonViewMode === "current") {
     const headerMain = header.createDiv("bangumi-dashboard-header-main");
 
     headerMain.createEl("h1", {
-      text: "动画评分仪表盘"
+      text: "动画仪表盘"
     });
 
     headerMain.createDiv({
@@ -3208,7 +3310,7 @@ if (this.settings.seasonViewMode === "current") {
       ) || 10
     );
 
-    const sectionDefs = [
+    const builtInSectionDefs = [
       {
         id: "personalRank",
         title: "我的评分排名",
@@ -3289,13 +3391,14 @@ if (this.settings.seasonViewMode === "current") {
       ? this.settings.customQuerySections
       : [];
 
+    const customSectionDefs = [];
     for (const customConfig of customConfigs) {
       const filtered = this.filterCustomQueryItems(items, customConfig);
       const sorted = this.sortCustomQueryItems(filtered, customConfig.sortBy);
       const limit = Number(customConfig.limit) || 0;
       const displayItems = limit > 0 ? sorted.slice(0, limit) : sorted;
 
-      sectionDefs.push({
+      customSectionDefs.push({
         id: customConfig.id,
         title: customConfig.title || "自定义查询",
         badgeText: filtered.length ? `${filtered.length} 部` : "",
@@ -3313,6 +3416,8 @@ if (this.settings.seasonViewMode === "current") {
         }
       });
     }
+
+    const sectionDefs = [...customSectionDefs, ...builtInSectionDefs];
 
     const hiddenMap = this.settings.dashboardSectionHidden || {};
 
@@ -3491,6 +3596,20 @@ if (this.settings.seasonViewMode === "current") {
         e.preventDefault();
         await this.resetScoreDashboardLayout(container, options);
       };
+    }
+
+    if (prevHeight > 0) {
+      container.style.minHeight = "";
+    }
+    if (scrollParent && savedScrollTop > 0) {
+      scrollParent.scrollTop = savedScrollTop;
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (scrollParent) {
+            scrollParent.scrollTop = savedScrollTop;
+          }
+        });
+      }
     }
   }
 
@@ -4109,6 +4228,15 @@ if (this.settings.seasonViewMode === "current") {
         );
       }
     ).open();
+  }
+
+  async openBatchTagManager() {
+    const items = await this.collectDashboardItems();
+    if (!items || items.length === 0) {
+      new Notice("没有找到带有 bangumi 标签的动画笔记。", 6000);
+      return;
+    }
+    new BatchTagManagerModal(this.app, this, items).open();
   }
   async collectAnimeItems() {
     const result = [];
@@ -5032,11 +5160,6 @@ var SetEpisodesModal = class extends Modal {
       const updates = { watchedEpisodes: count };
       let noticeMsg = `《${this.item.name}》已看集数已更新为：${count} 话`;
 
-      if (total > 0 && count >= total && this.item.state !== "已看") {
-        updates.state = "已看";
-        noticeMsg += `（全部看完，已自动设为“已看”）`;
-      }
-
       await this.plugin.quickUpdateAnimeNote(this.item, updates);
       this.close();
       if (typeof this.onSave === "function") {
@@ -5123,6 +5246,329 @@ var QuickAddTagModal = class extends Modal {
     saveBtn.onclick = async () => {
       await doSave();
     };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var BatchTagManagerModal = class extends Modal {
+  constructor(app, plugin, items) {
+    super(app);
+    this.plugin = plugin;
+    this.allItems = items || [];
+    this.selected = new Set();
+    this.actionType = "add";
+    this.searchQuery = "";
+    this.statusFilter = "all";
+    this.tagFilter = "all";
+    this.targetTag = "";
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.modalEl.style.width = "min(820px, 92vw)";
+    this.modalEl.style.maxWidth = "92vw";
+    this.modalEl.style.maxHeight = "90vh";
+    this.modalEl.style.overflowY = "auto";
+
+    contentEl.createEl("h2", { text: "批量管理已有笔记中的标签" });
+    contentEl.createEl("p", {
+      cls: "bangumi-modal-desc",
+      text: "批量为选中的动画笔记添加新标签，或从笔记中批量移除已有标签。根标签 #bangumi 受到严格保护，绝不会被意外移除。"
+    });
+
+    // 1. 操作类型设置
+    new Setting(contentEl)
+      .setName("操作类型")
+      .setDesc("选择是为选中的动画笔记批量添加标签，还是批量移除已有标签")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("add", "批量添加标签");
+        dropdown.addOption("remove", "批量移除已有标签");
+        dropdown.setValue(this.actionType);
+        dropdown.onChange((val) => {
+          this.actionType = val;
+          updateActionDesc();
+          updateSubmitBtn();
+        });
+      });
+
+    // 2. 目标标签输入
+    const tagSetting = new Setting(contentEl)
+      .setName("目标标签")
+      .setDesc("输入要批量添加的标签（支持以空格或逗号输入多个，如：热血 奇幻）")
+      .addText((text) => {
+        text.setPlaceholder("如：热血、奇幻、冷门佳作...");
+        text.setValue(this.targetTag);
+        text.onChange((val) => {
+          this.targetTag = val;
+        });
+      });
+
+    const updateActionDesc = () => {
+      if (this.actionType === "add") {
+        tagSetting.setDesc("输入要批量添加的标签（支持以空格或逗号输入多个，如：热血 奇幻）");
+      } else {
+        tagSetting.setDesc("输入要批量移除的标签（如：厕纸。保护根标签 bangumi）");
+      }
+    };
+
+    // 3. 筛选栏
+    const filterSection = contentEl.createDiv({ cls: "bangumi-batch-filter-bar" });
+    filterSection.style.display = "flex";
+    filterSection.style.flexWrap = "wrap";
+    filterSection.style.gap = "10px";
+    filterSection.style.alignItems = "center";
+    filterSection.style.margin = "12px 0";
+    filterSection.style.padding = "8px 12px";
+    filterSection.style.backgroundColor = "var(--background-secondary)";
+    filterSection.style.borderRadius = "6px";
+
+    const searchInput = filterSection.createEl("input", {
+      type: "text",
+      placeholder: "搜索动画名称..."
+    });
+    searchInput.style.flex = "1";
+    searchInput.style.minWidth = "160px";
+    searchInput.oninput = (e) => {
+      this.searchQuery = e.target.value.toLowerCase().trim();
+      renderList();
+    };
+
+    const statusSelect = filterSection.createEl("select");
+    statusSelect.createEl("option", { text: "全部状态", value: "all" });
+    for (const st of ["在看", "想看", "已看", "抛弃", "未设置"]) {
+      statusSelect.createEl("option", { text: st, value: st });
+    }
+    statusSelect.onchange = (e) => {
+      this.statusFilter = e.target.value;
+      renderList();
+    };
+
+    const tagSelect = filterSection.createEl("select");
+    tagSelect.createEl("option", { text: "全部现有标签", value: "all" });
+    const allTags = new Set();
+    for (const it of this.allItems) {
+      const tokens = String(it.tags || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+      for (const t of tokens) allTags.add(t);
+    }
+    for (const t of Array.from(allTags).sort()) {
+      tagSelect.createEl("option", { text: `#${t}`, value: t });
+    }
+    tagSelect.onchange = (e) => {
+      this.tagFilter = e.target.value;
+      renderList();
+    };
+
+    // 4. 选择控制栏
+    const controlBar = contentEl.createDiv();
+    controlBar.style.display = "flex";
+    controlBar.style.justifyContent = "space-between";
+    controlBar.style.alignItems = "center";
+    controlBar.style.margin = "8px 0";
+
+    const btnGroup = controlBar.createDiv();
+    const btnSelectAll = btnGroup.createEl("button", { text: "全选当前筛选结果" });
+    btnSelectAll.style.marginRight = "8px";
+    const btnDeselectAll = btnGroup.createEl("button", { text: "取消选择" });
+
+    const countInfo = controlBar.createSpan({ cls: "bangumi-batch-counter" });
+    countInfo.style.color = "var(--text-muted)";
+    countInfo.style.fontSize = "13px";
+
+    // 5. 笔记列表
+    const listEl = contentEl.createDiv("bangumi-batch-note-list");
+    listEl.style.maxHeight = "360px";
+    listEl.style.overflowY = "auto";
+    listEl.style.border = "1px solid var(--background-modifier-border)";
+    listEl.style.borderRadius = "6px";
+    listEl.style.padding = "6px";
+    listEl.style.margin = "8px 0 16px 0";
+
+    const getFiltered = () => {
+      return this.allItems.filter((it) => {
+        if (this.searchQuery) {
+          const matchName = String(it.name || "").toLowerCase().includes(this.searchQuery);
+          const matchJap = String(it.japaneseName || "").toLowerCase().includes(this.searchQuery);
+          if (!matchName && !matchJap) return false;
+        }
+        if (this.statusFilter !== "all" && it.state !== this.statusFilter) {
+          return false;
+        }
+        if (this.tagFilter !== "all") {
+          const tokens = String(it.tags || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+          if (!tokens.includes(this.tagFilter)) return false;
+        }
+        return true;
+      });
+    };
+
+    const updateCounts = () => {
+      const filtered = getFiltered();
+      countInfo.textContent = `已选 ${this.selected.size} / 筛选出 ${filtered.length} 部（共 ${this.allItems.length} 部）`;
+      updateSubmitBtn();
+    };
+
+    btnSelectAll.onclick = () => {
+      const filtered = getFiltered();
+      for (const it of filtered) {
+        this.selected.add(it.file.path);
+      }
+      renderList();
+    };
+
+    btnDeselectAll.onclick = () => {
+      this.selected.clear();
+      renderList();
+    };
+
+    const renderList = () => {
+      listEl.empty();
+      const filtered = getFiltered();
+      if (filtered.length === 0) {
+        const empty = listEl.createDiv({ text: "未找到匹配的动画笔记" });
+        empty.style.padding = "20px";
+        empty.style.textAlign = "center";
+        empty.style.color = "var(--text-muted)";
+        updateCounts();
+        return;
+      }
+
+      for (const it of filtered) {
+        const row = listEl.createDiv({ cls: "bangumi-batch-row" });
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.padding = "6px 10px";
+        row.style.borderBottom = "1px solid var(--background-modifier-border-focus)";
+        row.style.gap = "10px";
+        row.style.cursor = "pointer";
+
+        const cb = row.createEl("input", { type: "checkbox" });
+        cb.checked = this.selected.has(it.file.path);
+        cb.onchange = (e) => {
+          e.stopPropagation();
+          if (cb.checked) {
+            this.selected.add(it.file.path);
+          } else {
+            this.selected.delete(it.file.path);
+          }
+          updateCounts();
+        };
+
+        row.onclick = () => {
+          cb.checked = !cb.checked;
+          if (cb.checked) {
+            this.selected.add(it.file.path);
+          } else {
+            this.selected.delete(it.file.path);
+          }
+          updateCounts();
+        };
+
+        const titleEl = row.createDiv();
+        titleEl.style.flex = "1";
+        titleEl.style.fontWeight = "500";
+        titleEl.textContent = it.name;
+
+        const stateBadge = row.createSpan({
+          cls: `bangumi-grid-state-badge is-${this.plugin.getWatchStateClass(it.state)}`,
+          text: it.state || "未设置"
+        });
+        stateBadge.style.fontSize = "11px";
+        stateBadge.style.padding = "2px 6px";
+
+        const tagsContainer = row.createDiv();
+        tagsContainer.style.display = "flex";
+        tagsContainer.style.gap = "4px";
+        tagsContainer.style.flexWrap = "wrap";
+        const tokens = String(it.tags || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+        for (const t of tokens) {
+          const tChip = tagsContainer.createSpan({ text: `#${t}` });
+          tChip.style.fontSize = "11px";
+          tChip.style.padding = "1px 5px";
+          tChip.style.borderRadius = "3px";
+          tChip.style.backgroundColor = "var(--background-modifier-form-field)";
+          tChip.style.color = t === "bangumi" ? "var(--text-muted)" : "var(--text-accent)";
+        }
+      }
+
+      updateCounts();
+    };
+
+    // 6. 底部操作栏
+    const footer = contentEl.createDiv();
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "10px";
+    footer.style.marginTop = "12px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const submitBtn = footer.createEl("button", { cls: "mod-cta" });
+
+    const updateSubmitBtn = () => {
+      const count = this.selected.size;
+      if (this.actionType === "add") {
+        submitBtn.textContent = `批量添加标签（已选 ${count} 部）`;
+      } else {
+        submitBtn.textContent = `批量移除标签（已选 ${count} 部）`;
+      }
+    };
+
+    submitBtn.onclick = async () => {
+      const cleanTarget = String(this.targetTag || "").trim();
+      if (!cleanTarget) {
+        new Notice("请输入要操作的标签名称！");
+        return;
+      }
+      if (this.selected.size === 0) {
+        new Notice("请至少选择一部动画笔记！");
+        return;
+      }
+
+      const tags = cleanTarget.split(/[,;\s#]+/).filter(Boolean);
+      if (this.actionType === "remove") {
+        const hasBangumi = tags.some((t) => t.toLowerCase() === "bangumi");
+        if (hasBangumi) {
+          new Notice("根标签 #bangumi 受到系统保护，不可移除！");
+          return;
+        }
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = "正在处理中...";
+
+      try {
+        let successCount = 0;
+        for (const filePath of this.selected) {
+          const item = this.allItems.find((it) => it.file.path === filePath);
+          if (!item || !item.file) continue;
+
+          for (const t of tags) {
+            if (this.actionType === "add") {
+              await this.plugin.quickUpdateAnimeNote(item, { addTag: t });
+            } else {
+              await this.plugin.quickUpdateAnimeNote(item, { removeTag: t });
+            }
+          }
+          successCount += 1;
+        }
+
+        this.close();
+        const actionWord = this.actionType === "add" ? "添加" : "移除";
+        new Notice(`已成功为 ${successCount} 部动画笔记${actionWord}标签：#${tags.join(" #")}`);
+        await this.plugin.refreshOpenDashboardViews();
+      } catch (err) {
+        console.error("[Bangumi Manager] 批量管理标签失败:", err);
+        new Notice(`批量处理失败: ${err.message}`);
+      }
+    };
+
+    renderList();
+    updateSubmitBtn();
   }
 
   onClose() {

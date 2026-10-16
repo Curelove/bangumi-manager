@@ -789,7 +789,7 @@ class RatingSyncManager {
             task.dashboardRefreshes += 1;
           } catch (error) {
             task.failed += 1;
-            console.warn("刷新评分仪表盘失败:", error);
+            console.warn("刷新动画仪表盘失败:", error);
           }
         }
       } else if (task.stopRequested) {

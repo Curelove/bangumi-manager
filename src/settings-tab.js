@@ -884,13 +884,13 @@ module.exports = function createSettingsTabClass({
 
   addDashboardSettings(container, compact) {
     container.createEl("h3", {
-      text: "动画评分仪表盘"
+      text: "动画仪表盘"
     });
 
     new Setting(container)
       .setName("打开专属仪表盘")
       .setDesc(
-        "在插件专属页面中打开评分仪表盘，不受阅读模式和实时预览模式影响。"
+        "在插件专属页面中打开动画仪表盘，不受阅读模式和实时预览模式影响。"
       )
       .addButton((button) => {
         button.setButtonText("打开");
@@ -903,7 +903,7 @@ module.exports = function createSettingsTabClass({
     new Setting(container)
       .setName("恢复仪表盘默认布局")
       .setDesc(
-        "清除评分仪表盘自定义拖拽顺序、折叠和隐藏状态，恢复默认智能排序。"
+        "清除动画仪表盘自定义拖拽顺序、折叠和隐藏状态，恢复默认智能排序。"
       )
       .addButton((button) => {
         button.setButtonText("恢复默认");
@@ -917,7 +917,7 @@ module.exports = function createSettingsTabClass({
     new Setting(container)
       .setName("显示侧边栏仪表盘按钮")
       .setDesc(
-        "在 Obsidian 左侧功能栏显示动画评分仪表盘图标。"
+        "在 Obsidian 左侧功能栏显示动画仪表盘图标。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1392,7 +1392,7 @@ module.exports = function createSettingsTabClass({
     });
 
     const intro = container.createEl("p", {
-      text: "笔记评分控制动画笔记的属性区和正文；仪表盘选项只影响评分仪表盘；数据更新控制何时访问评分数据来源。"
+      text: "笔记评分控制动画笔记的属性区和正文；仪表盘选项只影响动画仪表盘；数据更新控制何时访问评分数据来源。"
     });
 
     intro.style.marginTop = "6px";
@@ -1506,7 +1506,7 @@ await this.saveAndSynchronizeNoteScores();
     new Setting(container)
       .setName("显示精确评分排名")
       .setDesc(
-        "在动画评分仪表盘中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
+        "在动画仪表盘中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -2000,6 +2000,19 @@ await this.saveAndRefreshDashboard();
 
         button.onClick(async () => {
           await this.plugin.openNetabaNoteManager();
+        });
+      });
+
+    new Setting(container)
+      .setName("批量管理已有笔记中的标签")
+      .setDesc(
+        "批量为选中的动画笔记添加新标签，或从笔记中批量移除已有标签。"
+      )
+      .addButton((button) => {
+        button.setButtonText("打开管理窗口");
+
+        button.onClick(async () => {
+          await this.plugin.openBatchTagManager();
         });
       });
   }

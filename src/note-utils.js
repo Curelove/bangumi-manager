@@ -23,17 +23,40 @@ function parseFrontmatter(content) {
     return null;
   }
   const fields = {};
-  for (const line of match[1].split(/\r?\n/)) {
+  const lines = match[1].split(/\r?\n/);
+  let currentKey = null;
+  let currentList = null;
+
+  for (const line of lines) {
+    const listMatch = line.match(/^\s*-\s+(.*)$/);
+    if (listMatch && currentKey) {
+      if (!currentList) {
+        currentList = [];
+        if (fields[currentKey]) {
+          currentList.push(fields[currentKey]);
+        }
+      }
+      let itemVal = listMatch[1].trim();
+      if ((itemVal.startsWith('"') && itemVal.endsWith('"')) || (itemVal.startsWith("'") && itemVal.endsWith("'"))) {
+        itemVal = itemVal.slice(1, -1);
+      }
+      currentList.push(itemVal);
+      fields[currentKey] = currentList.join(", ");
+      continue;
+    }
+
+    currentList = null;
     const index = line.indexOf(":");
     if (index < 0) {
       continue;
     }
     const key = line.slice(0, index).trim();
     let value = line.slice(index + 1).trim();
-    if (value.length >= 2 && (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))) {
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     }
     fields[key] = value;
+    currentKey = key;
   }
   return {
     full: match[0],
@@ -125,9 +148,21 @@ function updateFrontmatterField(content, fieldName, fieldValue) {
     /[.*+?^${}()|[\]\\]/g,
     "\\$&"
   );
-  const fieldLine = fieldName + ': "' + String(fieldValue || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  let fieldLine;
+  if (fieldName === "tags") {
+    let tagList = Array.isArray(fieldValue)
+      ? fieldValue
+      : String(fieldValue || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+    tagList = Array.from(new Set(tagList));
+    if (!tagList.some((t) => t.toLowerCase() === "bangumi")) {
+      tagList.unshift("bangumi");
+    }
+    fieldLine = "tags:\n" + tagList.map((t) => "  - " + t).join("\n");
+  } else {
+    fieldLine = fieldName + ': "' + String(fieldValue || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  }
   const pattern = new RegExp(
-    "^" + escapedName + "\\s*:.*$",
+    "^" + escapedName + "\\s*:(?:[^\\r\\n]*(?:\\r?\\n\\s+-[^\\r\\n]*)*)",
     "m"
   );
   const newBody = pattern.test(parsed.body) ? parsed.body.replace(
