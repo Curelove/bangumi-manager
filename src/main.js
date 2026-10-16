@@ -112,8 +112,9 @@ var DEFAULT_SETTINGS = {
 
 
   bangumiPreciseScoreDisplayDigits: 4,
-
-
+  dashboardSectionOrder: [],
+  dashboardSectionCollapsed: {},
+  dashboardSectionHidden: {}
 };
 
 var WATCH_STATES = [
@@ -166,6 +167,10 @@ var BangumiScoreDashboardView = class extends ItemView {
       text: "刷新"
     });
 
+    const resetButton = controls.createEl("button", {
+      text: "恢复默认布局"
+    });
+
     const markdownButton = controls.createEl("button", {
       text: "打开 Markdown"
     });
@@ -180,18 +185,26 @@ var BangumiScoreDashboardView = class extends ItemView {
       try {
         await this.plugin.refreshScoreDashboard(true);
         await this.plugin.renderScoreDashboard(
-          dashboard
+          dashboard,
+          { isMarkdown: false }
         );
       } finally {
         refreshButton.disabled = false;
       }
     };
 
+    resetButton.onclick = async () => {
+      await this.plugin.resetScoreDashboardLayout(
+        dashboard,
+        { isMarkdown: false }
+      );
+    };
+
     markdownButton.onclick = async () => {
       await this.plugin.openScoreDashboard();
     };
 
-    await this.plugin.renderScoreDashboard(dashboard);
+    await this.plugin.renderScoreDashboard(dashboard, { isMarkdown: false });
   }
 
   async onClose() {
@@ -1756,39 +1769,18 @@ if (this.settings.seasonViewMode === "current") {
     });
   }
 
-  createDashboardRankList(
-    container,
-    title,
+  renderRankListRows(
+    listContainer,
     items,
     scoreKey,
     secondaryKey,
     limit
   ) {
-    const section = container.createDiv(
-      "bangumi-dashboard-section"
-    );
-
-    section.createEl("h2", {
-      text: title
-    });
-
-    if (!items.length) {
-      section.createEl("p", {
-        text: "暂无可显示的评分记录。",
-        cls: "bangumi-dashboard-empty"
-      });
-      return;
-    }
-
-    const list = section.createDiv(
-      "bangumi-dashboard-rank-list"
-    );
-
     const maxScore = 10;
 
     items.slice(0, limit).forEach(
       (item, index) => {
-        const row = list.createDiv(
+        const row = listContainer.createDiv(
           "bangumi-dashboard-rank-row"
         );
 
@@ -1818,6 +1810,7 @@ if (this.settings.seasonViewMode === "current") {
 
         title.onclick = async (event) => {
           event.preventDefault();
+          event.stopPropagation();
 
           const leaf =
             this.app.workspace.getLeaf(true);
@@ -1857,10 +1850,12 @@ if (this.settings.seasonViewMode === "current") {
     );
   }
 
-  createDashboardPreciseRankList(
+  createDashboardRankList(
     container,
     title,
     items,
+    scoreKey,
+    secondaryKey,
     limit
   ) {
     const section = container.createDiv(
@@ -1873,7 +1868,7 @@ if (this.settings.seasonViewMode === "current") {
 
     if (!items.length) {
       section.createEl("p", {
-        text: "暂无可显示的精确评分记录。",
+        text: "暂无可显示的评分记录。",
         cls: "bangumi-dashboard-empty"
       });
       return;
@@ -1883,6 +1878,14 @@ if (this.settings.seasonViewMode === "current") {
       "bangumi-dashboard-rank-list"
     );
 
+    this.renderRankListRows(list, items, scoreKey, secondaryKey, limit);
+  }
+
+  renderPreciseRankListRows(
+    listContainer,
+    items,
+    limit
+  ) {
     const digits = Math.max(
       1,
       Math.min(
@@ -1895,7 +1898,7 @@ if (this.settings.seasonViewMode === "current") {
 
     items.slice(0, limit).forEach(
       (item, index) => {
-        const row = list.createDiv(
+        const row = listContainer.createDiv(
           "bangumi-dashboard-rank-row"
         );
 
@@ -1922,6 +1925,7 @@ if (this.settings.seasonViewMode === "current") {
 
         link.onclick = async (event) => {
           event.preventDefault();
+          event.stopPropagation();
           const leaf = this.app.workspace.getLeaf(true);
           await leaf.openFile(item.file);
         };
@@ -1945,15 +1949,39 @@ if (this.settings.seasonViewMode === "current") {
     );
   }
 
-  createDashboardDistribution(container, items) {
+  createDashboardPreciseRankList(
+    container,
+    title,
+    items,
+    limit
+  ) {
     const section = container.createDiv(
       "bangumi-dashboard-section"
     );
 
     section.createEl("h2", {
-      text: "我的评分分布"
+      text: title
     });
 
+    if (!items.length) {
+      section.createEl("p", {
+        text: "暂无可显示的精确评分记录。",
+        cls: "bangumi-dashboard-empty"
+      });
+      return;
+    }
+
+    const list = section.createDiv(
+      "bangumi-dashboard-rank-list"
+    );
+
+    this.renderPreciseRankListRows(list, items, limit);
+  }
+
+  renderDistributionBars(
+    chartContainer,
+    items
+  ) {
     const ranges = [
       { label: "0–2", min: 0, max: 2.99 },
       { label: "3–4", min: 3, max: 4.99 },
@@ -1967,14 +1995,14 @@ if (this.settings.seasonViewMode === "current") {
     );
 
     if (!scoredItems.length) {
-      section.createEl("p", {
+      chartContainer.createEl("p", {
         text: "填写“我的评分”后会显示评分分布。",
         cls: "bangumi-dashboard-empty"
       });
       return;
     }
 
-    const chart = section.createDiv(
+    const chart = chartContainer.createDiv(
       "bangumi-dashboard-distribution"
     );
 
@@ -2013,15 +2041,22 @@ if (this.settings.seasonViewMode === "current") {
     });
   }
 
-  createDashboardWatchState(container, items) {
+  createDashboardDistribution(container, items) {
     const section = container.createDiv(
       "bangumi-dashboard-section"
     );
 
     section.createEl("h2", {
-      text: "观看状态"
+      text: "我的评分分布"
     });
 
+    this.renderDistributionBars(section, items);
+  }
+
+  renderWatchStateCards(
+    gridContainer,
+    items
+  ) {
     const states = [
       "已看",
       "在看",
@@ -2029,7 +2064,7 @@ if (this.settings.seasonViewMode === "current") {
       "抛弃"
     ];
 
-    const grid = section.createDiv(
+    const grid = gridContainer.createDiv(
       "bangumi-dashboard-state-grid"
     );
 
@@ -2054,8 +2089,148 @@ if (this.settings.seasonViewMode === "current") {
     });
   }
 
-  async renderScoreDashboard(container) {
+  createDashboardWatchState(container, items) {
+    const section = container.createDiv(
+      "bangumi-dashboard-section"
+    );
+
+    section.createEl("h2", {
+      text: "观看状态"
+    });
+
+    this.renderWatchStateCards(section, items);
+  }
+
+  createDashboardSection(parentContainer, {
+    def,
+    isCollapsed,
+    onToggleCollapse,
+    onHide,
+    onReorder
+  }) {
+    const hasData = def.hasData;
+    const sectionEl = parentContainer.createDiv({
+      cls:
+        "bangumi-dashboard-section" +
+        (hasData ? "" : " is-empty") +
+        (isCollapsed ? " is-collapsed" : "") +
+        (def.spanFull ? " span-full" : "")
+    });
+
+    sectionEl.dataset.sectionId = def.id;
+    sectionEl.setAttribute("draggable", "true");
+
+    sectionEl.ondragstart = (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", def.id);
+      sectionEl.addClass("is-dragging");
+    };
+
+    sectionEl.ondragend = () => {
+      sectionEl.removeClass("is-dragging");
+      document.querySelectorAll(".bangumi-dashboard-section").forEach((el) => {
+        el.removeClass("drag-over-indicator");
+      });
+    };
+
+    sectionEl.ondragover = (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      sectionEl.addClass("drag-over-indicator");
+    };
+
+    sectionEl.ondragleave = () => {
+      sectionEl.removeClass("drag-over-indicator");
+    };
+
+    sectionEl.ondrop = async (e) => {
+      e.preventDefault();
+      sectionEl.removeClass("drag-over-indicator");
+      const sourceId = e.dataTransfer.getData("text/plain");
+      if (sourceId && sourceId !== def.id) {
+        await onReorder(sourceId, def.id);
+      }
+    };
+
+    const headerEl = sectionEl.createDiv("bangumi-dashboard-section-header");
+    const leftEl = headerEl.createDiv("bangumi-dashboard-section-header-left");
+
+    const dragHandle = leftEl.createSpan({
+      cls: "bangumi-dashboard-drag-handle",
+      text: "⋮⋮"
+    });
+    dragHandle.title = "拖拽调整分区顺序";
+
+    if (hasData) {
+      const collapseBtn = leftEl.createSpan({
+        cls: "bangumi-dashboard-collapse-btn",
+        text: isCollapsed ? "▶" : "▼"
+      });
+      collapseBtn.title = isCollapsed ? "展开分区" : "折叠分区";
+      collapseBtn.onclick = (e) => {
+        e.stopPropagation();
+        onToggleCollapse();
+      };
+    }
+
+    leftEl.createEl("h2", {
+      text: def.title
+    });
+
+    if (hasData && def.badgeText) {
+      leftEl.createSpan({
+        cls: "bangumi-dashboard-badge",
+        text: def.badgeText
+      });
+    }
+
+    if (!hasData) {
+      leftEl.createSpan({
+        cls: "bangumi-dashboard-empty-inline",
+        text: def.emptyText
+      });
+    }
+
+    const rightEl = headerEl.createDiv("bangumi-dashboard-section-header-right");
+    const hideBtn = rightEl.createEl("button", {
+      cls: "bangumi-dashboard-action-btn",
+      text: "隐藏"
+    });
+    hideBtn.title = "隐藏此分区（可在底部或设置中恢复）";
+    hideBtn.onclick = (e) => {
+      e.stopPropagation();
+      onHide();
+    };
+
+    headerEl.onclick = (e) => {
+      if (e.target === hideBtn || e.target === dragHandle) {
+        return;
+      }
+      if (hasData) {
+        onToggleCollapse();
+      }
+    };
+
+    if (hasData && !isCollapsed) {
+      const bodyEl = sectionEl.createDiv("bangumi-dashboard-section-body");
+      def.renderBody(bodyEl);
+    }
+  }
+
+  async resetScoreDashboardLayout(container, options = {}) {
+    this.settings.dashboardSectionOrder = [];
+    this.settings.dashboardSectionCollapsed = {};
+    this.settings.dashboardSectionHidden = {};
+    await this.saveSettings();
+    if (container) {
+      await this.renderScoreDashboard(container, options);
+    }
+    new Notice("已恢复评分仪表盘默认布局。");
+  }
+
+  async renderScoreDashboard(container, options = {}) {
     container.empty();
+    const isMarkdown = Boolean(options && options.isMarkdown);
 
     const items = await this.collectDashboardItems();
 
@@ -2078,6 +2253,19 @@ if (this.settings.seasonViewMode === "current") {
           b.bangumiScore - a.bangumiScore ||
           a.name.localeCompare(b.name, "zh-CN")
       );
+
+    const preciseItems = items
+      .filter((item) => {
+        return item.preciseScore !== null;
+      })
+      .sort((a, b) => {
+        return b.preciseScore - a.preciseScore ||
+          a.name.localeCompare(b.name, "zh-CN");
+      });
+
+    const scoredItems = items.filter(
+      (item) => item.personalScore !== null
+    );
 
     const personalAverage = personalItems.length
       ? (
@@ -2112,6 +2300,54 @@ if (this.settings.seasonViewMode === "current") {
       cls: "bangumi-dashboard-subtitle"
     });
 
+    if (isMarkdown) {
+      const banner = container.createDiv(
+        "bangumi-dashboard-compat-banner"
+      );
+
+      const text = banner.createDiv({
+        cls: "bangumi-dashboard-compat-text"
+      });
+
+      text.createSpan({
+        text: "提示：当前为 Markdown 嵌入模式。为避免实时预览光标干扰并获得最佳拖拽排版体验，推荐在"
+      });
+
+      text.createEl("strong", {
+        text: "专属页面"
+      });
+
+      text.createSpan({
+        text: "中打开。"
+      });
+
+      const actions = banner.createDiv(
+        "bangumi-dashboard-compat-actions"
+      );
+
+      const openBtn = actions.createEl("button", {
+        cls: "bangumi-dashboard-compat-btn",
+        text: "打开专属仪表盘"
+      });
+
+      openBtn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await this.openScoreDashboardView();
+      };
+
+      const resetBtn = actions.createEl("button", {
+        cls: "bangumi-dashboard-compat-reset-btn",
+        text: "恢复默认布局"
+      });
+
+      resetBtn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await this.resetScoreDashboardLayout(container, options);
+      };
+    }
+
     const cards = container.createDiv(
       "bangumi-dashboard-cards"
     );
@@ -2140,46 +2376,19 @@ if (this.settings.seasonViewMode === "current") {
       bangumiAverage
     );
 
-    const rankGrid = container.createDiv(
-      "bangumi-dashboard-rank-grid"
+    const personalLimit = Math.max(
+      1,
+      Number(
+        this.settings.dashboardPersonalRankLimit
+      ) || 10
     );
 
-    this.createDashboardRankList(
-      rankGrid,
-      "我的评分排名",
-      personalItems,
-      "personalScore",
-      "bangumiScore",
-      Math.max(
-        1,
-        Number(
-          this.settings.dashboardPersonalRankLimit
-        ) || 10
-      )
+    const bangumiLimit = Math.max(
+      1,
+      Number(
+        this.settings.dashboardBangumiRankLimit
+      ) || 10
     );
-
-    this.createDashboardRankList(
-      rankGrid,
-      "BGM 用户评分排名",
-      bangumiItems,
-      "bangumiScore",
-      "personalScore",
-      Math.max(
-        1,
-        Number(
-          this.settings.dashboardBangumiRankLimit
-        ) || 10
-      )
-    );
-
-    const preciseItems = items
-      .filter((item) => {
-        return item.preciseScore !== null;
-      })
-      .sort((a, b) => {
-        return b.preciseScore - a.preciseScore ||
-          a.name.localeCompare(b.name, "zh-CN");
-      });
 
     const preciseLimit = Math.max(
       1,
@@ -2188,37 +2397,246 @@ if (this.settings.seasonViewMode === "current") {
       ) || 10
     );
 
-    if (
-      this.settings.dashboardShowPreciseRank !==
-      false &&
-      preciseItems.length
-    ) {
-      this.createDashboardPreciseRankList(
-        rankGrid,
-        "BGM 精确评分排名",
-        preciseItems,
-        preciseLimit
-      );
+    const sectionDefs = [
+      {
+        id: "personalRank",
+        title: "我的评分排名",
+        badgeText: personalItems.length ? `${personalItems.length} 部` : "",
+        hasData: personalItems.length > 0,
+        emptyText: "暂无可显示的评分记录（笔记未填写“我的评分”）",
+        spanFull: false,
+        renderBody: (body) => {
+          const list = body.createDiv("bangumi-dashboard-rank-list");
+          this.renderRankListRows(
+            list,
+            personalItems,
+            "personalScore",
+            "bangumiScore",
+            personalLimit
+          );
+        }
+      },
+      {
+        id: "bangumiRank",
+        title: "BGM 用户评分排名",
+        badgeText: bangumiItems.length ? `${bangumiItems.length} 部` : "",
+        hasData: bangumiItems.length > 0,
+        emptyText: "暂无可显示的评分记录",
+        spanFull: false,
+        renderBody: (body) => {
+          const list = body.createDiv("bangumi-dashboard-rank-list");
+          this.renderRankListRows(
+            list,
+            bangumiItems,
+            "bangumiScore",
+            "personalScore",
+            bangumiLimit
+          );
+        }
+      },
+      {
+        id: "preciseRank",
+        title: "BGM 精确评分排名",
+        badgeText: preciseItems.length ? `${preciseItems.length} 部` : "",
+        hasData: preciseItems.length > 0,
+        emptyText: "暂无可显示的精确评分记录",
+        spanFull: false,
+        renderBody: (body) => {
+          const list = body.createDiv("bangumi-dashboard-rank-list");
+          this.renderPreciseRankListRows(
+            list,
+            preciseItems,
+            preciseLimit
+          );
+        }
+      },
+      {
+        id: "distribution",
+        title: "我的评分分布",
+        badgeText: scoredItems.length ? `${scoredItems.length} 部` : "",
+        hasData: scoredItems.length > 0,
+        emptyText: "填写“我的评分”后会显示评分分布",
+        spanFull: true,
+        renderBody: (body) => {
+          this.renderDistributionBars(body, items);
+        }
+      },
+      {
+        id: "watchState",
+        title: "观看状态",
+        badgeText: items.length ? `${items.length} 部` : "",
+        hasData: items.length > 0,
+        emptyText: "暂无观看状态记录",
+        spanFull: true,
+        renderBody: (body) => {
+          this.renderWatchStateCards(body, items);
+        }
+      }
+    ];
+
+    const hiddenMap = this.settings.dashboardSectionHidden || {};
+
+    const isSectionHidden = (id) => {
+      if (typeof hiddenMap[id] === "boolean") {
+        return hiddenMap[id];
+      }
+      if (id === "preciseRank") {
+        return this.settings.dashboardShowPreciseRank === false;
+      }
+      if (id === "distribution") {
+        return this.settings.dashboardShowDistribution === false;
+      }
+      if (id === "watchState") {
+        return this.settings.dashboardShowWatchState === false;
+      }
+      return false;
+    };
+
+    const userOrder = Array.isArray(
+      this.settings.dashboardSectionOrder
+    )
+      ? this.settings.dashboardSectionOrder.filter((id) =>
+          sectionDefs.some((s) => s.id === id)
+        )
+      : [];
+
+    let orderedDefs = [];
+
+    if (userOrder.length > 0) {
+      for (const id of userOrder) {
+        const def = sectionDefs.find((s) => s.id === id);
+        if (def && !orderedDefs.includes(def)) {
+          orderedDefs.push(def);
+        }
+      }
+      for (const def of sectionDefs) {
+        if (!orderedDefs.includes(def)) {
+          orderedDefs.push(def);
+        }
+      }
+    } else {
+      const withData = sectionDefs.filter((s) => s.hasData);
+      const withoutData = sectionDefs.filter((s) => !s.hasData);
+      orderedDefs = [...withData, ...withoutData];
     }
 
-    if (
-      this.settings.dashboardShowDistribution !==
-      false
-    ) {
-      this.createDashboardDistribution(
-        container,
-        items
-      );
+    const visibleDefs = orderedDefs.filter(
+      (s) => !isSectionHidden(s.id)
+    );
+
+    const hiddenDefs = sectionDefs.filter((s) =>
+      isSectionHidden(s.id)
+    );
+
+    const sectionsContainer = container.createDiv(
+      "bangumi-dashboard-sections"
+    );
+
+    const collapsedMap =
+      this.settings.dashboardSectionCollapsed || {};
+
+    for (const def of visibleDefs) {
+      const isCollapsed = Boolean(collapsedMap[def.id]);
+
+      this.createDashboardSection(sectionsContainer, {
+        def,
+        isCollapsed,
+        onToggleCollapse: async () => {
+          const next = Object.assign(
+            {},
+            this.settings.dashboardSectionCollapsed
+          );
+          next[def.id] = !isCollapsed;
+          this.settings.dashboardSectionCollapsed = next;
+          await this.saveSettings();
+          await this.renderScoreDashboard(container, options);
+        },
+        onHide: async () => {
+          const next = Object.assign(
+            {},
+            this.settings.dashboardSectionHidden
+          );
+          next[def.id] = true;
+          this.settings.dashboardSectionHidden = next;
+          await this.saveSettings();
+          await this.renderScoreDashboard(container, options);
+          new Notice(
+            `已隐藏“${def.title}”分区。可在底部或设置中恢复。`
+          );
+        },
+        onReorder: async (sourceId, targetId) => {
+          const currentOrder = visibleDefs.map((d) => d.id);
+          const fromIdx = currentOrder.indexOf(sourceId);
+          const toIdx = currentOrder.indexOf(targetId);
+
+          if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
+            currentOrder.splice(fromIdx, 1);
+            currentOrder.splice(toIdx, 0, sourceId);
+
+            for (const s of sectionDefs) {
+              if (!currentOrder.includes(s.id)) {
+                currentOrder.push(s.id);
+              }
+            }
+
+            this.settings.dashboardSectionOrder = currentOrder;
+            await this.saveSettings();
+            await this.renderScoreDashboard(container, options);
+            new Notice("已更新分区排序。");
+          }
+        }
+      });
     }
 
-    if (
-      this.settings.dashboardShowWatchState !==
-      false
-    ) {
-      this.createDashboardWatchState(
-        container,
-        items
+    if (hiddenDefs.length > 0) {
+      const restoreBar = container.createDiv(
+        "bangumi-dashboard-restore-bar"
       );
+
+      restoreBar.createSpan({
+        text: "已隐藏分区："
+      });
+
+      for (const hDef of hiddenDefs) {
+        const chip = restoreBar.createEl("button", {
+          cls: "bangumi-dashboard-restore-chip",
+          text: `+ 恢复 ${hDef.title}`
+        });
+
+        chip.onclick = async (e) => {
+          e.preventDefault();
+          const next = Object.assign(
+            {},
+            this.settings.dashboardSectionHidden
+          );
+          next[hDef.id] = false;
+
+          if (hDef.id === "preciseRank") {
+            this.settings.dashboardShowPreciseRank = true;
+          }
+          if (hDef.id === "distribution") {
+            this.settings.dashboardShowDistribution = true;
+          }
+          if (hDef.id === "watchState") {
+            this.settings.dashboardShowWatchState = true;
+          }
+
+          this.settings.dashboardSectionHidden = next;
+          await this.saveSettings();
+          await this.renderScoreDashboard(container, options);
+          new Notice(`已恢复显示“${hDef.title}”分区。`);
+        };
+      }
+
+      const resetBtn = restoreBar.createEl("button", {
+        cls: "bangumi-dashboard-restore-chip bangumi-dashboard-restore-all",
+        text: "恢复默认布局"
+      });
+
+      resetBtn.onclick = async (e) => {
+        e.preventDefault();
+        await this.resetScoreDashboardLayout(container, options);
+      };
     }
   }
 
@@ -2287,13 +2705,44 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-dashboard-header{margin:8px 0 18px;padding:20px 22px;border:1px solid var(--background-modifier-border);border-radius:16px;background:linear-gradient(135deg,var(--background-secondary),var(--background-primary));}",
       ".bangumi-dashboard-header h1{margin:0 0 6px;font-size:1.65em;}",
       ".bangumi-dashboard-subtitle{color:var(--text-muted);font-size:.9em;}",
+      ".bangumi-dashboard-compat-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;margin:0 0 16px;border-radius:10px;border:1px solid color-mix(in srgb,var(--interactive-accent) 25%,var(--background-modifier-border));background:color-mix(in srgb,var(--interactive-accent) 6%,var(--background-secondary));font-size:.84em;color:var(--text-normal);}",
+      ".bangumi-dashboard-compat-text{flex:1;min-width:0;}",
+      ".bangumi-dashboard-compat-actions{display:flex;gap:8px;flex-shrink:0;}",
+      ".bangumi-dashboard-compat-btn{cursor:pointer;padding:3px 10px;font-size:.85em;border-radius:6px;border:1px solid var(--interactive-accent);background:var(--interactive-accent);color:var(--text-on-accent);}",
+      ".bangumi-dashboard-compat-reset-btn{cursor:pointer;padding:3px 10px;font-size:.85em;border-radius:6px;border:1px solid var(--background-modifier-border);background:transparent;color:var(--text-muted);}",
+      ".bangumi-dashboard-compat-reset-btn:hover{background:var(--background-modifier-hover);color:var(--text-normal);}",
       ".bangumi-dashboard-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 18px;}",
       ".bangumi-dashboard-card{padding:16px;border:1px solid var(--background-modifier-border);border-radius:14px;background:var(--background-secondary);}",
       ".bangumi-dashboard-card-label{color:var(--text-muted);font-size:.82em;margin-bottom:7px;}",
       ".bangumi-dashboard-card-value{font-size:1.65em;font-weight:700;font-variant-numeric:tabular-nums;}",
+      ".bangumi-dashboard-sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;}",
       ".bangumi-dashboard-rank-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;}",
-      ".bangumi-dashboard-section{margin:16px 0;padding:16px;border:1px solid var(--background-modifier-border);border-radius:14px;background:var(--background-primary);}",
-      ".bangumi-dashboard-section h2{margin:0 0 14px;font-size:1.08em;}",
+      ".bangumi-dashboard-section{margin:0 0 16px;padding:16px;border:1px solid var(--background-modifier-border);border-radius:14px;background:var(--background-primary);transition:border-color .15s ease,box-shadow .15s ease,opacity .15s ease;}",
+      ".bangumi-dashboard-section.span-full{grid-column:1 / -1;}",
+      ".bangumi-dashboard-section.is-empty{grid-column:1 / -1;padding:9px 14px;margin-bottom:8px;border-style:dashed;border-color:var(--background-modifier-border);background:var(--background-secondary-alt);opacity:.75;}",
+      ".bangumi-dashboard-section.is-empty:hover{opacity:.95;}",
+      ".bangumi-dashboard-section.is-empty .bangumi-dashboard-section-header{margin-bottom:0;}",
+      ".bangumi-dashboard-section.is-empty h2{font-size:.92em;font-weight:500;color:var(--text-muted);}",
+      ".bangumi-dashboard-empty-inline{font-size:.82em;color:var(--text-faint);margin-left:8px;}",
+      ".bangumi-dashboard-section-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px;user-select:none;}",
+      ".bangumi-dashboard-section.is-collapsed .bangumi-dashboard-section-header{margin-bottom:0;}",
+      ".bangumi-dashboard-section-header-left{display:flex;align-items:center;gap:7px;min-width:0;flex:1;}",
+      ".bangumi-dashboard-section-header-left h2{margin:0;font-size:1.08em;cursor:pointer;}",
+      ".bangumi-dashboard-drag-handle{cursor:grab;color:var(--text-faint);display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:4px;font-size:12px;line-height:1;}",
+      ".bangumi-dashboard-drag-handle:hover{color:var(--text-normal);background:var(--background-modifier-hover);}",
+      ".bangumi-dashboard-drag-handle:active{cursor:grabbing;}",
+      ".bangumi-dashboard-collapse-btn{cursor:pointer;color:var(--text-muted);font-size:10px;width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border-radius:4px;transition:transform .15s ease;}",
+      ".bangumi-dashboard-collapse-btn:hover{color:var(--text-normal);background:var(--background-modifier-hover);}",
+      ".bangumi-dashboard-badge{font-size:.72em;padding:1px 7px;border-radius:999px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);color:var(--text-muted);font-weight:500;white-space:nowrap;}",
+      ".bangumi-dashboard-section-header-right{display:flex;align-items:center;gap:6px;flex-shrink:0;}",
+      ".bangumi-dashboard-action-btn{cursor:pointer;font-size:.75em;padding:2px 7px;border:1px solid var(--background-modifier-border);border-radius:6px;background:transparent;color:var(--text-muted);transition:all .15s ease;}",
+      ".bangumi-dashboard-action-btn:hover{color:var(--text-normal);background:var(--background-modifier-hover);}",
+      ".bangumi-dashboard-section.is-dragging{opacity:.35;}",
+      ".bangumi-dashboard-section.drag-over-indicator{border-color:var(--interactive-accent);box-shadow:0 0 0 2px var(--interactive-accent);}",
+      ".bangumi-dashboard-restore-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 14px;margin:8px 0 18px;border-radius:10px;border:1px dashed var(--background-modifier-border);background:var(--background-secondary);font-size:.83em;color:var(--text-muted);}",
+      ".bangumi-dashboard-restore-chip{cursor:pointer;padding:2px 9px;border-radius:999px;border:1px solid var(--background-modifier-border);background:var(--background-primary);color:var(--text-normal);font-size:.9em;}",
+      ".bangumi-dashboard-restore-chip:hover{border-color:var(--interactive-accent);color:var(--interactive-accent);}",
+      ".bangumi-dashboard-restore-all{margin-left:auto;}",
       ".bangumi-dashboard-empty{margin:0;color:var(--text-muted);}",
       ".bangumi-dashboard-rank-list{display:flex;flex-direction:column;gap:10px;}",
       ".bangumi-dashboard-rank-row{display:flex;gap:10px;padding:10px;border-radius:10px;background:var(--background-secondary);transition:background-color .15s ease;}",
@@ -2320,8 +2769,8 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-dashboard-view-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 0 10px;}",
       ".bangumi-dashboard-view-toolbar h2{margin:0;font-size:1.15em;}",
       ".bangumi-dashboard-view-controls{display:flex;gap:8px;flex-wrap:wrap;}",
-      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}",
-      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}}"
+      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}}",
+      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}}"
     ].join("");
 
     document.head.appendChild(style);
@@ -2333,7 +2782,7 @@ if (this.settings.seasonViewMode === "current") {
 
   registerScoreDashboardProcessor() {
     this.registerMarkdownPostProcessor(
-      async (element) => {
+      async (element, context) => {
         const dashboards =
           element.querySelectorAll(
             "[data-bangumi-dashboard=true]"
@@ -2341,7 +2790,8 @@ if (this.settings.seasonViewMode === "current") {
 
         for (const dashboard of dashboards) {
           await this.renderScoreDashboard(
-            dashboard
+            dashboard,
+            { isMarkdown: true, sourcePath: context && context.sourcePath }
           );
         }
       }

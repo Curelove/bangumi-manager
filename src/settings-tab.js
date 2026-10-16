@@ -901,6 +901,20 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
+      .setName("恢复仪表盘默认布局")
+      .setDesc(
+        "清除评分仪表盘自定义拖拽顺序、折叠和隐藏状态，恢复默认智能排序。"
+      )
+      .addButton((button) => {
+        button.setButtonText("恢复默认");
+
+        button.onClick(async () => {
+          await this.plugin.resetScoreDashboardLayout();
+          this.display();
+        });
+      });
+
+    new Setting(container)
       .setName("显示侧边栏仪表盘按钮")
       .setDesc(
         "在 Obsidian 左侧功能栏显示动画评分仪表盘图标。"
