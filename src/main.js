@@ -4,7 +4,8 @@ const {
   Setting,
   Notice,
   Modal,
-  ItemView
+  ItemView,
+  Menu
 } = require("obsidian");
 
 
@@ -18,6 +19,7 @@ let BangumiManagerSettingTab;
 let NetabaNoteManagerModal;
 let NetabaPageSelectModal;
 let NetabaCompareSelectModal;
+const noteUtils = require("./note-utils.js");
 let {
   cleanValue,
   parseFrontmatter,
@@ -26,7 +28,6 @@ let {
   getLocalStatusText,
   updateFrontmatterField,
   updateScoreFields,
-
   synchronizeBangumiScoreFields,
   updateFolderLine,
   updateNetabaIframeUrl,
@@ -35,14 +36,17 @@ let {
   extractBaseViewNames,
   removeBaseViews,
   hasBaseView,
-  appendSeasonView
-} = {};
+  appendSeasonView,
+  updateWatchedEpisodes,
+  updateCalloutTableRow,
+  addNoteTag,
+  removeNoteTag
+} = noteUtils;
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
 const batchImportManager = require("./batch-import-manager.js");
 const createSettingsTabClass = require("./settings-tab.js");
-const noteUtils = require("./note-utils.js");
 const { RatingSyncManager } = require("./rating-sync-manager.js");
 const createNetabaModals = require("./netaba-modals.js");
 
@@ -184,13 +188,11 @@ var BangumiScoreDashboardView = class extends ItemView {
     const dashboard = this.contentEl.createDiv(
       "bangumi-score-dashboard"
     );
+    this.dashboardEl = dashboard;
 
     addSectionButton.onclick = () => {
       this.plugin.openCustomQuerySectionModal(null, async () => {
-        await this.plugin.renderScoreDashboard(
-          dashboard,
-          { isMarkdown: false }
-        );
+        await this.refresh();
       });
     };
 
@@ -199,10 +201,7 @@ var BangumiScoreDashboardView = class extends ItemView {
 
       try {
         await this.plugin.refreshScoreDashboard(true);
-        await this.plugin.renderScoreDashboard(
-          dashboard,
-          { isMarkdown: false }
-        );
+        await this.refresh();
       } finally {
         refreshButton.disabled = false;
       }
@@ -219,10 +218,17 @@ var BangumiScoreDashboardView = class extends ItemView {
       await this.plugin.openScoreDashboard();
     };
 
-    await this.plugin.renderScoreDashboard(dashboard, { isMarkdown: false });
+    await this.refresh();
+  }
+
+  async refresh() {
+    if (this.dashboardEl) {
+      await this.plugin.renderScoreDashboard(this.dashboardEl, { isMarkdown: false });
+    }
   }
 
   async onClose() {
+    this.dashboardEl = null;
     this.contentEl.empty();
   }
 };
@@ -399,8 +405,16 @@ var BangumiManagerPlugin = class extends Plugin {
       noteUtils.hasBaseView;
     appendSeasonView =
       noteUtils.appendSeasonView;
+    updateWatchedEpisodes =
+      noteUtils.updateWatchedEpisodes;
+    updateCalloutTableRow =
+      noteUtils.updateCalloutTableRow;
+    addNoteTag =
+      noteUtils.addNoteTag;
+    removeNoteTag =
+      noteUtils.removeNoteTag;
 
-this.addSettingTab(
+    this.addSettingTab(
       new BangumiManagerSettingTab(
         this.app,
         this
@@ -1781,7 +1795,8 @@ if (this.settings.seasonViewMode === "current") {
         year: cleanValue(parsed.fields.开播年份),
         season: cleanValue(parsed.fields.开播季度),
         tags: rawTags,
-        totalEpisodes: cleanValue(parsed.fields.总集数)
+        totalEpisodes: cleanValue(parsed.fields.总集数),
+        watchedEpisodes: extractWatchedEpisodes(content)
       });
     }
 
@@ -1855,10 +1870,20 @@ if (this.settings.seasonViewMode === "current") {
 
         const scoreValue = item[scoreKey];
 
-        titleRow.createDiv({
+        const scoreEl = titleRow.createDiv({
           text: scoreValue.toFixed(1),
           cls: "bangumi-dashboard-score"
         });
+
+        if (scoreKey === "personalScore") {
+          scoreEl.addClass("is-interactive");
+          scoreEl.title = "点击修改个人评分";
+          scoreEl.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.openScoreMenu(e, item);
+          };
+        }
 
         const track = content.createDiv(
           "bangumi-dashboard-bar-track"
@@ -2316,13 +2341,20 @@ if (this.settings.seasonViewMode === "current") {
 
       const posterWrap = card.createDiv("bangumi-grid-poster-wrap");
 
-      if (item.state && item.state !== "未设置") {
-        posterWrap.createDiv({
-          cls: `bangumi-grid-state-badge is-${item.state}`,
-          text: item.state
-        });
-      }
+      // 1. 观看状态徽章（点击弹出菜单直接切换状态）
+      const currentState = item.state || "未设置";
+      const stateBadge = posterWrap.createDiv({
+        cls: `bangumi-grid-state-badge is-${currentState} is-interactive`,
+        text: currentState
+      });
+      stateBadge.title = "点击快速切换观看状态";
+      stateBadge.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openStateMenu(e, item);
+      };
 
+      // 2. 评分徽章（点击弹出打分菜单）
       let scoreBadgeText = "";
       if (item.personalScore !== null) {
         scoreBadgeText = `★ ${item.personalScore.toFixed(1)}`;
@@ -2330,15 +2362,22 @@ if (this.settings.seasonViewMode === "current") {
         scoreBadgeText = `BGM ${item.bangumiScore.toFixed(1)}`;
       } else if (item.preciseScore !== null) {
         scoreBadgeText = `BGM ${item.preciseScore.toFixed(1)}`;
+      } else {
+        scoreBadgeText = "★ 评分";
       }
 
-      if (scoreBadgeText) {
-        posterWrap.createDiv({
-          cls: "bangumi-grid-score-badge",
-          text: scoreBadgeText
-        });
-      }
+      const scoreBadge = posterWrap.createDiv({
+        cls: "bangumi-grid-score-badge is-interactive",
+        text: scoreBadgeText
+      });
+      scoreBadge.title = "点击快速打分 / 修改个人评分";
+      scoreBadge.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openScoreMenu(e, item);
+      };
 
+      // 封面海报
       const coverUrl = this.getCoverResourceUrl(item.cover, item.file.path);
       if (coverUrl) {
         const img = posterWrap.createEl("img", {
@@ -2356,6 +2395,62 @@ if (this.settings.seasonViewMode === "current") {
         this.renderPosterPlaceholder(posterWrap, item);
       }
 
+      // 3. 追番轻量微操作条（方案 A：微操作条常驻海报底部，[-1]、话数点击、[+1]）
+      const epBar = posterWrap.createDiv("bangumi-grid-ep-bar");
+
+      const btnDec = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-dec",
+        text: "−"
+      });
+      btnDec.title = "已看集数 -1";
+      btnDec.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        if (current > 0) {
+          const next = current - 1;
+          await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+          new Notice(`《${item.name}》已看集数调整为：${next} 话`);
+        }
+      };
+
+      const watched = item.watchedEpisodes !== null && item.watchedEpisodes !== undefined ? Number(item.watchedEpisodes) : 0;
+      const totalNum = Number(item.totalEpisodes);
+      const epLabelText = totalNum > 0 ? `${watched}/${totalNum}话` : `${watched}话`;
+
+      const epLabel = epBar.createDiv({
+        cls: "bangumi-grid-ep-label",
+        text: epLabelText
+      });
+      epLabel.title = "点击直接输入观看集数";
+      epLabel.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new SetEpisodesModal(this.app, this, item).open();
+      };
+
+      const btnInc = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-inc",
+        text: "+"
+      });
+      btnInc.title = "已看集数 +1";
+      btnInc.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        const total = Number(item.totalEpisodes) || 0;
+        const next = current + 1;
+        const updates = { watchedEpisodes: next };
+        let msg = `《${item.name}》已看集数递增至：${next} 话`;
+        if (total > 0 && next >= total && item.state !== "已看") {
+          updates.state = "已看";
+          msg += `（全部看完，已自动设为“已看”）`;
+        }
+        await this.quickUpdateAnimeNote(item, updates);
+        new Notice(msg);
+      };
+
+      // 4. 信息区
       const info = card.createDiv("bangumi-grid-info");
       const title = info.createDiv({
         cls: "bangumi-grid-title",
@@ -2366,14 +2461,45 @@ if (this.settings.seasonViewMode === "current") {
       const metaParts = [];
       if (item.year) metaParts.push(item.year);
       if (item.season) metaParts.push(item.season);
-      if (metaParts.length === 0 && item.tags) {
-        metaParts.push(String(item.tags).split(/[,;]/)[0].trim());
-      }
 
       info.createDiv({
         cls: "bangumi-grid-meta",
         text: metaParts.join(" · ") || " "
       });
+
+      // 5. 标签栏（支持点击删除、快速打标）
+      const tagsRow = info.createDiv("bangumi-grid-tags-row");
+      const tagTokens = String(item.tags || "")
+        .split(/[,;\s#\[\]"']+/)
+        .map((t) => t.trim())
+        .filter((t) => t && t.toLowerCase() !== "bangumi");
+
+      tagTokens.forEach((tag) => {
+        const chip = tagsRow.createDiv("bangumi-grid-tag-chip");
+        chip.createSpan({ text: `#${tag}` });
+        const delBtn = chip.createSpan({
+          cls: "bangumi-grid-tag-del",
+          text: "×"
+        });
+        delBtn.title = `移除标签 #${tag}`;
+        delBtn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await this.quickUpdateAnimeNote(item, { removeTag: tag });
+          new Notice(`已从《${item.name}》移除标签 #${tag}`);
+        };
+      });
+
+      const addTagBtn = tagsRow.createEl("button", {
+        cls: "bangumi-grid-add-tag-btn",
+        text: "+"
+      });
+      addTagBtn.title = "添加标签";
+      addTagBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new QuickAddTagModal(this.app, this, item).open();
+      };
     }
   }
 
@@ -2431,44 +2557,112 @@ if (this.settings.seasonViewMode === "current") {
         ? item[primaryKey]
         : (isBgmSort && item.preciseScore !== null ? item.preciseScore : null);
 
-      if (primaryScore !== null) {
-        titleRow.createDiv({
-          text: primaryScore.toFixed(1),
-          cls: "bangumi-dashboard-score"
-        });
+      const scoreEl = titleRow.createDiv({
+        text: primaryScore !== null ? primaryScore.toFixed(1) : "未评分",
+        cls: `bangumi-dashboard-score ${primaryScore === null ? "bangumi-dashboard-score-none" : ""}`
+      });
 
+      if (!isBgmSort) {
+        scoreEl.addClass("is-interactive");
+        scoreEl.title = "点击快速打分 / 修改个人评分";
+        scoreEl.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this.openScoreMenu(e, item);
+        };
+      }
+
+      if (primaryScore !== null) {
         const track = content.createDiv("bangumi-dashboard-bar-track");
         const bar = track.createDiv("bangumi-dashboard-bar");
         bar.style.width = Math.min(100, Math.max(0, (primaryScore / 10) * 100)) + "%";
-      } else {
-        titleRow.createDiv({
-          text: "未评分",
-          cls: "bangumi-dashboard-score bangumi-dashboard-score-none"
-        });
       }
 
-      const metaParts = [];
+      const metaRow = content.createDiv("bangumi-dashboard-rank-meta");
+
+      // 交互式状态微标
+      const statePill = metaRow.createSpan({
+        cls: `bangumi-list-state-pill is-${item.state || "未设置"}`,
+        text: item.state || "未设置"
+      });
+      statePill.title = "点击快速切换观看状态";
+      statePill.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openStateMenu(e, item);
+      };
+
+      // 集数微控组件
+      const epControl = metaRow.createSpan("bangumi-list-ep-control");
+      const btnListDec = epControl.createEl("button", {
+        cls: "bangumi-list-ep-btn is-dec",
+        text: "−"
+      });
+      btnListDec.title = "已看集数 -1";
+      btnListDec.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        if (current > 0) {
+          const next = current - 1;
+          await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+          new Notice(`《${item.name}》已看集数调整为：${next} 话`);
+        }
+      };
+
+      const watched = item.watchedEpisodes !== null && item.watchedEpisodes !== undefined ? Number(item.watchedEpisodes) : 0;
+      const totalNum = Number(item.totalEpisodes);
+      const epLabel = epControl.createSpan({
+        cls: "bangumi-list-ep-label",
+        text: totalNum > 0 ? ` ${watched}/${totalNum}话 ` : ` ${watched}话 `
+      });
+      epLabel.title = "点击直接输入观看集数";
+      epLabel.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new SetEpisodesModal(this.app, this, item).open();
+      };
+
+      const btnListInc = epControl.createEl("button", {
+        cls: "bangumi-list-ep-btn is-inc",
+        text: "+"
+      });
+      btnListInc.title = "已看集数 +1";
+      btnListInc.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        const total = Number(item.totalEpisodes) || 0;
+        const next = current + 1;
+        const updates = { watchedEpisodes: next };
+        let msg = `《${item.name}》已看集数递增至：${next} 话`;
+        if (total > 0 && next >= total && item.state !== "已看") {
+          updates.state = "已看";
+          msg += `（全部看完，已自动设为“已看”）`;
+        }
+        await this.quickUpdateAnimeNote(item, updates);
+        new Notice(msg);
+      };
+
       const secondaryScore = item[secondaryKey] !== null
         ? item[secondaryKey]
         : (!isBgmSort && item.preciseScore !== null ? item.preciseScore : null);
 
+      const metaParts = [];
       if (secondaryScore !== null) {
         metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + secondaryScore.toFixed(1));
       } else {
         metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + "未评分");
       }
-
-      if (item.state && item.state !== "未设置") {
-        metaParts.push(`状态：${item.state}`);
-      }
       if (item.year || item.season) {
         metaParts.push([item.year, item.season].filter(Boolean).join(" "));
       }
 
-      content.createDiv({
-        text: metaParts.join(" | "),
-        cls: "bangumi-dashboard-rank-meta"
-      });
+      if (metaParts.length > 0) {
+        metaRow.createSpan({
+          text: " · " + metaParts.join(" · ")
+        });
+      }
     });
   }
 
@@ -2500,6 +2694,175 @@ if (this.settings.seasonViewMode === "current") {
       }
       new Notice(`已删除自定义分区“${section.title}”。`);
     }).open();
+  }
+
+  async quickUpdateAnimeNote(item, updates) {
+    if (!item || !item.file) return false;
+    try {
+      const file = item.file;
+      const content = await this.app.vault.read(file);
+      let newContent = content;
+
+      if (updates.watchedEpisodes !== undefined) {
+        newContent = updateWatchedEpisodes(newContent, updates.watchedEpisodes);
+        const parsed = parseFrontmatter(newContent);
+        if (parsed && parsed.fields && "已观看集数" in parsed.fields) {
+          newContent = updateFrontmatterField(newContent, "已观看集数", String(updates.watchedEpisodes));
+        }
+      }
+
+      if (updates.state !== undefined) {
+        newContent = updateFrontmatterField(newContent, "观看状态", updates.state);
+        newContent = updateCalloutTableRow(newContent, "观看状态", updates.state);
+      }
+
+      if (updates.score !== undefined) {
+        const scoreStr = updates.score === null || updates.score === "未评分" ? "未评分" : String(updates.score);
+        newContent = updateFrontmatterField(newContent, "我的评分", scoreStr);
+        newContent = updateCalloutTableRow(newContent, "我的评分", scoreStr);
+      }
+
+      if (updates.addTag) {
+        newContent = addNoteTag(newContent, updates.addTag);
+      }
+
+      if (updates.removeTag) {
+        newContent = removeNoteTag(newContent, updates.removeTag);
+      }
+
+      if (newContent !== content) {
+        await this.app.vault.modify(file, newContent);
+      }
+
+      if (updates.watchedEpisodes !== undefined) {
+        item.watchedEpisodes = updates.watchedEpisodes;
+      }
+      if (updates.state !== undefined) {
+        item.state = updates.state;
+      }
+      if (updates.score !== undefined) {
+        item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+      }
+      if (updates.addTag || updates.removeTag) {
+        const parsedAfter = parseFrontmatter(newContent);
+        if (parsedAfter) {
+          item.tags = cleanValue(parsedAfter.fields.tags);
+        }
+      }
+
+      await this.refreshOpenDashboardViews();
+      return true;
+    } catch (err) {
+      console.error("[Bangumi Manager] 快捷修改动画笔记失败:", err);
+      new Notice(`修改笔记失败: ${err.message}`);
+      return false;
+    }
+  }
+
+  async refreshOpenDashboardViews() {
+    const leaves = this.app.workspace.getLeavesOfType(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE);
+    for (const leaf of leaves) {
+      if (leaf.view && typeof leaf.view.refresh === "function") {
+        await leaf.view.refresh();
+      }
+    }
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      const domDashboards = document.querySelectorAll(
+        ".bangumi-score-dashboard[data-markdown-dashboard='true'], [data-bangumi-dashboard='true']"
+      );
+      for (const el of domDashboards) {
+        if (el) {
+          await this.renderScoreDashboard(el, el._dashboardOptions || { isMarkdown: true });
+        }
+      }
+    }
+  }
+
+  openStateMenu(event, item) {
+    if (!item) return;
+    const menu = new Menu();
+
+    const states = [
+      { id: "想看", icon: "bookmark" },
+      { id: "在看", icon: "play" },
+      { id: "已看", icon: "check-circle" },
+      { id: "抛弃", icon: "x-circle" },
+      { id: "未设置", icon: "minus" }
+    ];
+
+    states.forEach(({ id, icon }) => {
+      menu.addItem((menuItem) => {
+        menuItem
+          .setTitle(id)
+          .setIcon(icon)
+          .setChecked(item.state === id)
+          .onClick(async () => {
+            if (item.state !== id) {
+              await this.quickUpdateAnimeNote(item, { state: id });
+              new Notice(`已将《${item.name}》状态切换为：${id}`);
+            }
+          });
+      });
+    });
+
+    if (event && event.nativeEvent instanceof MouseEvent) {
+      menu.showAtMouseEvent(event.nativeEvent);
+    } else if (event instanceof MouseEvent) {
+      menu.showAtMouseEvent(event);
+    } else if (event && typeof event.clientX === "number") {
+      menu.showAtPosition({ x: event.clientX, y: event.clientY });
+    }
+  }
+
+  openScoreMenu(event, item) {
+    if (!item) return;
+    const menu = new Menu();
+
+    const scores = [
+      { score: 10, label: "10 分 (★★★★★ 极佳)" },
+      { score: 9, label: "9 分 (★★★★☆ 优秀)" },
+      { score: 8, label: "8 分 (★★★★ 推荐)" },
+      { score: 7, label: "7 分 (★★★☆ 良好)" },
+      { score: 6, label: "6 分 (★★★ 尚可)" },
+      { score: 5, label: "5 分 (★★☆ 勉强)" },
+      { score: 4, label: "4 分 (★★ 较差)" },
+      { score: 3, label: "3 分 (★☆ 差)" },
+      { score: 2, label: "2 分 (★ 很差)" },
+      { score: 1, label: "1 分 (☆ 不忍直视)" }
+    ];
+
+    scores.forEach(({ score, label }) => {
+      menu.addItem((menuItem) => {
+        menuItem
+          .setTitle(label)
+          .setChecked(item.personalScore === score)
+          .onClick(async () => {
+            await this.quickUpdateAnimeNote(item, { score });
+            new Notice(`已更新《${item.name}》个人评分为：${score} 分`);
+          });
+      });
+    });
+
+    menu.addSeparator();
+
+    menu.addItem((menuItem) => {
+      menuItem
+        .setTitle("清除评分 (设为未评分)")
+        .setIcon("trash-2")
+        .setChecked(item.personalScore === null)
+        .onClick(async () => {
+          await this.quickUpdateAnimeNote(item, { score: "未评分" });
+          new Notice(`已清除《${item.name}》个人评分`);
+        });
+    });
+
+    if (event && event.nativeEvent instanceof MouseEvent) {
+      menu.showAtMouseEvent(event.nativeEvent);
+    } else if (event instanceof MouseEvent) {
+      menu.showAtMouseEvent(event);
+    } else if (event && typeof event.clientX === "number") {
+      menu.showAtPosition({ x: event.clientX, y: event.clientY });
+    }
   }
 
   createDashboardSection(parentContainer, {
@@ -2661,6 +3024,10 @@ if (this.settings.seasonViewMode === "current") {
   async renderScoreDashboard(container, options = {}) {
     container.empty();
     const isMarkdown = Boolean(options && options.isMarkdown);
+    if (isMarkdown) {
+      container.dataset.markdownDashboard = "true";
+      container._dashboardOptions = options;
+    }
 
     const items = await this.collectDashboardItems();
 
@@ -3173,6 +3540,9 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   registerScoreDashboardStyles() {
+    if (typeof document === "undefined") {
+      return;
+    }
     const styleId =
       "bangumi-score-dashboard-style";
 
@@ -3266,14 +3636,42 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-grid-poster-icon{font-size:24px;margin-bottom:4px;opacity:.7;}",
       ".bangumi-grid-poster-text{font-size:.76em;line-height:1.25;max-height:3em;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}",
       ".bangumi-grid-state-badge{position:absolute;top:6px;left:6px;padding:2px 6px;font-size:.72em;font-weight:600;border-radius:4px;background:rgba(0,0,0,.68);color:#fff;backdrop-filter:blur(4px);z-index:2;pointer-events:none;}",
-      ".bangumi-grid-state-badge.is-已看{background:rgba(40,167,69,.8);}",
-      ".bangumi-grid-state-badge.is-在看{background:rgba(0,123,255,.8);}",
-      ".bangumi-grid-state-badge.is-想看{background:rgba(255,153,0,.8);}",
-      ".bangumi-grid-state-badge.is-抛弃{background:rgba(108,117,125,.8);}",
+      ".bangumi-grid-state-badge.is-interactive{pointer-events:auto;cursor:pointer;transition:transform .12s ease,filter .12s ease;}",
+      ".bangumi-grid-state-badge.is-interactive:hover{transform:scale(1.06);filter:brightness(1.15);}",
+      ".bangumi-grid-state-badge.is-已看{background:rgba(40,167,69,.85);}",
+      ".bangumi-grid-state-badge.is-在看{background:rgba(0,123,255,.85);}",
+      ".bangumi-grid-state-badge.is-想看{background:rgba(255,153,0,.85);}",
+      ".bangumi-grid-state-badge.is-抛弃{background:rgba(108,117,125,.85);}",
+      ".bangumi-grid-state-badge.is-未设置{background:rgba(80,80,80,.75);}",
       ".bangumi-grid-score-badge{position:absolute;top:6px;right:6px;padding:2px 6px;font-size:.75em;font-weight:700;border-radius:4px;background:var(--interactive-accent);color:var(--text-on-accent);box-shadow:0 2px 4px rgba(0,0,0,.2);z-index:2;pointer-events:none;font-variant-numeric:tabular-nums;}",
+      ".bangumi-grid-score-badge.is-interactive{pointer-events:auto;cursor:pointer;transition:transform .12s ease,filter .12s ease;}",
+      ".bangumi-grid-score-badge.is-interactive:hover{transform:scale(1.06);filter:brightness(1.15);}",
+      ".bangumi-grid-ep-bar{position:absolute;bottom:0;left:0;right:0;height:26px;display:flex;align-items:center;justify-content:space-between;padding:0 5px;background:linear-gradient(180deg,rgba(0,0,0,0.3) 0%,rgba(0,0,0,0.85) 100%);backdrop-filter:blur(3px);color:#fff;font-size:11px;z-index:3;}",
+      ".bangumi-grid-ep-btn{cursor:pointer;width:20px;height:20px;padding:0;border:1px solid rgba(255,255,255,0.28);border-radius:3px;background:rgba(255,255,255,0.18);color:#fff;font-size:13px;font-weight:bold;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background-color .12s ease,border-color .12s ease;}",
+      ".bangumi-grid-ep-btn:hover{background:var(--interactive-accent);border-color:var(--interactive-accent);}",
+      ".bangumi-grid-ep-label{cursor:pointer;font-family:var(--font-monospace);white-space:nowrap;padding:0 3px;text-shadow:0 1px 2px rgba(0,0,0,0.85);font-weight:500;transition:color .12s ease;}",
+      ".bangumi-grid-ep-label:hover{color:var(--text-accent);text-decoration:underline;}",
       ".bangumi-grid-info{padding:8px 10px 10px;display:flex;flex-direction:column;min-width:0;}",
       ".bangumi-grid-title{font-size:.88em;font-weight:600;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35;}",
       ".bangumi-grid-meta{font-size:.76em;color:var(--text-muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+      ".bangumi-grid-tags-row{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;align-items:center;}",
+      ".bangumi-grid-tag-chip{font-size:10px;padding:1px 5px;border-radius:3px;background:var(--background-secondary-alt);color:var(--text-muted);border:1px solid var(--background-modifier-border);display:inline-flex;align-items:center;gap:2px;line-height:1.2;}",
+      ".bangumi-grid-tag-del{cursor:pointer;color:var(--text-muted);margin-left:2px;transition:color .12s ease;}",
+      ".bangumi-grid-tag-del:hover{color:var(--text-error);font-weight:bold;}",
+      ".bangumi-grid-add-tag-btn{font-size:11px;padding:0 5px;height:18px;border-radius:3px;border:1px dashed var(--background-modifier-border);background:transparent;color:var(--text-muted);cursor:pointer;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:all .12s ease;}",
+      ".bangumi-grid-add-tag-btn:hover{border-color:var(--interactive-accent);color:var(--interactive-accent);}",
+      ".bangumi-list-state-pill{display:inline-block;padding:1px 6px;border-radius:3px;font-size:11px;cursor:pointer;background:var(--background-secondary-alt);border:1px solid var(--background-modifier-border);color:var(--text-muted);margin-right:4px;transition:opacity .12s ease;}",
+      ".bangumi-list-state-pill:hover{opacity:.85;border-color:var(--interactive-accent);color:var(--interactive-accent);}",
+      ".bangumi-list-ep-control{display:inline-flex;align-items:center;gap:3px;margin:0 4px;font-size:11px;vertical-align:middle;}",
+      ".bangumi-list-ep-btn{width:18px;height:18px;padding:0;border:1px solid var(--background-modifier-border);border-radius:3px;background:var(--background-secondary);color:var(--text-muted);font-size:12px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:all .12s ease;}",
+      ".bangumi-list-ep-btn:hover{background:var(--interactive-accent);border-color:var(--interactive-accent);color:var(--text-on-accent);}",
+      ".bangumi-list-ep-label{cursor:pointer;font-family:var(--font-monospace);padding:0 2px;}",
+      ".bangumi-list-ep-label:hover{color:var(--text-accent);text-decoration:underline;}",
+      ".bangumi-dashboard-score.is-interactive{cursor:pointer;transition:transform .12s ease,opacity .12s ease;}",
+      ".bangumi-dashboard-score.is-interactive:hover{opacity:.85;transform:scale(1.05);}",
+      ".bangumi-modal-subtitle{color:var(--text-muted);font-size:.9em;margin:-8px 0 16px;}",
+      ".bangumi-ep-shortcuts button{cursor:pointer;font-size:.85em;padding:4px 10px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);transition:all .12s ease;}",
+      ".bangumi-ep-shortcuts button:hover{background:var(--background-modifier-hover);border-color:var(--interactive-accent);color:var(--interactive-accent);}",
       ".bangumi-custom-query-modal .setting-item{padding:10px 0;}",
       ".bangumi-score-dashboard-view{padding:0 18px 24px;overflow:auto;}",
       ".bangumi-dashboard-view-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 0 10px;}",
@@ -4538,6 +4936,192 @@ var CustomQuerySectionModal = class extends Modal {
       }
 
       new Notice(isEdit ? `已更新分区“${formData.title}”。` : `已创建分区“${formData.title}”。`);
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var SetEpisodesModal = class extends Modal {
+  constructor(app, plugin, item, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.item = item;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bangumi-set-episodes-modal");
+
+    contentEl.createEl("h2", { text: "设置观看集数" });
+    contentEl.createDiv({
+      cls: "bangumi-modal-subtitle",
+      text: `《${this.item.name}》`
+    });
+
+    const currentWatched = Number(this.item.watchedEpisodes) || 0;
+    const total = Number(this.item.totalEpisodes) || 0;
+
+    let targetCount = currentWatched;
+
+    new Setting(contentEl)
+      .setName("已观看集数")
+      .setDesc(total > 0 ? `当前进度：${currentWatched} / ${total} 话` : `当前进度：${currentWatched} 话`)
+      .addText((text) => {
+        text.inputEl.type = "number";
+        text.inputEl.min = "0";
+        if (total > 0) text.inputEl.max = String(total * 2);
+        text.setValue(String(targetCount));
+        text.onChange((val) => {
+          const num = parseInt(val, 10);
+          if (!isNaN(num) && num >= 0) {
+            targetCount = num;
+          }
+        });
+        this.inputComponent = text;
+        setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    const shortcuts = contentEl.createDiv("bangumi-ep-shortcuts");
+    shortcuts.style.display = "flex";
+    shortcuts.style.gap = "8px";
+    shortcuts.style.marginTop = "12px";
+    shortcuts.style.flexWrap = "wrap";
+
+    const updateInputValue = (val) => {
+      targetCount = Math.max(0, val);
+      if (this.inputComponent) {
+        this.inputComponent.setValue(String(targetCount));
+      }
+    };
+
+    const btnPlus1 = shortcuts.createEl("button", { text: "+1 话" });
+    btnPlus1.onclick = () => updateInputValue(targetCount + 1);
+
+    const btnPlus2 = shortcuts.createEl("button", { text: "+2 话" });
+    btnPlus2.onclick = () => updateInputValue(targetCount + 2);
+
+    if (total > 0) {
+      const btnAll = shortcuts.createEl("button", { text: `全看完 (${total}话)` });
+      btnAll.onclick = () => updateInputValue(total);
+    }
+
+    const btnZero = shortcuts.createEl("button", { text: "重置为 0" });
+    btnZero.onclick = () => updateInputValue(0);
+
+    const footer = contentEl.createDiv("bangumi-modal-footer");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "24px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const saveBtn = footer.createEl("button", {
+      text: "保存进度",
+      cls: "mod-cta"
+    });
+
+    saveBtn.onclick = async () => {
+      const count = Math.max(0, parseInt(targetCount, 10) || 0);
+      const updates = { watchedEpisodes: count };
+      let noticeMsg = `《${this.item.name}》已看集数已更新为：${count} 话`;
+
+      if (total > 0 && count >= total && this.item.state !== "已看") {
+        updates.state = "已看";
+        noticeMsg += `（全部看完，已自动设为“已看”）`;
+      }
+
+      await this.plugin.quickUpdateAnimeNote(this.item, updates);
+      this.close();
+      if (typeof this.onSave === "function") {
+        await this.onSave(count);
+      }
+      new Notice(noticeMsg);
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var QuickAddTagModal = class extends Modal {
+  constructor(app, plugin, item, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.item = item;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bangumi-quick-add-tag-modal");
+
+    contentEl.createEl("h2", { text: "添加标签" });
+    contentEl.createDiv({
+      cls: "bangumi-modal-subtitle",
+      text: `《${this.item.name}》`
+    });
+
+    let newTag = "";
+
+    new Setting(contentEl)
+      .setName("新标签名称")
+      .setDesc("输入要添加的标签（支持以空格或逗号添加多个，如：百合 原创）")
+      .addText((text) => {
+        text.setPlaceholder("如：百合、萌系、硬核推理...");
+        text.onChange((val) => {
+          newTag = val;
+        });
+        text.inputEl.addEventListener("keydown", async (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            await doSave();
+          }
+        });
+        setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    const footer = contentEl.createDiv("bangumi-modal-footer");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "20px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const saveBtn = footer.createEl("button", {
+      text: "添加标签",
+      cls: "mod-cta"
+    });
+
+    const doSave = async () => {
+      const clean = String(newTag || "").trim();
+      if (!clean) {
+        new Notice("请输入标签名称！");
+        return;
+      }
+      const tags = clean.split(/[,;\s#]+/).filter(Boolean);
+      for (const t of tags) {
+        await this.plugin.quickUpdateAnimeNote(this.item, { addTag: t });
+      }
+      this.close();
+      if (typeof this.onSave === "function") {
+        await this.onSave(tags);
+      }
+      new Notice(`已为《${this.item.name}》添加标签：#${tags.join(" #")}`);
+    };
+
+    saveBtn.onclick = async () => {
+      await doSave();
     };
   }
 

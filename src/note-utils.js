@@ -907,6 +907,66 @@ function synchronizeBangumiScoreFields(
 
 
 
+function updateWatchedEpisodes(content, count) {
+  const patterns = [
+    /(\*\*已观看集数\s*：\s*\*\*\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\s*:\s*\*\*\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\*\*\s*：\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\*\*\s*:\s*)\d+(?:\.\d+)?/
+  ];
+  for (const pattern of patterns) {
+    if (pattern.test(content)) {
+      return content.replace(pattern, `$1${count}`);
+    }
+  }
+  const parsed = parseFrontmatter(content);
+  if (parsed) {
+    return content.replace(parsed.full, parsed.full + `\n\n**已观看集数**： ${count}`);
+  }
+  return `**已观看集数**： ${count}\n\n` + content;
+}
+
+function updateCalloutTableRow(content, fieldName, newValue) {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`^(\\|\\s*${escaped}\\s*\\|)[^|\\r\\n]*(\\|)`, "m");
+  if (regex.test(content)) {
+    return content.replace(regex, `$1 ${newValue} $2`);
+  }
+  return content;
+}
+
+function addNoteTag(content, tag) {
+  const cleanTag = String(tag || "").trim().replace(/^#/, "");
+  if (!cleanTag) return content;
+  const parsed = parseFrontmatter(content);
+  if (!parsed) return content;
+
+  let existing = cleanValue(parsed.fields.tags || "");
+  const tokens = existing.split(/[,;\s#\[\]"']+/).filter(Boolean);
+  if (tokens.includes(cleanTag)) {
+    return content;
+  }
+  tokens.push(cleanTag);
+  const newTags = tokens.join(", ");
+  return updateFrontmatterField(content, "tags", newTags);
+}
+
+function removeNoteTag(content, tag) {
+  const cleanTag = String(tag || "").trim().replace(/^#/, "");
+  if (!cleanTag || cleanTag.toLowerCase() === "bangumi") return content;
+  const parsed = parseFrontmatter(content);
+  if (!parsed) return content;
+
+  let existing = cleanValue(parsed.fields.tags || "");
+  const tokens = existing.split(/[,;\s#\[\]"']+/).filter(Boolean);
+  const remaining = tokens.filter((t) => t !== cleanTag);
+  if (remaining.length === tokens.length) {
+    return content;
+  }
+  const newTags = remaining.join(", ");
+  return updateFrontmatterField(content, "tags", newTags);
+}
+
 module.exports = {
   cleanValue,
   parseFrontmatter,
@@ -925,5 +985,9 @@ module.exports = {
   extractBaseViewNames,
   removeBaseViews,
   hasBaseView,
-  appendSeasonView
+  appendSeasonView,
+  updateWatchedEpisodes,
+  updateCalloutTableRow,
+  addNoteTag,
+  removeNoteTag
 };
