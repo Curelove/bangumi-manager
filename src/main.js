@@ -47,6 +47,7 @@ let {
 
 const netabaTrendService = require("./netaba-trend-service.js");
 const NetabaTrendModal = netabaTrendService.createNetabaTrendModalClass({ Modal, Notice });
+const { Dashboard3DSpace } = require("./dashboard-3d-view.js");
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -57,6 +58,7 @@ const createNetabaModals = require("./netaba-modals.js");
 
 var DEFAULT_SETTINGS = {
   mode: "lazy",
+  dashboard3dPerfMode: "medium",
   noteRootFolder: "动画笔记",
   coverFolder: "\u9644\u4EF6/Bangumi Images",
   baseFilePath: "动画笔记/追番广场/动画库.base",
@@ -215,10 +217,39 @@ var BangumiScoreDashboardView = class extends ItemView {
       text: "打开 Markdown"
     });
 
+    const toggle3DBtn = controls.createEl("button", {
+      text: "🧊 3D 档案空间",
+      cls: "mod-cta"
+    });
+    this.toggle3DBtn = toggle3DBtn;
+
     const dashboard = this.contentEl.createDiv(
       "bangumi-score-dashboard"
     );
     this.dashboardEl = dashboard;
+
+    toggle3DBtn.onclick = async () => {
+      if (this.space3DInstance) {
+        this.destroy3D();
+        this.dashboardEl.style.display = "";
+        toggle3DBtn.textContent = "🧊 3D 档案空间";
+        toggle3DBtn.classList.add("mod-cta");
+        await this.refresh();
+      } else {
+        this.dashboardEl.style.display = "none";
+        toggle3DBtn.textContent = "🔲 返回 2D 仪表盘";
+        toggle3DBtn.classList.remove("mod-cta");
+        const items = await this.plugin.collectDashboardItems();
+        this.space3DContainer = this.contentEl.createDiv("bangumi-3d-wrapper");
+        this.space3DInstance = new Dashboard3DSpace(this.space3DContainer, this.plugin, {
+          items,
+          filterMode: "watching"
+        });
+        this.space3DInstance.onExit3D = () => {
+          toggle3DBtn.click();
+        };
+      }
+    };
 
     addSectionButton.onclick = () => {
       this.plugin.openCustomQuerySectionModal(null, async () => {
@@ -257,13 +288,25 @@ var BangumiScoreDashboardView = class extends ItemView {
     await this.refresh();
   }
 
+  destroy3D() {
+    if (this.space3DInstance) {
+      this.space3DInstance.destroy();
+      this.space3DInstance = null;
+    }
+    if (this.space3DContainer) {
+      this.space3DContainer.remove();
+      this.space3DContainer = null;
+    }
+  }
+
   async refresh() {
-    if (this.dashboardEl) {
+    if (this.dashboardEl && !this.space3DInstance) {
       await this.plugin.renderScoreDashboard(this.dashboardEl, { isMarkdown: false });
     }
   }
 
   async onClose() {
+    this.destroy3D();
     this.dashboardEl = null;
     this.contentEl.empty();
   }
@@ -486,6 +529,21 @@ var BangumiManagerPlugin = class extends Plugin {
       name: "打开动画仪表盘",
       callback: async () => {
         await this.openScoreDashboardView();
+      }
+    });
+
+    this.addCommand({
+      id: "open-bangumi-3d-space",
+      name: "打开 3D 交互式动画档案空间",
+      callback: async () => {
+        await this.openScoreDashboardView();
+        const leaves = this.app.workspace.getLeavesOfType(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE);
+        if (leaves.length > 0 && leaves[0].view) {
+          const view = leaves[0].view;
+          if (view.toggle3DBtn && !view.space3DInstance) {
+            view.toggle3DBtn.click();
+          }
+        }
       }
     });
 
@@ -5418,7 +5476,36 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-local-action-btn.is-play{background:var(--interactive-accent);color:#fff;border-color:var(--interactive-accent);font-weight:600;}",
       ".bangumi-local-action-btn.is-play:hover{filter:brightness(1.1);}",
       ".bangumi-local-action-btn.is-folder:hover{background:var(--background-modifier-hover);}",
-      ".bangumi-grid-ep-btn.is-trend{margin-left:auto;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);font-size:.78em;padding:2px 6px;}"
+      ".bangumi-grid-ep-btn.is-trend{margin-left:auto;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);font-size:.78em;padding:2px 6px;}",
+      ".bangumi-3d-wrapper{width:100%;height:100%;min-height:640px;position:relative;}",
+      ".bangumi-3d-toolbar{position:absolute;top:12px;left:16px;right:16px;display:flex;justify-content:space-between;align-items:center;z-index:10;pointer-events:none;}",
+      ".toolbar-section-left,.toolbar-section-right{display:flex;align-items:center;gap:10px;pointer-events:auto;}",
+      ".bangumi-3d-btn{background:rgba(22,25,31,0.85);backdrop-filter:blur(8px);border:1px solid var(--background-modifier-border);color:var(--text-normal);padding:5px 12px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s ease;}",
+      ".bangumi-3d-btn:hover{background:var(--interactive-accent);color:#fff;border-color:var(--interactive-accent);}",
+      ".bangumi-3d-title-badge{font-size:12px;font-weight:700;letter-spacing:1px;padding:4px 10px;border-radius:6px;background:rgba(0,123,255,0.18);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.3);backdrop-filter:blur(8px);}",
+      ".bangumi-3d-select{background:rgba(22,25,31,0.85);backdrop-filter:blur(8px);border:1px solid var(--background-modifier-border);color:var(--text-normal);padding:4px 8px;border-radius:6px;font-size:12px;outline:none;}",
+      ".bangumi-3d-perf-group{display:flex;background:rgba(22,25,31,0.85);backdrop-filter:blur(8px);border:1px solid var(--background-modifier-border);border-radius:6px;overflow:hidden;padding:2px;}",
+      ".bangumi-perf-btn{background:transparent;border:0;color:var(--text-muted);font-size:11px;padding:3px 8px;cursor:pointer;border-radius:4px;transition:all .15s ease;}",
+      ".bangumi-perf-btn.is-active{background:var(--interactive-accent);color:#fff;font-weight:600;}",
+      ".bangumi-3d-status-pill{position:absolute;bottom:14px;right:18px;font-size:11px;padding:3px 10px;border-radius:999px;background:rgba(20,24,30,0.8);backdrop-filter:blur(6px);border:1px solid var(--background-modifier-border);color:var(--text-muted);z-index:10;pointer-events:none;}",
+      ".bangumi-3d-status-pill.is-sleeping{color:var(--text-accent, #e5a00d);border-color:rgba(229,160,13,0.3);}",
+      ".bangumi-3d-hud-panel{position:absolute;top:70px;left:24px;width:300px;background:rgba(18,21,26,0.88);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);box-shadow:0 12px 32px rgba(0,0,0,0.4);border-radius:12px;padding:16px;pointer-events:auto;color:#fff;animation:hudFadeIn .25s ease;}",
+      "@keyframes hudFadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}",
+      ".hud-title{font-size:16px;font-weight:700;line-height:1.3;margin-bottom:4px;color:#fff;}",
+      ".hud-sub{font-size:12px;color:var(--text-muted);margin-bottom:12px;}",
+      ".hud-score-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;}",
+      ".hud-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;}",
+      ".hud-pill.is-personal{background:rgba(255,193,7,0.18);color:#ffc107;border:1px solid rgba(255,193,7,0.35);}",
+      ".hud-pill.is-bgm{background:rgba(59,130,246,0.18);color:#60a5fa;border:1px solid rgba(59,130,246,0.35);}",
+      ".hud-pill.is-state{background:rgba(255,255,255,0.1);color:#eee;}",
+      ".hud-progress-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);}",
+      ".hud-ep-label{font-size:13px;font-weight:500;}",
+      ".hud-action-btn{font-size:12px;padding:3px 10px;border-radius:6px;cursor:pointer;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);color:#fff;transition:all .15s ease;}",
+      ".hud-action-btn:hover{background:var(--interactive-accent);border-color:var(--interactive-accent);}",
+      ".hud-action-btn.is-play{background:var(--interactive-accent);border-color:var(--interactive-accent);font-weight:600;}",
+      ".hud-local-bar{display:flex;gap:8px;margin-bottom:12px;}",
+      ".hud-close-btn{width:100%;font-size:12px;padding:6px 0;border-radius:6px;cursor:pointer;background:transparent;border:1px solid rgba(255,255,255,0.15);color:var(--text-muted);margin-top:6px;transition:all .15s ease;}",
+      ".hud-close-btn:hover{background:rgba(255,255,255,0.08);color:#fff;}"
     ].join("");
 
     document.head.appendChild(style);
