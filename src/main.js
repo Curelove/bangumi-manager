@@ -40,7 +40,8 @@ let {
   updateWatchedEpisodes,
   updateCalloutTableRow,
   addNoteTag,
-  removeNoteTag
+  removeNoteTag,
+  syncNoteCalloutFromFrontmatter
 } = noteUtils;
 
 const bangumiApi = require("./bangumi-api.js");
@@ -119,7 +120,8 @@ var DEFAULT_SETTINGS = {
   dashboardSectionOrder: [],
   dashboardSectionCollapsed: {},
   dashboardSectionHidden: {},
-  customQuerySections: []
+  customQuerySections: [],
+  customCollectionSections: []
 };
 
 var DEFAULT_PRESET_QUERY_SECTION = {
@@ -188,6 +190,11 @@ var BangumiScoreDashboardView = class extends ItemView {
       cls: "mod-cta"
     });
 
+    const addCollectionButton = controls.createEl("button", {
+      text: "+ 新建收藏展柜",
+      cls: "mod-cta"
+    });
+
     const refreshButton = controls.createEl("button", {
       text: "刷新"
     });
@@ -207,6 +214,12 @@ var BangumiScoreDashboardView = class extends ItemView {
 
     addSectionButton.onclick = () => {
       this.plugin.openCustomQuerySectionModal(null, async () => {
+        await this.refresh();
+      });
+    };
+
+    addCollectionButton.onclick = () => {
+      this.plugin.openCustomCollectionModal(null, async () => {
         await this.refresh();
       });
     };
@@ -355,6 +368,12 @@ var BangumiManagerPlugin = class extends Plugin {
     if (this.settings.customQuerySections.length === 0) {
       this.settings.customQuerySections = [Object.assign({}, DEFAULT_PRESET_QUERY_SECTION)];
     }
+    if (!Array.isArray(this.settings.customCollectionSections)) {
+      this.settings.customCollectionSections = [];
+    }
+
+    this.isPluginWritingNote = new Set();
+    this.calloutSyncTimers = new Map();
 
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
@@ -562,6 +581,25 @@ var BangumiManagerPlugin = class extends Plugin {
         if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) {
           return;
         }
+        if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) {
+          return;
+        }
+
+        // Auto-sync callout from frontmatter (debounced 1200ms)
+        if (!this.calloutSyncTimers) {
+          this.calloutSyncTimers = new Map();
+        }
+        if (this.calloutSyncTimers.has(file.path)) {
+          clearTimeout(this.calloutSyncTimers.get(file.path));
+        }
+        const calloutTimer = setTimeout(async () => {
+          if (this.calloutSyncTimers) {
+            this.calloutSyncTimers.delete(file.path);
+          }
+          await this.autoSyncNoteCallout(file);
+        }, 1200);
+        this.calloutSyncTimers.set(file.path, calloutTimer);
+
         clearTimeout(this.dashboardAutoRefreshTimer);
         this.dashboardAutoRefreshTimer = setTimeout(async () => {
           await this.refreshOpenDashboardViews();
@@ -598,6 +636,13 @@ var BangumiManagerPlugin = class extends Plugin {
     this.stopStatusTimer();
     clearTimeout(this.saveCheckTimer);
     clearTimeout(this.startupTimer);
+    clearTimeout(this.dashboardAutoRefreshTimer);
+    if (this.calloutSyncTimers) {
+      for (const t of this.calloutSyncTimers.values()) {
+        clearTimeout(t);
+      }
+      this.calloutSyncTimers.clear();
+    }
 
     if (this.dashboardRibbon) {
       this.dashboardRibbon.remove();
@@ -1804,6 +1849,9 @@ if (this.settings.seasonViewMode === "current") {
         continue;
       }
 
+      const bgmLink = cleanValue(parsed.fields.BGM链接);
+      const subjectId = bangumiApi.getSubjectId(bgmLink);
+
       result.push({
         file,
         name: cleanValue(
@@ -1826,16 +1874,16 @@ if (this.settings.seasonViewMode === "current") {
             this.settings.bangumiPreciseRatingCache ||
             {}
           )[
-            bangumiApi.getSubjectId(
-              cleanValue(parsed.fields.BGM链接)
-            )
+            subjectId
           ] || parsed.fields.BGM精确评分
         ),
         year: cleanValue(parsed.fields.开播年份),
         season: cleanValue(parsed.fields.开播季度),
         tags: rawTags,
         totalEpisodes: cleanValue(parsed.fields.总集数),
-        watchedEpisodes: extractWatchedEpisodes(content)
+        watchedEpisodes: extractWatchedEpisodes(content),
+        bgmUrl: bgmLink,
+        subjectId: subjectId
       });
     }
 
@@ -2697,6 +2745,477 @@ if (this.settings.seasonViewMode === "current") {
     });
   }
 
+  renderCollectionGrid(container, items, collectionConfig, dashboardContainer, dashboardOptions) {
+    if (!items || items.length === 0) {
+      const emptyDiv = container.createDiv({
+        cls: "bangumi-dashboard-empty bangumi-collection-empty",
+        text: "展柜内暂无动画。"
+      });
+      const addBtn = emptyDiv.createEl("button", {
+        cls: "bangumi-collection-empty-add-btn",
+        text: "+ 从动画库添加作品"
+      });
+      addBtn.onclick = () => {
+        this.openCollectionItemsManagerModal(collectionConfig, async () => {
+          if (dashboardContainer) {
+            await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+          }
+        });
+      };
+      return;
+    }
+
+    const grid = container.createDiv("bangumi-dashboard-custom-grid bangumi-collection-grid");
+
+    items.forEach((item, index) => {
+      const card = grid.createDiv("bangumi-grid-card bangumi-collection-card");
+      card.dataset.filePath = item.file ? item.file.path : "";
+      card.dataset.collectionIndex = String(index);
+      card.setAttribute("draggable", "true");
+
+      card.ondragstart = (e) => {
+        e.stopPropagation();
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/collection-idx", String(index));
+        card.addClass("is-dragging");
+      };
+
+      card.ondragend = () => {
+        card.removeClass("is-dragging");
+        grid.querySelectorAll(".bangumi-collection-card").forEach((el) => {
+          el.removeClass("drag-over-indicator");
+        });
+      };
+
+      card.ondragover = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        card.addClass("drag-over-indicator");
+      };
+
+      card.ondragleave = (e) => {
+        e.stopPropagation();
+        card.removeClass("drag-over-indicator");
+      };
+
+      card.ondrop = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        card.removeClass("drag-over-indicator");
+        const sourceIdxStr = e.dataTransfer.getData("text/collection-idx");
+        if (sourceIdxStr !== "" && sourceIdxStr !== undefined) {
+          const sourceIdx = Number(sourceIdxStr);
+          const targetIdx = index;
+          if (!isNaN(sourceIdx) && sourceIdx !== targetIdx && Array.isArray(collectionConfig.items)) {
+            const [moved] = collectionConfig.items.splice(sourceIdx, 1);
+            collectionConfig.items.splice(targetIdx, 0, moved);
+            await this.saveSettings();
+            if (dashboardContainer) {
+              await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+            }
+            new Notice(`已调整《${item.name}》在展柜中的位置。`);
+          }
+        }
+      };
+
+      card.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (item.file) {
+          const leaf = this.app.workspace.getLeaf(true);
+          await leaf.openFile(item.file);
+        }
+      };
+
+      const posterWrap = card.createDiv("bangumi-grid-poster-wrap");
+
+      // 1. 观看状态徽章
+      const currentState = item.state || "未设置";
+      const stateBadge = posterWrap.createDiv({
+        cls: `bangumi-grid-state-badge is-${currentState} is-interactive`,
+        text: currentState
+      });
+      stateBadge.title = "点击快速切换观看状态";
+      stateBadge.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openStateMenu(e, item);
+      };
+
+      // 2. 评分徽章
+      let scoreBadgeText = "";
+      if (item.personalScore !== null) {
+        scoreBadgeText = `★ ${item.personalScore.toFixed(1)}`;
+      } else if (item.bangumiScore !== null) {
+        scoreBadgeText = `BGM ${item.bangumiScore.toFixed(1)}`;
+      } else if (item.preciseScore !== null) {
+        scoreBadgeText = `BGM ${item.preciseScore.toFixed(1)}`;
+      } else {
+        scoreBadgeText = "★ 评分";
+      }
+
+      const scoreBadge = posterWrap.createDiv({
+        cls: "bangumi-grid-score-badge is-interactive",
+        text: scoreBadgeText
+      });
+      scoreBadge.title = "点击快速打分 / 修改个人评分";
+      scoreBadge.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openScoreMenu(e, item);
+      };
+
+      // 封面海报
+      const coverUrl = item.file ? this.getCoverResourceUrl(item.cover, item.file.path) : null;
+      if (coverUrl) {
+        const img = posterWrap.createEl("img", { cls: "bangumi-grid-poster" });
+        img.alt = item.name;
+        img.loading = "lazy";
+        img.src = coverUrl;
+        img.onerror = () => {
+          img.remove();
+          this.renderPosterPlaceholder(posterWrap, item);
+        };
+      } else {
+        this.renderPosterPlaceholder(posterWrap, item);
+      }
+
+      // 3. 追番轻量微操作条
+      const epBar = posterWrap.createDiv("bangumi-grid-ep-bar");
+      const btnDec = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-dec",
+        text: "−"
+      });
+      btnDec.title = "已看集数 -1";
+      btnDec.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        if (current > 0) {
+          const next = current - 1;
+          await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+          new Notice(`《${item.name}》已看集数调整为：${next} 话`);
+        }
+      };
+
+      const watched = item.watchedEpisodes !== null && item.watchedEpisodes !== undefined ? Number(item.watchedEpisodes) : 0;
+      const totalNum = Number(item.totalEpisodes);
+      const epLabelText = totalNum > 0 ? `${watched}/${totalNum}话` : `${watched}话`;
+
+      const epLabel = epBar.createDiv({
+        cls: "bangumi-grid-ep-label",
+        text: epLabelText
+      });
+      epLabel.title = "点击直接输入观看集数";
+      epLabel.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new SetEpisodesModal(this.app, this, item).open();
+      };
+
+      const btnInc = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-inc",
+        text: "+"
+      });
+      btnInc.title = "已看集数 +1";
+      btnInc.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        const next = current + 1;
+        await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+        new Notice(`《${item.name}》已看集数递增至：${next} 话`);
+      };
+
+      // 4. 信息区
+      const info = card.createDiv("bangumi-grid-info");
+      const title = info.createDiv({
+        cls: "bangumi-grid-title",
+        text: item.name
+      });
+      title.title = item.name;
+
+      const metaParts = [];
+      if (item.year) metaParts.push(item.year);
+      if (item.season) metaParts.push(item.season);
+
+      info.createDiv({
+        cls: "bangumi-grid-meta",
+        text: metaParts.join(" · ") || " "
+      });
+
+      // 5. 标签栏
+      const tagsRow = info.createDiv("bangumi-grid-tags-row");
+      const tagTokens = String(item.tags || "")
+        .split(/[,;\s#\[\]"']+/)
+        .map((t) => t.trim())
+        .filter((t) => t && t.toLowerCase() !== "bangumi");
+
+      tagTokens.forEach((tag) => {
+        const chip = tagsRow.createDiv("bangumi-grid-tag-chip");
+        chip.createSpan({ text: `#${tag}` });
+        const delBtn = chip.createSpan({
+          cls: "bangumi-grid-tag-del",
+          text: "×"
+        });
+        delBtn.title = `移除标签 #${tag}`;
+        delBtn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await this.quickUpdateAnimeNote(item, { removeTag: tag });
+          new Notice(`已从《${item.name}》移除标签 #${tag}`);
+        };
+      });
+
+      const addTagBtn = tagsRow.createEl("button", {
+        cls: "bangumi-grid-add-tag-btn",
+        text: "+"
+      });
+      addTagBtn.title = "添加标签";
+      addTagBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new QuickAddTagModal(this.app, this, item).open();
+      };
+
+      // 6. 移出展柜按钮
+      const shelfActionRow = info.createDiv("bangumi-grid-shelf-action-row");
+      const removeBtn = shelfActionRow.createEl("button", {
+        cls: "bangumi-grid-shelf-del-btn",
+        text: "移出展柜"
+      });
+      removeBtn.title = `从展柜“${collectionConfig.title}”中移出《${item.name}》`;
+      removeBtn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (Array.isArray(collectionConfig.items)) {
+          collectionConfig.items = collectionConfig.items.filter((entry) => {
+            const entryPath = typeof entry === "string" ? entry : entry.path;
+            const entrySubject = typeof entry === "object" ? entry.subjectId : null;
+            if (item.file && entryPath === item.file.path) return false;
+            if (item.subjectId && entrySubject && String(entrySubject) === String(item.subjectId)) return false;
+            return true;
+          });
+          await this.saveSettings();
+          if (dashboardContainer) {
+            await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+          }
+          new Notice(`已将《${item.name}》移出展柜“${collectionConfig.title}”。`);
+        }
+      };
+    });
+  }
+
+  renderCollectionList(container, items, collectionConfig, dashboardContainer, dashboardOptions) {
+    if (!items || items.length === 0) {
+      const emptyDiv = container.createDiv({
+        cls: "bangumi-dashboard-empty bangumi-collection-empty",
+        text: "展柜内暂无动画。"
+      });
+      const addBtn = emptyDiv.createEl("button", {
+        cls: "bangumi-collection-empty-add-btn",
+        text: "+ 从动画库添加作品"
+      });
+      addBtn.onclick = () => {
+        this.openCollectionItemsManagerModal(collectionConfig, async () => {
+          if (dashboardContainer) {
+            await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+          }
+        });
+      };
+      return;
+    }
+
+    const list = container.createDiv("bangumi-dashboard-rank-list");
+
+    items.forEach((item, index) => {
+      const row = list.createDiv("bangumi-dashboard-rank-row bangumi-collection-list-row");
+      row.dataset.filePath = item.file ? item.file.path : "";
+      row.dataset.collectionIndex = String(index);
+      row.setAttribute("draggable", "true");
+
+      row.ondragstart = (e) => {
+        e.stopPropagation();
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/collection-idx", String(index));
+        row.addClass("is-dragging");
+      };
+
+      row.ondragend = () => {
+        row.removeClass("is-dragging");
+        list.querySelectorAll(".bangumi-collection-list-row").forEach((el) => {
+          el.removeClass("drag-over-indicator");
+        });
+      };
+
+      row.ondragover = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        row.addClass("drag-over-indicator");
+      };
+
+      row.ondragleave = (e) => {
+        e.stopPropagation();
+        row.removeClass("drag-over-indicator");
+      };
+
+      row.ondrop = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        row.removeClass("drag-over-indicator");
+        const sourceIdxStr = e.dataTransfer.getData("text/collection-idx");
+        if (sourceIdxStr !== "" && sourceIdxStr !== undefined) {
+          const sourceIdx = Number(sourceIdxStr);
+          const targetIdx = index;
+          if (!isNaN(sourceIdx) && sourceIdx !== targetIdx && Array.isArray(collectionConfig.items)) {
+            const [moved] = collectionConfig.items.splice(sourceIdx, 1);
+            collectionConfig.items.splice(targetIdx, 0, moved);
+            await this.saveSettings();
+            if (dashboardContainer) {
+              await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+            }
+            new Notice(`已调整《${item.name}》在展柜中的位置。`);
+          }
+        }
+      };
+
+      const rankIndex = row.createDiv({
+        cls: "bangumi-dashboard-rank-index",
+        text: String(index + 1)
+      });
+      rankIndex.title = "拖拽可重新排序";
+      rankIndex.style.cursor = "grab";
+
+      const content = row.createDiv("bangumi-dashboard-rank-content");
+      const titleRow = content.createDiv("bangumi-dashboard-rank-title-row");
+
+      const titleLink = titleRow.createEl("a", {
+        text: item.name,
+        href: "#"
+      });
+      titleLink.onclick = async (e) => {
+        e.preventDefault();
+        if (item.file) {
+          const leaf = this.app.workspace.getLeaf(true);
+          await leaf.openFile(item.file);
+        }
+      };
+
+      const scoreWrap = titleRow.createDiv({
+        cls: "bangumi-dashboard-score is-interactive"
+      });
+      if (item.personalScore !== null) {
+        scoreWrap.setText(`★ ${item.personalScore.toFixed(1)}`);
+      } else if (item.bangumiScore !== null) {
+        scoreWrap.setText(`BGM ${item.bangumiScore.toFixed(1)}`);
+      } else {
+        scoreWrap.setText("未评分");
+        scoreWrap.addClass("bangumi-dashboard-score-none");
+      }
+      scoreWrap.title = "点击打分 / 修改评分";
+      scoreWrap.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openScoreMenu(e, item);
+      };
+
+      const metaRow = content.createDiv("bangumi-dashboard-rank-meta");
+
+      const statePill = metaRow.createSpan({
+        cls: `bangumi-list-state-pill is-${item.state || "未设置"}`,
+        text: item.state || "未设置"
+      });
+      statePill.title = "点击切换观看状态";
+      statePill.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openStateMenu(e, item);
+      };
+
+      const epControl = metaRow.createSpan("bangumi-list-ep-control");
+      const listDec = epControl.createEl("button", {
+        cls: "bangumi-list-ep-btn",
+        text: "−"
+      });
+      listDec.title = "已看集数 -1";
+      listDec.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        if (current > 0) {
+          const next = current - 1;
+          await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+          new Notice(`《${item.name}》已看集数调整为：${next} 话`);
+        }
+      };
+
+      const watched = item.watchedEpisodes !== null && item.watchedEpisodes !== undefined ? Number(item.watchedEpisodes) : 0;
+      const totalNum = Number(item.totalEpisodes);
+      const epLabelText = totalNum > 0 ? `${watched}/${totalNum}话` : `${watched}话`;
+
+      const listEpLabel = epControl.createSpan({
+        cls: "bangumi-list-ep-label",
+        text: epLabelText
+      });
+      listEpLabel.title = "点击直接输入观看集数";
+      listEpLabel.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        new SetEpisodesModal(this.app, this, item).open();
+      };
+
+      const listInc = epControl.createEl("button", {
+        cls: "bangumi-list-ep-btn",
+        text: "+"
+      });
+      listInc.title = "已看集数 +1";
+      listInc.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const current = Number(item.watchedEpisodes) || 0;
+        const next = current + 1;
+        await this.quickUpdateAnimeNote(item, { watchedEpisodes: next });
+        new Notice(`《${item.name}》已看集数递增至：${next} 话`);
+      };
+
+      const metaParts = [];
+      if (item.year || item.season) {
+        metaParts.push([item.year, item.season].filter(Boolean).join(" "));
+      }
+      if (metaParts.length > 0) {
+        metaRow.createSpan({
+          text: " · " + metaParts.join(" · ")
+        });
+      }
+
+      const removeBtn = metaRow.createEl("button", {
+        cls: "bangumi-list-remove-btn",
+        text: "移出展柜"
+      });
+      removeBtn.title = `从展柜“${collectionConfig.title}”中移出`;
+      removeBtn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (Array.isArray(collectionConfig.items)) {
+          collectionConfig.items = collectionConfig.items.filter((entry) => {
+            const entryPath = typeof entry === "string" ? entry : entry.path;
+            const entrySubject = typeof entry === "object" ? entry.subjectId : null;
+            if (item.file && entryPath === item.file.path) return false;
+            if (item.subjectId && entrySubject && String(entrySubject) === String(item.subjectId)) return false;
+            return true;
+          });
+          await this.saveSettings();
+          if (dashboardContainer) {
+            await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
+          }
+          new Notice(`已将《${item.name}》移出展柜。`);
+        }
+      };
+    });
+  }
+
   openCustomQuerySectionModal(existingConfig, onSave) {
     new CustomQuerySectionModal(this.app, this, existingConfig, onSave).open();
   }
@@ -2725,6 +3244,136 @@ if (this.settings.seasonViewMode === "current") {
       }
       new Notice(`已删除自定义分区“${section.title}”。`);
     }).open();
+  }
+
+  openCustomCollectionModal(existingConfig, onSave) {
+    new CustomCollectionModal(this.app, this, existingConfig, onSave).open();
+  }
+
+  openCollectionItemsManagerModal(collectionConfig, onSave) {
+    new CollectionItemsManagerModal(this.app, this, collectionConfig, onSave).open();
+  }
+
+  confirmDeleteCustomCollection(collectionConfig, onDeleted) {
+    new ConfirmDeleteSectionModal(
+      this.app,
+      collectionConfig.title,
+      async () => {
+        this.settings.customCollectionSections = (this.settings.customCollectionSections || []).filter(
+          (s) => s.id !== collectionConfig.id
+        );
+
+        const sectionId = `collection_${collectionConfig.id}`;
+        if (Array.isArray(this.settings.dashboardSectionOrder)) {
+          this.settings.dashboardSectionOrder = this.settings.dashboardSectionOrder.filter(
+            (id) => id !== sectionId
+          );
+        }
+        if (this.settings.dashboardSectionCollapsed) {
+          delete this.settings.dashboardSectionCollapsed[sectionId];
+        }
+        if (this.settings.dashboardSectionHidden) {
+          delete this.settings.dashboardSectionHidden[sectionId];
+        }
+
+        await this.saveSettings();
+        if (typeof onDeleted === "function") {
+          await onDeleted();
+        }
+        new Notice(`已删除收藏展柜“${collectionConfig.title}”。`);
+      },
+      `确定要删除收藏展柜“${collectionConfig.title}”吗？展柜内的笔记不会受到任何影响，仅移除展柜展示。`
+    ).open();
+  }
+
+  resolveCollectionItems(colConfig, allItems) {
+    if (!colConfig || !Array.isArray(colConfig.items)) return [];
+    const resolved = [];
+    let settingsNeedSave = false;
+
+    const pathMap = new Map();
+    const subjectMap = new Map();
+    const nameMap = new Map();
+
+    for (const it of allItems) {
+      if (it.file && it.file.path) {
+        pathMap.set(it.file.path, it);
+      }
+      if (it.subjectId) {
+        subjectMap.set(String(it.subjectId), it);
+      }
+      if (it.name) {
+        nameMap.set(it.name, it);
+      }
+    }
+
+    for (const entry of colConfig.items) {
+      let entryObj = typeof entry === "string" ? { path: entry } : entry;
+      let matched = null;
+
+      if (entryObj.path && pathMap.has(entryObj.path)) {
+        matched = pathMap.get(entryObj.path);
+      }
+
+      if (!matched && entryObj.subjectId && subjectMap.has(String(entryObj.subjectId))) {
+        matched = subjectMap.get(String(entryObj.subjectId));
+        if (matched.file && matched.file.path && entryObj.path !== matched.file.path) {
+          entryObj.path = matched.file.path;
+          settingsNeedSave = true;
+        }
+      }
+
+      if (!matched && entryObj.name && nameMap.has(entryObj.name)) {
+        matched = nameMap.get(entryObj.name);
+        if (matched.file && matched.file.path && entryObj.path !== matched.file.path) {
+          entryObj.path = matched.file.path;
+          settingsNeedSave = true;
+        }
+      }
+
+      if (matched) {
+        if (!entryObj.subjectId && matched.subjectId) {
+          entryObj.subjectId = matched.subjectId;
+          settingsNeedSave = true;
+        }
+        if (!entryObj.name && matched.name) {
+          entryObj.name = matched.name;
+          settingsNeedSave = true;
+        }
+        resolved.push(matched);
+      }
+    }
+
+    if (settingsNeedSave) {
+      this.saveSettings().catch((e) => console.error("保存展柜自愈路径失败:", e));
+    }
+
+    return resolved;
+  }
+
+  async autoSyncNoteCallout(file) {
+    if (!file || !this.isTargetNote(file)) return;
+    if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) return;
+    if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) return;
+    try {
+      const content = await this.app.vault.read(file);
+      const synced = syncNoteCalloutFromFrontmatter(content);
+      if (synced && synced !== content) {
+        if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
+        this.isPluginWritingNote.add(file.path);
+        try {
+          await this.app.vault.modify(file, synced);
+        } finally {
+          setTimeout(() => {
+            if (this.isPluginWritingNote) {
+              this.isPluginWritingNote.delete(file.path);
+            }
+          }, 1000);
+        }
+      }
+    } catch (err) {
+      console.error("自动同步动画信息卡失败:", err);
+    }
   }
 
   async quickUpdateAnimeNote(item, updates) {
@@ -2762,7 +3411,17 @@ if (this.settings.seasonViewMode === "current") {
       }
 
       if (newContent !== content) {
-        await this.app.vault.modify(file, newContent);
+        if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
+        this.isPluginWritingNote.add(file.path);
+        try {
+          await this.app.vault.modify(file, newContent);
+        } finally {
+          setTimeout(() => {
+            if (this.isPluginWritingNote) {
+              this.isPluginWritingNote.delete(file.path);
+            }
+          }, 1000);
+        }
       }
 
       if (updates.watchedEpisodes !== undefined) {
@@ -2929,6 +3588,7 @@ if (this.settings.seasonViewMode === "current") {
     onToggleCollapse,
     onHide,
     onReorder,
+    onManage,
     onEdit,
     onDelete
   }) {
@@ -3017,7 +3677,43 @@ if (this.settings.seasonViewMode === "current") {
 
     const rightEl = headerEl.createDiv("bangumi-dashboard-section-header-right");
 
-    if (def.isCustom) {
+    if (def.isCollection) {
+      const manageBtn = rightEl.createEl("button", {
+        cls: "bangumi-dashboard-action-btn",
+        text: "管理"
+      });
+      manageBtn.title = "管理展柜中的动画条目";
+      manageBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof onManage === "function") {
+          onManage();
+        }
+      };
+
+      const editBtn = rightEl.createEl("button", {
+        cls: "bangumi-dashboard-action-btn",
+        text: "编辑"
+      });
+      editBtn.title = "编辑展柜标题与显示模式";
+      editBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof onEdit === "function") {
+          onEdit();
+        }
+      };
+
+      const deleteBtn = rightEl.createEl("button", {
+        cls: "bangumi-dashboard-action-btn",
+        text: "删除"
+      });
+      deleteBtn.title = "删除此收藏展柜";
+      deleteBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof onDelete === "function") {
+          onDelete();
+        }
+      };
+    } else if (def.isCustom) {
       const editBtn = rightEl.createEl("button", {
         cls: "bangumi-dashboard-action-btn",
         text: "编辑"
@@ -3213,6 +3909,17 @@ if (this.settings.seasonViewMode === "current") {
       });
     };
 
+    const addCollectionBtn = headerActions.createEl("button", {
+      cls: "bangumi-dashboard-header-btn",
+      text: "+ 新建收藏展柜"
+    });
+
+    addCollectionBtn.onclick = () => {
+      this.openCustomCollectionModal(null, async () => {
+        await this.renderScoreDashboard(container, options);
+      });
+    };
+
     if (isMarkdown) {
       const banner = container.createDiv(
         "bangumi-dashboard-compat-banner"
@@ -3387,6 +4094,32 @@ if (this.settings.seasonViewMode === "current") {
       }
     ];
 
+    const collectionConfigs = Array.isArray(this.settings.customCollectionSections)
+      ? this.settings.customCollectionSections
+      : [];
+
+    const collectionSectionDefs = [];
+    for (const colConfig of collectionConfigs) {
+      const colItems = this.resolveCollectionItems(colConfig, items);
+      collectionSectionDefs.push({
+        id: `collection_${colConfig.id}`,
+        title: colConfig.title || "自定义展柜",
+        badgeText: colItems.length ? `${colItems.length} 部` : "",
+        hasData: colItems.length > 0,
+        emptyText: "展柜内暂无动画（点击右上角“管理”添加）",
+        spanFull: true,
+        isCollection: true,
+        collectionConfig: colConfig,
+        renderBody: (body) => {
+          if (colConfig.displayMode === "list") {
+            this.renderCollectionList(body, colItems, colConfig, container, options);
+          } else {
+            this.renderCollectionGrid(body, colItems, colConfig, container, options);
+          }
+        }
+      });
+    }
+
     const customConfigs = Array.isArray(this.settings.customQuerySections)
       ? this.settings.customQuerySections
       : [];
@@ -3417,7 +4150,7 @@ if (this.settings.seasonViewMode === "current") {
       });
     }
 
-    const sectionDefs = [...customSectionDefs, ...builtInSectionDefs];
+    const sectionDefs = [...collectionSectionDefs, ...customSectionDefs, ...builtInSectionDefs];
 
     const hiddenMap = this.settings.dashboardSectionHidden || {};
 
@@ -3530,20 +4263,39 @@ if (this.settings.seasonViewMode === "current") {
             new Notice("已更新分区排序。");
           }
         },
-        onEdit: def.isCustom
+        onManage: def.isCollection
           ? async () => {
-              this.openCustomQuerySectionModal(def.config, async () => {
+              this.openCollectionItemsManagerModal(def.collectionConfig, async () => {
                 await this.renderScoreDashboard(container, options);
               });
             }
           : null,
-        onDelete: def.isCustom
+        onEdit: def.isCollection
           ? async () => {
-              this.confirmDeleteCustomQuerySection(def.config, async () => {
+              this.openCustomCollectionModal(def.collectionConfig, async () => {
                 await this.renderScoreDashboard(container, options);
               });
             }
-          : null
+          : (def.isCustom
+            ? async () => {
+                this.openCustomQuerySectionModal(def.config, async () => {
+                  await this.renderScoreDashboard(container, options);
+                });
+              }
+            : null),
+        onDelete: def.isCollection
+          ? async () => {
+              this.confirmDeleteCustomCollection(def.collectionConfig, async () => {
+                await this.renderScoreDashboard(container, options);
+              });
+            }
+          : (def.isCustom
+            ? async () => {
+                this.confirmDeleteCustomQuerySection(def.config, async () => {
+                  await this.renderScoreDashboard(container, options);
+                });
+              }
+            : null)
       });
     }
 
@@ -3792,11 +4544,31 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-ep-shortcuts button{cursor:pointer;font-size:.85em;padding:4px 10px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);transition:all .12s ease;}",
       ".bangumi-ep-shortcuts button:hover{background:var(--background-modifier-hover);border-color:var(--interactive-accent);color:var(--interactive-accent);}",
       ".bangumi-custom-query-modal .setting-item{padding:10px 0;}",
+      ".bangumi-custom-collection-modal .setting-item{padding:10px 0;}",
+      ".bangumi-collection-empty{padding:24px 12px;text-align:center;color:var(--text-muted);display:flex;flex-direction:column;align-items:center;gap:10px;}",
+      ".bangumi-collection-empty-add-btn{cursor:pointer;padding:4px 14px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--interactive-accent);background:var(--interactive-accent);color:var(--text-on-accent);transition:opacity .15s ease;}",
+      ".bangumi-collection-empty-add-btn:hover{opacity:.9;}",
+      ".bangumi-grid-shelf-action-row{display:flex;justify-content:flex-end;margin-top:6px;}",
+      ".bangumi-grid-shelf-del-btn{cursor:pointer;font-size:10px;padding:2px 6px;border-radius:4px;border:1px solid var(--background-modifier-border);background:var(--background-secondary-alt);color:var(--text-muted);transition:all .12s ease;}",
+      ".bangumi-grid-shelf-del-btn:hover{color:var(--text-error);border-color:var(--text-error);}",
+      ".bangumi-list-remove-btn{cursor:pointer;font-size:11px;padding:1px 6px;border-radius:3px;border:1px solid var(--background-modifier-border);background:transparent;color:var(--text-muted);margin-left:auto;transition:all .12s ease;}",
+      ".bangumi-list-remove-btn:hover{color:var(--text-error);border-color:var(--text-error);}",
+      ".bangumi-collection-manager-row{transition:background-color .12s ease;}",
+      ".bangumi-collection-manager-row:hover{background:var(--background-modifier-hover);}",
+      ".bangumi-manager-mini-btn{cursor:pointer;padding:1px 6px;font-size:11px;border-radius:4px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);line-height:1.2;transition:all .12s ease;}",
+      ".bangumi-manager-mini-btn:hover{border-color:var(--interactive-accent);color:var(--interactive-accent);}",
+      ".bangumi-manager-mini-btn.mod-cta{background:var(--interactive-accent);color:var(--text-on-accent);border-color:var(--interactive-accent);}",
+      ".bangumi-manager-mini-btn.mod-cta:hover{opacity:.9;}",
+      ".bangumi-manager-mini-btn.mod-warning:hover{color:var(--text-error);border-color:var(--text-error);}",
+      ".bangumi-collection-panel{border:1px solid var(--background-modifier-border);border-radius:8px;padding:12px;background:var(--background-primary);display:flex;flex-direction:column;}",
+      ".bangumi-collection-panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--background-modifier-border);font-size:.9em;}",
+      ".bangumi-collection-panel-empty{color:var(--text-muted);font-size:.85em;padding:24px 10px;text-align:center;}",
+      ".bangumi-collection-more-hint{font-size:11px;color:var(--text-faint);text-align:center;padding:6px;}",
       ".bangumi-score-dashboard-view{padding:0 18px 24px;overflow:auto;}",
       ".bangumi-dashboard-view-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 0 10px;}",
       ".bangumi-dashboard-view-toolbar h2{margin:0;font-size:1.15em;}",
       ".bangumi-dashboard-view-controls{display:flex;gap:8px;flex-wrap:wrap;}",
-      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}}",
+      "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}.bangumi-collection-manager-panels{grid-template-columns:1fr !important;}}",
       "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}}"
     ].join("");
 
@@ -4796,18 +5568,19 @@ var ManagerRibbonModal = class extends Modal {
 };
 
 var ConfirmDeleteSectionModal = class extends Modal {
-  constructor(app, sectionTitle, onConfirm) {
+  constructor(app, sectionTitle, onConfirm, customDesc) {
     super(app);
     this.sectionTitle = sectionTitle;
     this.onConfirm = onConfirm;
+    this.customDesc = customDesc;
   }
 
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "确认删除自定义分区" });
+    contentEl.createEl("h3", { text: "确认删除" });
     contentEl.createEl("p", {
-      text: `确定要删除自定义分区“${this.sectionTitle}”吗？此操作仅移除分区配置，不会修改任何动画笔记或数据。`
+      text: this.customDesc || `确定要删除自定义分区“${this.sectionTitle}”吗？此操作仅移除分区配置，不会修改任何动画笔记或数据。`
     });
 
     const actions = contentEl.createDiv("bangumi-modal-actions");
@@ -5064,6 +5837,461 @@ var CustomQuerySectionModal = class extends Modal {
       }
 
       new Notice(isEdit ? `已更新分区“${formData.title}”。` : `已创建分区“${formData.title}”。`);
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var CustomCollectionModal = class extends Modal {
+  constructor(app, plugin, existingConfig, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.existingConfig = existingConfig;
+    this.onSave = onSave;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bangumi-custom-collection-modal");
+
+    const isEdit = Boolean(this.existingConfig);
+    contentEl.createEl("h2", {
+      text: isEdit ? "编辑收藏展柜" : "新建收藏展柜"
+    });
+    contentEl.createEl("p", {
+      cls: "bangumi-modal-subtitle",
+      text: "手动挑选并编排心爱作品的专属展柜，支持卡片拖拽重排与直观展出。"
+    });
+
+    const formData = Object.assign(
+      {
+        id: "col_" + Date.now(),
+        title: "",
+        displayMode: "grid",
+        items: []
+      },
+      this.existingConfig || {}
+    );
+
+    new Setting(contentEl)
+      .setName("展柜名称")
+      .setDesc("为您的收藏展柜起一个优雅的名字")
+      .addText((text) => {
+        text
+          .setPlaceholder("如：年度十佳、神作殿堂、二次元启蒙...")
+          .setValue(formData.title)
+          .onChange((val) => {
+            formData.title = val;
+          });
+        setTimeout(() => text.inputEl.focus(), 50);
+      });
+
+    new Setting(contentEl)
+      .setName("展示形态")
+      .setDesc("选择展柜在仪表盘上的展现方式")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("grid", "响应式封面海报网格 (Cover Grid)")
+          .addOption("list", "紧凑榜单列表 (Compact List)")
+          .setValue(formData.displayMode || "grid")
+          .onChange((val) => {
+            formData.displayMode = val;
+          });
+      });
+
+    const footer = contentEl.createDiv("bangumi-modal-footer");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "20px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const saveBtn = footer.createEl("button", {
+      text: isEdit ? "保存修改" : "创建展柜并挑选动画",
+      cls: "mod-cta"
+    });
+
+    saveBtn.onclick = async () => {
+      const cleanTitle = String(formData.title || "").trim();
+      if (!cleanTitle) {
+        new Notice("请输入展柜名称！");
+        return;
+      }
+      formData.title = cleanTitle;
+
+      const collections = Array.isArray(this.plugin.settings.customCollectionSections)
+        ? [...this.plugin.settings.customCollectionSections]
+        : [];
+
+      if (isEdit) {
+        const idx = collections.findIndex((s) => s.id === formData.id);
+        if (idx >= 0) {
+          collections[idx] = formData;
+        } else {
+          collections.push(formData);
+        }
+      } else {
+        collections.push(formData);
+      }
+
+      this.plugin.settings.customCollectionSections = collections;
+      await this.plugin.saveSettings();
+      this.close();
+
+      if (typeof this.onSave === "function") {
+        await this.onSave(formData);
+      }
+
+      new Notice(isEdit ? `已更新展柜“${formData.title}”。` : `已创建展柜“${formData.title}”。`);
+
+      if (!isEdit) {
+        this.plugin.openCollectionItemsManagerModal(formData, this.onSave);
+      }
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+var CollectionItemsManagerModal = class extends Modal {
+  constructor(app, plugin, collectionConfig, onSave) {
+    super(app);
+    this.plugin = plugin;
+    this.collectionConfig = collectionConfig;
+    this.onSave = onSave;
+    this.searchQuery = "";
+    this.statusFilter = "all";
+    this.allItems = [];
+    this.currentItems = Array.isArray(collectionConfig.items)
+      ? [...collectionConfig.items]
+      : [];
+  }
+
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    this.modalEl.style.width = "min(860px, 94vw)";
+    this.modalEl.style.maxWidth = "94vw";
+    this.modalEl.style.maxHeight = "90vh";
+    this.modalEl.style.overflowY = "auto";
+
+    contentEl.createEl("h2", {
+      text: `管理收藏展柜 - 《${this.collectionConfig.title}》`
+    });
+    contentEl.createEl("p", {
+      cls: "bangumi-modal-subtitle",
+      text: "从动画库中挑选动画收录至展柜，使用“↑ / ↓”微调展示顺序，或一键从展柜移出。"
+    });
+
+    this.allItems = await this.plugin.collectDashboardItems();
+
+    const itemByPath = new Map();
+    const itemBySubject = new Map();
+    for (const it of this.allItems) {
+      if (it.file && it.file.path) itemByPath.set(it.file.path, it);
+      if (it.subjectId) itemBySubject.set(String(it.subjectId), it);
+    }
+
+    const controlsRow = contentEl.createDiv("bangumi-collection-manager-controls");
+    controlsRow.style.display = "flex";
+    controlsRow.style.gap = "10px";
+    controlsRow.style.marginBottom = "14px";
+    controlsRow.style.flexWrap = "wrap";
+
+    const searchInput = controlsRow.createEl("input", {
+      type: "text",
+      placeholder: "搜索动画库（标题、日文名、标签）..."
+    });
+    searchInput.style.flex = "1";
+    searchInput.style.minWidth = "200px";
+
+    const statusSelect = controlsRow.createEl("select");
+    [
+      { val: "all", text: "全部状态" },
+      { val: "在看", text: "在看" },
+      { val: "已看", text: "已看" },
+      { val: "想看", text: "想看" },
+      { val: "抛弃", text: "抛弃" }
+    ].forEach((opt) => {
+      const o = statusSelect.createEl("option", { value: opt.val, text: opt.text });
+      if (opt.val === this.statusFilter) o.selected = true;
+    });
+
+    const panelsWrap = contentEl.createDiv("bangumi-collection-manager-panels");
+    panelsWrap.style.display = "grid";
+    panelsWrap.style.gridTemplateColumns = "1fr 1fr";
+    panelsWrap.style.gap = "14px";
+    panelsWrap.style.minHeight = "360px";
+
+    const leftCol = panelsWrap.createDiv("bangumi-collection-panel");
+    const rightCol = panelsWrap.createDiv("bangumi-collection-panel");
+
+    const leftHeader = leftCol.createDiv("bangumi-collection-panel-header");
+    const rightHeader = rightCol.createDiv("bangumi-collection-panel-header");
+
+    const leftList = leftCol.createDiv("bangumi-collection-panel-list");
+    leftList.style.maxHeight = "360px";
+    leftList.style.overflowY = "auto";
+    leftList.style.display = "flex";
+    leftList.style.flexDirection = "column";
+    leftList.style.gap = "6px";
+
+    const rightList = rightCol.createDiv("bangumi-collection-panel-list");
+    rightList.style.maxHeight = "360px";
+    rightList.style.overflowY = "auto";
+    rightList.style.display = "flex";
+    rightList.style.flexDirection = "column";
+    rightList.style.gap = "6px";
+
+    const isItemInShelf = (it) => {
+      return this.currentItems.some((entry) => {
+        const p = typeof entry === "string" ? entry : entry.path;
+        const sub = typeof entry === "object" ? entry.subjectId : null;
+        if (it.file && p === it.file.path) return true;
+        if (it.subjectId && sub && String(sub) === String(it.subjectId)) return true;
+        return false;
+      });
+    };
+
+    const renderPanels = () => {
+      leftHeader.empty();
+      leftHeader.createEl("strong", {
+        text: `已收录到展柜 (${this.currentItems.length} 部)`
+      });
+      leftList.empty();
+
+      if (this.currentItems.length === 0) {
+        leftList.createDiv({
+          cls: "bangumi-collection-panel-empty",
+          text: "展柜为空，请从右侧点击“+ 添加”加入作品。"
+        });
+      } else {
+        this.currentItems.forEach((entry, idx) => {
+          const entryPath = typeof entry === "string" ? entry : entry.path;
+          const entrySubject = typeof entry === "object" ? entry.subjectId : null;
+          const resolved = (entryPath && itemByPath.get(entryPath)) ||
+            (entrySubject && itemBySubject.get(String(entrySubject))) ||
+            null;
+
+          const title = resolved ? resolved.name : (entry.name || entryPath || "未知动画");
+          const state = resolved ? resolved.state : "";
+
+          const row = leftList.createDiv("bangumi-collection-manager-row");
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.justifyContent = "space-between";
+          row.style.padding = "6px 8px";
+          row.style.borderRadius = "6px";
+          row.style.background = "var(--background-secondary)";
+          row.style.fontSize = "0.85em";
+
+          const leftInfo = row.createDiv();
+          leftInfo.style.display = "flex";
+          leftInfo.style.alignItems = "center";
+          leftInfo.style.gap = "6px";
+          leftInfo.style.minWidth = "0";
+          leftInfo.style.flex = "1";
+
+          leftInfo.createSpan({
+            text: `${idx + 1}.`,
+            cls: "bangumi-collection-idx"
+          }).style.color = "var(--text-faint)";
+
+          const titleEl = leftInfo.createSpan({
+            text: title,
+            cls: "bangumi-collection-title"
+          });
+          titleEl.style.overflow = "hidden";
+          titleEl.style.textOverflow = "ellipsis";
+          titleEl.style.whiteSpace = "nowrap";
+
+          if (state) {
+            const pill = leftInfo.createSpan({
+              text: state,
+              cls: `bangumi-list-state-pill is-${state}`
+            });
+            pill.style.fontSize = "10px";
+            pill.style.padding = "0 4px";
+          }
+
+          const ops = row.createDiv();
+          ops.style.display = "flex";
+          ops.style.gap = "4px";
+          ops.style.flexShrink = "0";
+
+          if (idx > 0) {
+            const btnUp = ops.createEl("button", { text: "↑", cls: "bangumi-manager-mini-btn" });
+            btnUp.title = "上移";
+            btnUp.onclick = () => {
+              const temp = this.currentItems[idx - 1];
+              this.currentItems[idx - 1] = this.currentItems[idx];
+              this.currentItems[idx] = temp;
+              renderPanels();
+            };
+          }
+
+          if (idx < this.currentItems.length - 1) {
+            const btnDown = ops.createEl("button", { text: "↓", cls: "bangumi-manager-mini-btn" });
+            btnDown.title = "下移";
+            btnDown.onclick = () => {
+              const temp = this.currentItems[idx + 1];
+              this.currentItems[idx + 1] = this.currentItems[idx];
+              this.currentItems[idx] = temp;
+              renderPanels();
+            };
+          }
+
+          const btnDel = ops.createEl("button", { text: "×", cls: "bangumi-manager-mini-btn mod-warning" });
+          btnDel.title = "从展柜移出";
+          btnDel.onclick = () => {
+            this.currentItems.splice(idx, 1);
+            renderPanels();
+          };
+        });
+      }
+
+      rightHeader.empty();
+      const q = String(this.searchQuery || "").toLowerCase().trim();
+      const st = this.statusFilter;
+
+      const candidates = this.allItems.filter((it) => {
+        if (isItemInShelf(it)) return false;
+        if (st !== "all" && it.state !== st) return false;
+        if (q) {
+          const matchTitle = (it.name || "").toLowerCase().includes(q);
+          const matchJp = (it.japaneseName || "").toLowerCase().includes(q);
+          const matchTag = (it.tags || "").toLowerCase().includes(q);
+          if (!matchTitle && !matchJp && !matchTag) return false;
+        }
+        return true;
+      });
+
+      rightHeader.createEl("strong", {
+        text: `动画库候选 (${candidates.length} 部)`
+      });
+      rightList.empty();
+
+      if (candidates.length === 0) {
+        rightList.createDiv({
+          cls: "bangumi-collection-panel-empty",
+          text: q ? "未搜索到匹配的动画。" : "所有符合条件的动画均已收录。"
+        });
+      } else {
+        candidates.slice(0, 50).forEach((it) => {
+          const row = rightList.createDiv("bangumi-collection-manager-row");
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.justifyContent = "space-between";
+          row.style.padding = "6px 8px";
+          row.style.borderRadius = "6px";
+          row.style.background = "var(--background-secondary)";
+          row.style.fontSize = "0.85em";
+
+          const leftInfo = row.createDiv();
+          leftInfo.style.display = "flex";
+          leftInfo.style.alignItems = "center";
+          leftInfo.style.gap = "6px";
+          leftInfo.style.minWidth = "0";
+          leftInfo.style.flex = "1";
+
+          const titleEl = leftInfo.createSpan({ text: it.name });
+          titleEl.style.overflow = "hidden";
+          titleEl.style.textOverflow = "ellipsis";
+          titleEl.style.whiteSpace = "nowrap";
+
+          if (it.state) {
+            const pill = leftInfo.createSpan({
+              text: it.state,
+              cls: `bangumi-list-state-pill is-${it.state}`
+            });
+            pill.style.fontSize = "10px";
+            pill.style.padding = "0 4px";
+          }
+
+          if (it.year) {
+            leftInfo.createSpan({
+              text: it.year,
+              cls: "bangumi-meta-year"
+            }).style.color = "var(--text-faint)";
+          }
+
+          const addBtn = row.createEl("button", {
+            text: "+ 添加",
+            cls: "bangumi-manager-mini-btn mod-cta"
+          });
+          addBtn.onclick = () => {
+            this.currentItems.push({
+              path: it.file.path,
+              subjectId: it.subjectId || "",
+              name: it.name
+            });
+            renderPanels();
+          };
+        });
+
+        if (candidates.length > 50) {
+          rightList.createDiv({
+            cls: "bangumi-collection-more-hint",
+            text: "已显示前 50 部，更多作品请使用上方搜索框过滤。"
+          });
+        }
+      }
+    };
+
+    searchInput.oninput = () => {
+      this.searchQuery = searchInput.value;
+      renderPanels();
+    };
+
+    statusSelect.onchange = () => {
+      this.statusFilter = statusSelect.value;
+      renderPanels();
+    };
+
+    renderPanels();
+
+    const footer = contentEl.createDiv("bangumi-modal-footer");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "flex-end";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "20px";
+
+    const cancelBtn = footer.createEl("button", { text: "取消" });
+    cancelBtn.onclick = () => this.close();
+
+    const saveBtn = footer.createEl("button", {
+      text: "保存展柜编排",
+      cls: "mod-cta"
+    });
+
+    saveBtn.onclick = async () => {
+      this.collectionConfig.items = this.currentItems;
+
+      const collections = Array.isArray(this.plugin.settings.customCollectionSections)
+        ? [...this.plugin.settings.customCollectionSections]
+        : [];
+      const idx = collections.findIndex((c) => c.id === this.collectionConfig.id);
+      if (idx >= 0) {
+        collections[idx] = this.collectionConfig;
+      } else {
+        collections.push(this.collectionConfig);
+      }
+      this.plugin.settings.customCollectionSections = collections;
+      await this.plugin.saveSettings();
+
+      this.close();
+      if (typeof this.onSave === "function") {
+        await this.onSave();
+      }
+      new Notice(`已保存展柜“${this.collectionConfig.title}”的编排（共收录 ${this.currentItems.length} 部）。`);
     };
   }
 

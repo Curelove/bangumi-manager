@@ -1278,6 +1278,59 @@ module.exports = function createSettingsTabClass({
           });
       }
     }
+
+    new Setting(container)
+      .setName("自定义收藏展柜")
+      .setDesc("手动挑选并编排心爱作品的专属展柜，支持自定义排序与展示形态。")
+      .addButton((btn) => {
+        btn
+          .setButtonText("+ 新建收藏展柜")
+          .setCta()
+          .onClick(() => {
+            this.plugin.openCustomCollectionModal(null, () => {
+              this.display();
+            });
+          });
+      });
+
+    const collectionSections = Array.isArray(this.plugin.settings.customCollectionSections)
+      ? this.plugin.settings.customCollectionSections
+      : [];
+
+    if (collectionSections.length > 0) {
+      for (const col of collectionSections) {
+        const itemCount = Array.isArray(col.items) ? col.items.length : 0;
+        const modeText = col.displayMode === "list" ? "榜单列表" : "海报网格";
+
+        new Setting(container)
+          .setName(col.title)
+          .setDesc(`收录: ${itemCount} 部 | 展示形态: ${modeText}`)
+          .addButton((btn) => {
+            btn.setButtonText("管理条目").onClick(() => {
+              this.plugin.openCollectionItemsManagerModal(col, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn.setButtonText("编辑").onClick(() => {
+              this.plugin.openCustomCollectionModal(col, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn
+              .setButtonText("删除")
+              .setWarning()
+              .onClick(() => {
+                this.plugin.confirmDeleteCustomCollection(col, () => {
+                  this.display();
+                });
+              });
+          });
+      }
+    }
   }
 
   async promptForScoreDataRefresh() {

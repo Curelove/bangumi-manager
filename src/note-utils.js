@@ -963,11 +963,59 @@ function updateWatchedEpisodes(content, count) {
 
 function updateCalloutTableRow(content, fieldName, newValue) {
   const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`^(\\|\\s*${escaped}\\s*\\|)[^|\\r\\n]*(\\|)`, "m");
+  const regex = new RegExp(`^((?:>\\s*)?\\|\\s*(?:\\*\\*)?${escaped}(?:\\*\\*)?\\s*\\|)[^|\\r\\n]*(\\|)`, "m");
   if (regex.test(content)) {
     return content.replace(regex, `$1 ${newValue} $2`);
   }
   return content;
+}
+
+function syncNoteCalloutFromFrontmatter(content) {
+  const parsed = parseFrontmatter(content);
+  if (!parsed || !parsed.fields) return content;
+  let updated = content;
+
+  if (parsed.fields["观看状态"]) {
+    const st = cleanValue(parsed.fields["观看状态"]);
+    if (st) {
+      updated = updateCalloutTableRow(updated, "观看状态", st);
+    }
+  }
+
+  if (parsed.fields["我的评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["我的评分"]);
+    updated = updateCalloutTableRow(updated, "我的评分", sc || "未评分");
+  }
+
+  if (parsed.fields["BGM用户评分"] !== undefined || parsed.fields["Bangumi用户评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["BGM用户评分"] || parsed.fields["Bangumi用户评分"]);
+    updated = updateCalloutTableRow(updated, "BGM用户评分", sc || "未评分");
+    updated = updateCalloutTableRow(updated, "BGM 用户评分", sc || "未评分");
+  }
+
+  if (parsed.fields["BGM评分"] !== undefined || parsed.fields["BGM 评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["BGM评分"] || parsed.fields["BGM 评分"]);
+    if (sc) {
+      updated = updateCalloutTableRow(updated, "BGM 评分", sc);
+      updated = updateCalloutTableRow(updated, "BGM评分", sc);
+    }
+  }
+
+  const watchedInBody = extractWatchedEpisodes(content);
+  let ep = null;
+  if (parsed.fields["已观看集数"] !== undefined) {
+    const parsedEp = parseInt(parsed.fields["已观看集数"], 10);
+    if (!isNaN(parsedEp)) ep = parsedEp;
+  } else if (watchedInBody !== null) {
+    ep = watchedInBody;
+  }
+
+  if (ep !== null && !isNaN(ep) && ep >= 0) {
+    updated = updateWatchedEpisodes(updated, ep);
+    updated = updateCalloutTableRow(updated, "已观看集数", String(ep));
+  }
+
+  return updated;
 }
 
 function addNoteTag(content, tag) {
@@ -1023,6 +1071,7 @@ module.exports = {
   appendSeasonView,
   updateWatchedEpisodes,
   updateCalloutTableRow,
+  syncNoteCalloutFromFrontmatter,
   addNoteTag,
   removeNoteTag
 };
