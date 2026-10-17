@@ -79,6 +79,389 @@ var ScoreDataRefreshPromptModal = class extends Modal {
     this.contentEl.empty();
   }
 };
+class RatingSyncProgressModal extends Modal {
+  constructor(app, plugin, onCloseRequest) {
+    super(app);
+    this.plugin = plugin;
+    this.onCloseRequest = onCloseRequest;
+    this.unsubscribe = null;
+    this.closeRequested = false;
+    this.allowClose = false;
+  }
+
+  onOpen() {
+    this.render();
+
+    if (
+      this.plugin.ratingSync &&
+      typeof this.plugin.ratingSync.subscribe === "function"
+    ) {
+      this.unsubscribe =
+        this.plugin.ratingSync.subscribe(() => {
+          this.render();
+        });
+    }
+  }
+
+  getTask() {
+    return this.plugin.ratingSync
+      ? this.plugin.ratingSync.getTask()
+      : null;
+  }
+
+  render() {
+    const task = this.getTask();
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "评分同步进度"
+    });
+
+    if (!task) {
+      contentEl.createEl("p", {
+        text: "没有正在运行的评分同步任务。"
+      });
+      return;
+    }
+
+    contentEl.createEl("p", {
+      text: task.phase || "正在准备"
+    });
+
+    const current = task.currentName
+      ? "当前：" + task.currentName
+      : "";
+
+    if (current) {
+      contentEl.createEl("p", {
+        text: current
+      });
+    }
+
+    const stats = [
+      "扫描笔记：" + task.scanned,
+      "详情请求：" + task.requested,
+      "已完成：" + task.completed,
+      "失败：" + task.failed,
+      "超时：" + task.timedOut,
+      "无数据：" + task.noData
+    ];
+
+    contentEl.createEl("p", {
+      text: stats.join("，")
+    });
+
+    if (task.pauseRequested && task.running) {
+      contentEl.createEl("p", {
+        text: "已暂停后续请求，等待停止决定。"
+      });
+    } else if (task.stopRequested && task.running) {
+      contentEl.createEl("p", {
+        text: task.stopMode === "commit"
+          ? "正在保存已获取结果并停止。"
+          : "正在停止并放弃本次结果。"
+      });
+    }
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.justifyContent = "flex-end";
+
+    if (task.running) {
+      const stopButton = actions.createEl("button", {
+        text: "停止同步"
+      });
+
+      stopButton.onclick = () => {
+        if (this.closeRequested) {
+          return;
+        }
+
+        new RatingSyncStopModal(
+          this.app,
+          this.plugin,
+          () => {
+            this.closeRequested = true;
+            this.allowClose = true;
+            this.close();
+          },
+          () => {
+            this.render();
+          }
+        ).open();
+      };
+    } else {
+      const closeButton = actions.createEl("button", {
+        text: "关闭"
+      });
+
+      closeButton.onclick = () => {
+        this.allowClose = true;
+        this.close();
+      };
+    }
+  }
+
+  onClose() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+
+    const task = this.getTask();
+
+    if (
+      task &&
+      task.running &&
+      !this.allowClose &&
+      !this.closeRequested &&
+      typeof this.onCloseRequest === "function"
+    ) {
+      this.closeRequested = true;
+      this.onCloseRequest();
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+class RatingSyncCloseModal extends Modal {
+  constructor(app, plugin, onBackground, onStop) {
+    super(app);
+    this.plugin = plugin;
+    this.onBackground = onBackground;
+    this.onStop = onStop;
+    this.resolved = false;
+  }
+
+  resolve(action) {
+    if (this.resolved) {
+      return;
+    }
+
+    this.resolved = true;
+
+    if (action === "background") {
+      this.onBackground();
+    } else {
+      this.onStop();
+    }
+
+    this.close();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "关闭评分同步进度"
+    });
+
+    contentEl.createEl("p", {
+      text: "同步任务仍在运行。请选择关闭窗口后的处理方式。"
+    });
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.justifyContent = "flex-end";
+
+    const backgroundButton = actions.createEl("button", {
+      text: "关闭窗口，后台继续"
+    });
+
+    const stopButton = actions.createEl("button", {
+      text: "停止后续同步"
+    });
+
+    backgroundButton.onclick = () => {
+      this.resolve("background");
+    };
+
+    stopButton.onclick = () => {
+      this.resolve("stop");
+    };
+  }
+
+  onClose() {
+    if (!this.resolved) {
+      this.resolve("background");
+      return;
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+class RatingSyncStopModal extends Modal {
+  constructor(app, plugin, onClose, onContinue) {
+    super(app);
+    this.plugin = plugin;
+    this.onCloseCallback = onClose;
+    this.onContinue = onContinue;
+    this.resolved = false;
+  }
+
+  onOpen() {
+    this.plugin.ratingSync.pauseForDecision();
+
+    const { contentEl } = this;
+
+    contentEl.empty();
+
+    contentEl.createEl("h2", {
+      text: "停止评分同步"
+    });
+
+    contentEl.createEl("p", {
+      text: "停止后，已经取得的网络结果可以保存，也可以全部放弃。"
+    });
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.flexWrap = "wrap";
+    actions.style.justifyContent = "flex-end";
+
+    const continueButton = actions.createEl("button", {
+      text: "继续同步"
+    });
+
+    const saveButton = actions.createEl("button", {
+      text: "保存已获取结果并停止"
+    });
+
+    const discardButton = actions.createEl("button", {
+      text: "放弃本次结果并停止"
+    });
+
+    continueButton.onclick = () => {
+      this.resolved = true;
+      this.plugin.ratingSync.resumeAfterDecision();
+      this.close();
+      this.onContinue();
+    };
+
+    saveButton.onclick = () => {
+      this.resolved = true;
+      this.plugin.ratingSync.requestStop("commit");
+      this.close();
+    };
+
+    discardButton.onclick = () => {
+      this.resolved = true;
+      this.plugin.ratingSync.requestStop("discard");
+      this.close();
+    };
+  }
+
+  onClose() {
+    if (!this.resolved) {
+      this.resolved = true;
+      this.plugin.ratingSync.resumeAfterDecision();
+      this.onContinue();
+    }
+
+    this.contentEl.empty();
+  }
+}
+
+function openRatingSyncProgress(plugin, app) {
+  const existing = plugin.ratingSync &&
+    plugin.ratingSync.getTask();
+
+  if (existing && existing.running) {
+    new RatingSyncProgressModal(
+      app,
+      plugin,
+      () => {
+        new RatingSyncCloseModal(
+          app,
+          plugin,
+          () => {},
+          () => {
+            new RatingSyncStopModal(
+              app,
+              plugin,
+              () => {
+                new RatingSyncProgressModal(
+                  app,
+                  plugin,
+                  () => {}
+                ).open();
+              },
+              () => {
+                new RatingSyncProgressModal(
+                  app,
+                  plugin,
+                  () => {}
+                ).open();
+              }
+            ).open();
+          }
+        ).open();
+      }
+    ).open();
+
+    return;
+  }
+
+  const progress = new RatingSyncProgressModal(
+    app,
+    plugin,
+    () => {
+      new RatingSyncCloseModal(
+        app,
+        plugin,
+        () => {},
+        () => {
+          new RatingSyncStopModal(
+            app,
+            plugin,
+            () => {
+              new RatingSyncProgressModal(
+                app,
+                plugin,
+                () => {}
+              ).open();
+            },
+            () => {
+              new RatingSyncProgressModal(
+                app,
+                plugin,
+                () => {}
+              ).open();
+            }
+          ).open();
+        }
+      ).open();
+    }
+  );
+
+  progress.open();
+
+  plugin.ratingSync.start({
+    forceRefresh: true,
+    mode: "standard"
+  }).then((task) => {
+    new Notice(
+      plugin.ratingSync.buildSummary(task),
+      10000
+    );
+  }).catch((error) => {
+    console.error("评分同步失败:", error);
+
+    new Notice(
+      "评分同步失败，请查看控制台日志。",
+      7000
+    );
+  });
+}
 module.exports = function createSettingsTabClass({
   PluginSettingTab,
   Setting,
@@ -501,13 +884,13 @@ module.exports = function createSettingsTabClass({
 
   addDashboardSettings(container, compact) {
     container.createEl("h3", {
-      text: "动画评分仪表盘"
+      text: "动画仪表盘"
     });
 
     new Setting(container)
       .setName("打开专属仪表盘")
       .setDesc(
-        "在插件专属页面中打开评分仪表盘，不受阅读模式和实时预览模式影响。"
+        "在插件专属页面中打开动画仪表盘，不受阅读模式和实时预览模式影响。"
       )
       .addButton((button) => {
         button.setButtonText("打开");
@@ -518,9 +901,23 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
+      .setName("恢复仪表盘默认布局")
+      .setDesc(
+        "清除动画仪表盘自定义拖拽顺序、折叠和隐藏状态，恢复默认智能排序。"
+      )
+      .addButton((button) => {
+        button.setButtonText("恢复默认");
+
+        button.onClick(async () => {
+          await this.plugin.resetScoreDashboardLayout();
+          this.display();
+        });
+      });
+
+    new Setting(container)
       .setName("显示侧边栏仪表盘按钮")
       .setDesc(
-        "在 Obsidian 左侧功能栏显示动画评分仪表盘图标。"
+        "在 Obsidian 左侧功能栏显示动画仪表盘图标。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -827,6 +1224,169 @@ module.exports = function createSettingsTabClass({
           await this.plugin.saveSettings();
         });
       });
+
+    new Setting(container)
+      .setName("显示追番全景与时长统计")
+      .setDesc("统计累计观看话数、追番投入时长估算以及各观看状态彩带分布。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowProgressStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowProgressStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示年代与番季分布")
+      .setDesc("按开播年份收录柱状图与四大番季（1月/4月/7月/10月）收录情况统计。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowYearStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowYearStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示评分差异与偏好分析")
+      .setDesc("对比个人评分与 Bangumi 大众评分差异（Δ），展示个人最偏爱与最严苛作品榜单。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowScoreDelta !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowScoreDelta = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示制作公司与改编类型")
+      .setDesc("统计各大动画制作公司收录数与平均分，以及原作类型（原创/漫改/轻改/游戏改等）分布。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowStudioStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowStudioStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("自定义查询分区")
+      .setDesc("根据标签、状态、评分门槛及年代创建个性化的动态聚合分区。")
+      .addButton((btn) => {
+        btn
+          .setButtonText("+ 新建查询分区")
+          .setCta()
+          .onClick(() => {
+            this.plugin.openCustomQuerySectionModal(null, () => {
+              this.display();
+            });
+          });
+      });
+
+    const customSections = Array.isArray(this.plugin.settings.customQuerySections)
+      ? this.plugin.settings.customQuerySections
+      : [];
+
+    if (customSections.length > 0) {
+      for (const section of customSections) {
+        const descParts = [];
+        if (section.tag) descParts.push(`标签: ${section.tag}`);
+        if (section.watchStatus && section.watchStatus !== "all") descParts.push(`状态: ${section.watchStatus}`);
+        if (section.minMyScore) descParts.push(`个人评分≥${section.minMyScore}`);
+        if (section.minBgmScore) descParts.push(`BGM评分≥${section.minBgmScore}`);
+        if (section.year) descParts.push(`年份: ${section.year}`);
+        if (section.season) descParts.push(`季度: ${section.season}`);
+        descParts.push(section.displayMode === "grid" ? "海报网格" : "榜单列表");
+        const limitText = Number(section.limit) > 0 ? `${section.limit}部` : "全部";
+        descParts.push(`上限: ${limitText}`);
+
+        new Setting(container)
+          .setName(section.title)
+          .setDesc(descParts.join(" | "))
+          .addButton((btn) => {
+            btn.setButtonText("编辑").onClick(() => {
+              this.plugin.openCustomQuerySectionModal(section, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn
+              .setButtonText("删除")
+              .setWarning()
+              .onClick(() => {
+                this.plugin.confirmDeleteCustomQuerySection(section, () => {
+                  this.display();
+                });
+              });
+          });
+      }
+    }
+
+    new Setting(container)
+      .setName("自定义收藏展柜")
+      .setDesc("手动挑选并编排心爱作品的专属展柜，支持自定义排序与展示形态。")
+      .addButton((btn) => {
+        btn
+          .setButtonText("+ 新建收藏展柜")
+          .setCta()
+          .onClick(() => {
+            this.plugin.openCustomCollectionModal(null, () => {
+              this.display();
+            });
+          });
+      });
+
+    const collectionSections = Array.isArray(this.plugin.settings.customCollectionSections)
+      ? this.plugin.settings.customCollectionSections
+      : [];
+
+    if (collectionSections.length > 0) {
+      for (const col of collectionSections) {
+        const itemCount = Array.isArray(col.items) ? col.items.length : 0;
+        const modeText = col.displayMode === "list" ? "榜单列表" : "海报网格";
+
+        new Setting(container)
+          .setName(col.title)
+          .setDesc(`收录: ${itemCount} 部 | 展示形态: ${modeText}`)
+          .addButton((btn) => {
+            btn.setButtonText("管理条目").onClick(() => {
+              this.plugin.openCollectionItemsManagerModal(col, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn.setButtonText("编辑").onClick(() => {
+              this.plugin.openCustomCollectionModal(col, () => {
+                this.display();
+              });
+            });
+          })
+          .addButton((btn) => {
+            btn
+              .setButtonText("删除")
+              .setWarning()
+              .onClick(() => {
+                this.plugin.confirmDeleteCustomCollection(col, () => {
+                  this.display();
+                });
+              });
+          });
+      }
+    }
   }
 
   async promptForScoreDataRefresh() {
@@ -941,7 +1501,7 @@ module.exports = function createSettingsTabClass({
     });
 
     const intro = container.createEl("p", {
-      text: "笔记评分控制动画笔记的属性区和正文；仪表盘选项只影响评分仪表盘；数据更新控制何时访问评分数据来源。"
+      text: "笔记评分控制动画笔记的属性区和正文；仪表盘选项只影响动画仪表盘；数据更新控制何时访问评分数据来源。"
     });
 
     intro.style.marginTop = "6px";
@@ -1055,7 +1615,7 @@ await this.saveAndSynchronizeNoteScores();
     new Setting(container)
       .setName("显示精确评分排名")
       .setDesc(
-        "在动画评分仪表盘中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
+        "在动画仪表盘中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1160,62 +1720,46 @@ await this.saveAndRefreshDashboard();
     new Setting(container)
       .setName("立即更新评分数据")
       .setDesc(
-        "立刻读取普通 BGM评分、BGM 用户评分，以及当前启用的精确评分和仪表盘排名数据。接口无数据或请求失败时保留当前笔记内容。"
+        "读取普通 BGM评分、BGM 用户评分，以及当前启用的精确评分。同步过程中可以关闭窗口并让任务在后台继续。"
       )
       .addButton((button) => {
         button.setButtonText("立即更新");
 
-        button.onClick(async () => {
-          button.setDisabled(true);
-
-          try {
-            const previousMonitorState =
-              this.plugin.settings.ratingMonitorEnabled;
-
-            this.plugin.settings.ratingMonitorEnabled =
-              true;
-
-            await this.plugin.refreshBangumiRatingsSilently();
-
-            const summary =
-              await this.plugin.refreshPreciseRatingsSilently(
-                true
-              );
-
-            this.plugin.settings.ratingMonitorEnabled =
-              previousMonitorState;
-
-            await this.plugin.saveSettings();
-
-            new Notice(
-              "评分数据更新完成：扫描 " +
-              summary.scanned +
-              " 篇，请求 " +
-              summary.requested +
-              " 篇， 精确评分更新 " + summary.preciseUpdated + " 篇，写入笔记 " + summary.notesUpdated +
-              " 篇，无数据 " +
-              summary.noData +
-              " 篇，失败 " +
-              summary.failed +
-              " 篇。",
-              9000
-            );
-          } catch (error) {
-            console.error(
-              "手动更新评分数据失败:",
-              error
-            );
-
-            new Notice(
-              "更新评分数据失败，请检查网络或稍后重试。",
-              6000
-            );
-          } finally {
-            button.setDisabled(false);
-          }
+        button.onClick(() => {
+          openRatingSyncProgress(
+            this.plugin,
+            this.app
+          );
         });
       });
 
+    new Setting(container)
+      .setName("查看评分同步状态")
+      .setDesc(
+        "重新打开当前评分同步任务的进度窗口。没有运行中的任务时不会执行操作。"
+      )
+      .addButton((button) => {
+        button.setButtonText("查看状态");
+
+        button.onClick(() => {
+          const task =
+            this.plugin.ratingSync &&
+            this.plugin.ratingSync.getTask();
+
+          if (!task || !task.running) {
+            new Notice(
+              "当前没有正在运行的评分同步任务。",
+              5000
+            );
+            return;
+          }
+
+          openRatingSyncProgress(
+            this.plugin,
+            this.app
+          );
+        });
+      });
     new Setting(container)
       .setName("刷新笔记中的评分显示")
       .setDesc(
@@ -1565,6 +2109,19 @@ await this.saveAndRefreshDashboard();
 
         button.onClick(async () => {
           await this.plugin.openNetabaNoteManager();
+        });
+      });
+
+    new Setting(container)
+      .setName("批量管理已有笔记中的标签")
+      .setDesc(
+        "批量为选中的动画笔记添加新标签，或从笔记中批量移除已有标签。"
+      )
+      .addButton((button) => {
+        button.setButtonText("打开管理窗口");
+
+        button.onClick(async () => {
+          await this.plugin.openBatchTagManager();
         });
       });
   }

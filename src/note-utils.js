@@ -23,17 +23,40 @@ function parseFrontmatter(content) {
     return null;
   }
   const fields = {};
-  for (const line of match[1].split(/\r?\n/)) {
+  const lines = match[1].split(/\r?\n/);
+  let currentKey = null;
+  let currentList = null;
+
+  for (const line of lines) {
+    const listMatch = line.match(/^\s*-\s+(.*)$/);
+    if (listMatch && currentKey) {
+      if (!currentList) {
+        currentList = [];
+        if (fields[currentKey]) {
+          currentList.push(fields[currentKey]);
+        }
+      }
+      let itemVal = listMatch[1].trim();
+      if ((itemVal.startsWith('"') && itemVal.endsWith('"')) || (itemVal.startsWith("'") && itemVal.endsWith("'"))) {
+        itemVal = itemVal.slice(1, -1);
+      }
+      currentList.push(itemVal);
+      fields[currentKey] = currentList.join(", ");
+      continue;
+    }
+
+    currentList = null;
     const index = line.indexOf(":");
     if (index < 0) {
       continue;
     }
     const key = line.slice(0, index).trim();
     let value = line.slice(index + 1).trim();
-    if (value.length >= 2 && (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))) {
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     }
     fields[key] = value;
+    currentKey = key;
   }
   return {
     full: match[0],
@@ -58,13 +81,59 @@ function extractWatchedEpisodes(content) {
   }
   return 0;
 }
+function extractEpisodeNumberFromFileName(fileName) {
+  if (!fileName) return null;
+  const baseName = fileName.replace(/\.[^/.]+$/, "");
+  const epPattern = /(?:ep|episode|e|第)\s*(\d{1,4})(?:\s*话|\s*集|\b)/i;
+  const match1 = baseName.match(epPattern);
+  if (match1 && match1[1]) {
+    return parseInt(match1[1], 10);
+  }
+  const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:[\s_\-\]\)])/;
+  const match2 = baseName.match(delimPattern);
+  if (match2 && match2[1]) {
+    return parseInt(match2[1], 10);
+  }
+  const tailPattern = /(\d{1,3})$/;
+  const match3 = baseName.match(tailPattern);
+  if (match3 && match3[1]) {
+    return parseInt(match3[1], 10);
+  }
+  return null;
+}
+
+let electronShell = null;
+try {
+  electronShell = require("electron").shell;
+} catch (e) {}
+
+async function openLocalPathSafely(targetPath) {
+  if (!targetPath) return false;
+  try {
+    if (electronShell && typeof electronShell.openPath === "function") {
+      const errMsg = await electronShell.openPath(targetPath);
+      if (!errMsg) return true;
+    }
+  } catch (e) {}
+  try {
+    const normalized = String(targetPath).replace(/\\/g, "/");
+    window.open("file:///" + encodeURI(normalized));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function inspectLocalFolder(downloadPath, watchedEpisodes) {
   if (!downloadPath || downloadPath === "\u65E0") {
     return {
       error: "\u65E0\u4E0B\u8F7D\u8DEF\u5F84",
       downloadPath: "",
       fileCount: 0,
-      newCount: 0
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
     };
   }
   if (!fs.existsSync(downloadPath)) {
@@ -72,33 +141,77 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
       error: "\u6587\u4EF6\u5939\u4E0D\u5B58\u5728",
       downloadPath,
       fileCount: 0,
-      newCount: 0
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
     };
   }
-  const entries = fs.readdirSync(
-    downloadPath,
-    {
-      withFileTypes: true
-    }
-  );
-  const fileCount = entries.filter((entry) => {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(downloadPath, { withFileTypes: true });
+  } catch (err) {
+    return {
+      error: "\u6587\u4EF6\u5939\u8BFB\u53D6\u5931\u8D25",
+      downloadPath,
+      fileCount: 0,
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
+    };
+  }
+  const rawVideoEntries = entries.filter((entry) => {
     if (!entry.isFile()) {
       return false;
     }
     return VIDEO_EXTENSIONS.includes(
-      path.extname(
-        entry.name
-      ).toLowerCase()
+      path.extname(entry.name).toLowerCase()
     );
-  }).length;
+  });
+  const videoFiles = rawVideoEntries.map((entry, index) => {
+    const fullPath = path.join(downloadPath, entry.name);
+    const parsedEp = extractEpisodeNumberFromFileName(entry.name);
+    return {
+      name: entry.name,
+      path: fullPath,
+      episode: parsedEp !== null ? parsedEp : (index + 1)
+    };
+  });
+  videoFiles.sort((a, b) => {
+    if (a.episode !== b.episode) {
+      return a.episode - b.episode;
+    }
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  });
+
+  const currentWatched = Number(watchedEpisodes) || 0;
+  const targetNextEp = currentWatched + 1;
+  let nextEpisodeFile = null;
+  let nextEpisodeNumber = null;
+  const matched = videoFiles.find(vf => vf.episode === targetNextEp);
+  if (matched) {
+    nextEpisodeFile = matched.path;
+    nextEpisodeNumber = matched.episode;
+  } else if (currentWatched < videoFiles.length) {
+    const fallback = videoFiles[currentWatched];
+    if (fallback) {
+      nextEpisodeFile = fallback.path;
+      nextEpisodeNumber = fallback.episode;
+    }
+  }
+
   return {
     error: null,
     downloadPath,
-    fileCount,
+    fileCount: videoFiles.length,
     newCount: Math.max(
       0,
-      fileCount - watchedEpisodes
-    )
+      videoFiles.length - currentWatched
+    ),
+    videoFiles,
+    nextEpisodeFile,
+    nextEpisodeNumber
   };
 }
 function getLocalStatusText(result) {
@@ -125,9 +238,21 @@ function updateFrontmatterField(content, fieldName, fieldValue) {
     /[.*+?^${}()|[\]\\]/g,
     "\\$&"
   );
-  const fieldLine = fieldName + ': "' + String(fieldValue || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  let fieldLine;
+  if (fieldName === "tags") {
+    let tagList = Array.isArray(fieldValue)
+      ? fieldValue
+      : String(fieldValue || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+    tagList = Array.from(new Set(tagList));
+    if (!tagList.some((t) => t.toLowerCase() === "bangumi")) {
+      tagList.unshift("bangumi");
+    }
+    fieldLine = "tags:\n" + tagList.map((t) => "  - " + t).join("\n");
+  } else {
+    fieldLine = fieldName + ': "' + String(fieldValue || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+  }
   const pattern = new RegExp(
-    "^" + escapedName + "\\s*:.*$",
+    "^" + escapedName + "\\s*:(?:[^\\r\\n]*(?:\\r?\\n\\s+-[^\\r\\n]*)*)",
     "m"
   );
   const newBody = pattern.test(parsed.body) ? parsed.body.replace(
@@ -907,6 +1032,114 @@ function synchronizeBangumiScoreFields(
 
 
 
+function updateWatchedEpisodes(content, count) {
+  const patterns = [
+    /(\*\*已观看集数\s*：\s*\*\*\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\s*:\s*\*\*\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\*\*\s*：\s*)\d+(?:\.\d+)?/,
+    /(\*\*已观看集数\*\*\s*:\s*)\d+(?:\.\d+)?/
+  ];
+  for (const pattern of patterns) {
+    if (pattern.test(content)) {
+      return content.replace(pattern, `$1${count}`);
+    }
+  }
+  const parsed = parseFrontmatter(content);
+  if (parsed) {
+    return content.replace(parsed.full, parsed.full + `\n\n**已观看集数**： ${count}`);
+  }
+  return `**已观看集数**： ${count}\n\n` + content;
+}
+
+function updateCalloutTableRow(content, fieldName, newValue) {
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`^((?:>\\s*)?\\|\\s*(?:\\*\\*)?${escaped}(?:\\*\\*)?\\s*\\|)[^|\\r\\n]*(\\|)`, "m");
+  if (regex.test(content)) {
+    return content.replace(regex, `$1 ${newValue} $2`);
+  }
+  return content;
+}
+
+function syncNoteCalloutFromFrontmatter(content) {
+  const parsed = parseFrontmatter(content);
+  if (!parsed || !parsed.fields) return content;
+  let updated = content;
+
+  if (parsed.fields["观看状态"]) {
+    const st = cleanValue(parsed.fields["观看状态"]);
+    if (st) {
+      updated = updateCalloutTableRow(updated, "观看状态", st);
+    }
+  }
+
+  if (parsed.fields["我的评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["我的评分"]);
+    updated = updateCalloutTableRow(updated, "我的评分", sc || "未评分");
+  }
+
+  if (parsed.fields["BGM用户评分"] !== undefined || parsed.fields["Bangumi用户评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["BGM用户评分"] || parsed.fields["Bangumi用户评分"]);
+    updated = updateCalloutTableRow(updated, "BGM用户评分", sc || "未评分");
+    updated = updateCalloutTableRow(updated, "BGM 用户评分", sc || "未评分");
+  }
+
+  if (parsed.fields["BGM评分"] !== undefined || parsed.fields["BGM 评分"] !== undefined) {
+    const sc = cleanValue(parsed.fields["BGM评分"] || parsed.fields["BGM 评分"]);
+    if (sc) {
+      updated = updateCalloutTableRow(updated, "BGM 评分", sc);
+      updated = updateCalloutTableRow(updated, "BGM评分", sc);
+    }
+  }
+
+  const watchedInBody = extractWatchedEpisodes(content);
+  let ep = null;
+  if (parsed.fields["已观看集数"] !== undefined) {
+    const parsedEp = parseInt(parsed.fields["已观看集数"], 10);
+    if (!isNaN(parsedEp)) ep = parsedEp;
+  } else if (watchedInBody !== null) {
+    ep = watchedInBody;
+  }
+
+  if (ep !== null && !isNaN(ep) && ep >= 0) {
+    updated = updateWatchedEpisodes(updated, ep);
+    updated = updateCalloutTableRow(updated, "已观看集数", String(ep));
+  }
+
+  return updated;
+}
+
+function addNoteTag(content, tag) {
+  const cleanTag = String(tag || "").trim().replace(/^#/, "");
+  if (!cleanTag) return content;
+  const parsed = parseFrontmatter(content);
+  if (!parsed) return content;
+
+  let existing = cleanValue(parsed.fields.tags || "");
+  const tokens = existing.split(/[,;\s#\[\]"']+/).filter(Boolean);
+  if (tokens.includes(cleanTag)) {
+    return content;
+  }
+  tokens.push(cleanTag);
+  const newTags = tokens.join(", ");
+  return updateFrontmatterField(content, "tags", newTags);
+}
+
+function removeNoteTag(content, tag) {
+  const cleanTag = String(tag || "").trim().replace(/^#/, "");
+  if (!cleanTag || cleanTag.toLowerCase() === "bangumi") return content;
+  const parsed = parseFrontmatter(content);
+  if (!parsed) return content;
+
+  let existing = cleanValue(parsed.fields.tags || "");
+  const tokens = existing.split(/[,;\s#\[\]"']+/).filter(Boolean);
+  const remaining = tokens.filter((t) => t !== cleanTag);
+  if (remaining.length === tokens.length) {
+    return content;
+  }
+  const newTags = remaining.join(", ");
+  return updateFrontmatterField(content, "tags", newTags);
+}
+
 module.exports = {
   cleanValue,
   parseFrontmatter,
@@ -925,5 +1158,12 @@ module.exports = {
   extractBaseViewNames,
   removeBaseViews,
   hasBaseView,
-  appendSeasonView
+  appendSeasonView,
+  updateWatchedEpisodes,
+  updateCalloutTableRow,
+  syncNoteCalloutFromFrontmatter,
+  addNoteTag,
+  removeNoteTag,
+  extractEpisodeNumberFromFileName,
+  openLocalPathSafely
 };
