@@ -41,8 +41,12 @@ let {
   updateCalloutTableRow,
   addNoteTag,
   removeNoteTag,
-  syncNoteCalloutFromFrontmatter
+  syncNoteCalloutFromFrontmatter,
+  openLocalPathSafely
 } = noteUtils;
+
+const netabaTrendService = require("./netaba-trend-service.js");
+const NetabaTrendModal = netabaTrendService.createNetabaTrendModalClass({ Modal, Notice });
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -266,6 +270,10 @@ var BangumiScoreDashboardView = class extends ItemView {
 };
 
 var BangumiManagerPlugin = class extends Plugin {
+  getWatchStateClass(state) {
+    return state || "未设置";
+  }
+
   async onload() {
     const savedSettings =
       await this.loadData();
@@ -454,6 +462,8 @@ var BangumiManagerPlugin = class extends Plugin {
       noteUtils.addNoteTag;
     removeNoteTag =
       noteUtils.removeNoteTag;
+    openLocalPathSafely =
+      noteUtils.openLocalPathSafely;
 
     this.addSettingTab(
       new BangumiManagerSettingTab(
@@ -1890,7 +1900,10 @@ if (this.settings.seasonViewMode === "current") {
         subjectId: subjectId,
         animeType: cleanValue(parsed.fields.改编类型),
         studio: cleanValue(parsed.fields.制作公司),
-        director: cleanValue(parsed.fields.监督)
+        director: cleanValue(parsed.fields.监督),
+        downloadPath: cleanValue(parsed.fields.下载路径),
+        localUpdateStatus: cleanValue(parsed.fields.本地更新状态),
+        netabaUrl: cleanValue(parsed.fields.Netaba链接)
       });
     }
 
@@ -3061,6 +3074,21 @@ if (this.settings.seasonViewMode === "current") {
         new Notice(msg);
       };
 
+      const btnTrend = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-trend",
+        text: "📈"
+      });
+      btnTrend.title = "查看 Netaba 播出期间评分趋势与个人评分对比";
+      btnTrend.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!item.subjectId) {
+          new Notice("该动画未关联有效的 Bangumi 编号，无法获取 Netaba 趋势。");
+          return;
+        }
+        new NetabaTrendModal(this.app, this, item).open();
+      };
+
       // 4. 信息区
       const info = card.createDiv("bangumi-grid-info");
       const title = info.createDiv({
@@ -3077,6 +3105,64 @@ if (this.settings.seasonViewMode === "current") {
         cls: "bangumi-grid-meta",
         text: metaParts.join(" · ") || " "
       });
+
+      // 本地视频追番深度联动
+      if (item.downloadPath && item.downloadPath !== "\u65E0") {
+        const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
+        if (localResult && !localResult.error && localResult.fileCount > 0) {
+          const localBar = info.createDiv("bangumi-grid-local-bar");
+          const capsule = localBar.createSpan({
+            cls: `bangumi-local-capsule ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
+            text: localResult.newCount > 0
+              ? `📁 本地 +${localResult.newCount}话`
+              : `📁 本地 ${localResult.fileCount}话`
+          });
+          capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
+          capsule.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await openLocalPathSafely(item.downloadPath);
+          };
+
+          if (localResult.nextEpisodeFile) {
+            const nextEpNum = localResult.nextEpisodeNumber || (Number(item.watchedEpisodes || 0) + 1);
+            const playBtn = localBar.createEl("button", {
+              cls: "bangumi-local-action-btn is-play",
+              text: `▶ 第${nextEpNum}话`
+            });
+            playBtn.title = `调用系统默认播放器打开第 ${nextEpNum} 话`;
+            playBtn.onclick = async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const ok = await openLocalPathSafely(localResult.nextEpisodeFile);
+              if (ok) {
+                const noticeEl = document.createElement("div");
+                noticeEl.innerHTML = `<div>已调用播放器打开<strong>第 ${nextEpNum} 话</strong>。</div><div style="margin-top:6px;display:flex;gap:6px;"><button class="mod-cta" id="bgm-quick-advance-ep">标记已看至第 ${nextEpNum} 话</button></div>`;
+                const n = new Notice(noticeEl, 12000);
+                const advBtn = noticeEl.querySelector("#bgm-quick-advance-ep");
+                if (advBtn) {
+                  advBtn.onclick = async () => {
+                    n.hide();
+                    await this.quickUpdateAnimeNote(item, { watchedEpisodes: nextEpNum });
+                    new Notice(`《${item.name}》已更新为观看至第 ${nextEpNum} 话`);
+                  };
+                }
+              }
+            };
+          }
+
+          const folderBtn = localBar.createEl("button", {
+            cls: "bangumi-local-action-btn is-folder",
+            text: "📂"
+          });
+          folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
+          folderBtn.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await openLocalPathSafely(item.downloadPath);
+          };
+        }
+      }
 
       // 5. 标签栏（支持点击删除、快速打标）
       const tagsRow = info.createDiv("bangumi-grid-tags-row");
@@ -3456,6 +3542,21 @@ if (this.settings.seasonViewMode === "current") {
         new Notice(`《${item.name}》已看集数递增至：${next} 话`);
       };
 
+      const btnTrend = epBar.createEl("button", {
+        cls: "bangumi-grid-ep-btn is-trend",
+        text: "📈"
+      });
+      btnTrend.title = "查看 Netaba 播出期间评分趋势与个人评分对比";
+      btnTrend.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!item.subjectId) {
+          new Notice("该动画未关联有效的 Bangumi 编号，无法获取 Netaba 趋势。");
+          return;
+        }
+        new NetabaTrendModal(this.app, this, item).open();
+      };
+
       // 4. 信息区
       const info = card.createDiv("bangumi-grid-info");
       const title = info.createDiv({
@@ -3472,6 +3573,64 @@ if (this.settings.seasonViewMode === "current") {
         cls: "bangumi-grid-meta",
         text: metaParts.join(" · ") || " "
       });
+
+      // 本地视频追番深度联动
+      if (item.downloadPath && item.downloadPath !== "\u65E0") {
+        const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
+        if (localResult && !localResult.error && localResult.fileCount > 0) {
+          const localBar = info.createDiv("bangumi-grid-local-bar");
+          const capsule = localBar.createSpan({
+            cls: `bangumi-local-capsule ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
+            text: localResult.newCount > 0
+              ? `📁 本地 +${localResult.newCount}话`
+              : `📁 本地 ${localResult.fileCount}话`
+          });
+          capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
+          capsule.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await openLocalPathSafely(item.downloadPath);
+          };
+
+          if (localResult.nextEpisodeFile) {
+            const nextEpNum = localResult.nextEpisodeNumber || (Number(item.watchedEpisodes || 0) + 1);
+            const playBtn = localBar.createEl("button", {
+              cls: "bangumi-local-action-btn is-play",
+              text: `▶ 第${nextEpNum}话`
+            });
+            playBtn.title = `调用系统默认播放器打开第 ${nextEpNum} 话`;
+            playBtn.onclick = async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const ok = await openLocalPathSafely(localResult.nextEpisodeFile);
+              if (ok) {
+                const noticeEl = document.createElement("div");
+                noticeEl.innerHTML = `<div>已调用播放器打开<strong>第 ${nextEpNum} 话</strong>。</div><div style="margin-top:6px;display:flex;gap:6px;"><button class="mod-cta" id="bgm-quick-advance-ep-compact">标记已看至第 ${nextEpNum} 话</button></div>`;
+                const n = new Notice(noticeEl, 12000);
+                const advBtn = noticeEl.querySelector("#bgm-quick-advance-ep-compact");
+                if (advBtn) {
+                  advBtn.onclick = async () => {
+                    n.hide();
+                    await this.quickUpdateAnimeNote(item, { watchedEpisodes: nextEpNum });
+                    new Notice(`《${item.name}》已更新为观看至第 ${nextEpNum} 话`);
+                  };
+                }
+              }
+            };
+          }
+
+          const folderBtn = localBar.createEl("button", {
+            cls: "bangumi-local-action-btn is-folder",
+            text: "📂"
+          });
+          folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
+          folderBtn.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await openLocalPathSafely(item.downloadPath);
+          };
+        }
+      }
 
       // 5. 标签栏
       const tagsRow = info.createDiv("bangumi-grid-tags-row");
@@ -5234,7 +5393,32 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-type-bar{height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--interactive-accent),var(--color-accent-2, var(--color-blue)));transition:width .2s ease;}",
       ".bangumi-type-count{font-size:.8em;color:var(--text-muted);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}",
       "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}.bangumi-collection-manager-panels{grid-template-columns:1fr !important;}.bangumi-analytics-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-season-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-summary-top{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-lists-wrap{grid-template-columns:1fr;}.bangumi-studio-type-wrap{grid-template-columns:1fr;}}",
-      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}.bangumi-analytics-stat-grid{grid-template-columns:1fr;}.bangumi-season-grid{grid-template-columns:1fr;}.bangumi-delta-summary-top{grid-template-columns:1fr;}}"
+      "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}.bangumi-analytics-stat-grid{grid-template-columns:1fr;}.bangumi-season-grid{grid-template-columns:1fr;}.bangumi-delta-summary-top{grid-template-columns:1fr;}}",
+      ".bangumi-trend-component{padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);margin:12px 0;}",
+      ".bangumi-trend-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;}",
+      ".bangumi-trend-header-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}",
+      ".bangumi-trend-score-badge{font-size:.82em;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);}",
+      ".bangumi-trend-personal-badge{font-size:.82em;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,153,0,0.12);color:var(--text-accent, #e5a00d);border:1px solid rgba(255,153,0,0.25);}",
+      ".bangumi-trend-toggle-group{display:flex;background:var(--background-primary);border:1px solid var(--background-modifier-border);border-radius:6px;overflow:hidden;padding:2px;}",
+      ".bangumi-trend-btn{background:transparent;border:0;padding:3px 10px;font-size:.78em;cursor:pointer;border-radius:4px;color:var(--text-muted);transition:all .15s ease;}",
+      ".bangumi-trend-btn.is-active{background:var(--interactive-accent);color:#fff;font-weight:600;}",
+      ".bangumi-trend-tooltip{background:var(--background-primary);border:1px solid var(--background-modifier-border);box-shadow:0 6px 18px rgba(0,0,0,0.18);border-radius:8px;padding:8px 12px;font-size:12px;min-width:130px;line-height:1.45;}",
+      ".trend-tip-date{font-weight:600;color:var(--text-normal);margin-bottom:2px;}",
+      ".trend-tip-score{font-size:14px;font-weight:700;color:var(--interactive-accent);}",
+      ".trend-tip-score .score-label{font-size:11px;font-weight:normal;color:var(--text-muted);}",
+      ".trend-tip-meta{color:var(--text-muted);font-size:11px;}",
+      ".trend-tip-ep{color:var(--color-green, #28a745);font-size:11px;font-weight:600;margin-top:2px;}",
+      ".bangumi-grid-local-bar{display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap;}",
+      ".bangumi-local-capsule{font-size:.75em;padding:2px 7px;border-radius:4px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:3px;transition:all .15s ease;}",
+      ".bangumi-local-capsule.is-synced{background:rgba(40,167,69,0.12);color:var(--color-green, #28a745);border:1px solid rgba(40,167,69,0.25);}",
+      ".bangumi-local-capsule.has-new{background:rgba(0,123,255,0.15);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.3);}",
+      ".bangumi-local-capsule.is-missing{background:rgba(235,87,87,0.12);color:var(--text-error);border:1px solid rgba(235,87,87,0.25);}",
+      ".bangumi-local-capsule:hover{filter:brightness(1.15);transform:translateY(-1px);}",
+      ".bangumi-local-action-btn{font-size:.72em;padding:2px 7px;border-radius:4px;cursor:pointer;background:var(--background-secondary-alt);border:1px solid var(--background-modifier-border);color:var(--text-normal);line-height:1.4;transition:all .15s ease;}",
+      ".bangumi-local-action-btn.is-play{background:var(--interactive-accent);color:#fff;border-color:var(--interactive-accent);font-weight:600;}",
+      ".bangumi-local-action-btn.is-play:hover{filter:brightness(1.1);}",
+      ".bangumi-local-action-btn.is-folder:hover{background:var(--background-modifier-hover);}",
+      ".bangumi-grid-ep-btn.is-trend{margin-left:auto;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);font-size:.78em;padding:2px 6px;}"
     ].join("");
 
     document.head.appendChild(style);
@@ -5295,6 +5479,10 @@ if (this.settings.seasonViewMode === "current") {
 
           const pages = [
             {
+              key: "nativeTrend",
+              name: "📈 原生趋势图"
+            },
+            {
               key: "subject",
               name: "当前动画页面"
             },
@@ -5338,6 +5526,49 @@ if (this.settings.seasonViewMode === "current") {
               async (event) => {
                 event.preventDefault();
                 event.stopPropagation();
+
+                if (page.key === "nativeTrend") {
+                  const parsed = parseFrontmatter(content);
+                  const sid = bangumiApi.getSubjectId(cleanValue(parsed?.fields?.BGM链接 || parsed?.fields?.Netaba链接));
+                  if (!sid) {
+                    new Notice("未找到该动画的有效 Bangumi 编号。");
+                    return;
+                  }
+                  let nativeBox = element.querySelector(".bangumi-native-trend-container");
+                  if (!nativeBox) {
+                    nativeBox = document.createElement("div");
+                    nativeBox.className = "bangumi-native-trend-container";
+                    if (iframe && iframe.parentElement) {
+                      iframe.parentElement.before(nativeBox);
+                    } else {
+                      element.appendChild(nativeBox);
+                    }
+                  }
+                  if (iframe && iframe.parentElement) {
+                    iframe.parentElement.style.display = "none";
+                  }
+                  nativeBox.style.display = "block";
+                  nativeBox.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-muted);">正在加载原生趋势图……</div>';
+                  try {
+                    const rawData = await netabaTrendService.fetchSubjectTrendData(this.app, sid);
+                    const pScore = this.parseDashboardScore(parsed?.fields?.我的评分);
+                    const normData = netabaTrendService.normalizeTrendData(rawData, pScore);
+                    netabaTrendService.renderNativeTrendSvg(nativeBox, normData);
+                    new Notice("已渲染原生轻量评分趋势图");
+                  } catch (e) {
+                    nativeBox.innerHTML = `<div style="padding:16px;color:var(--text-error);">加载原生趋势图失败: ${e.message}</div>`;
+                  }
+                  return;
+                }
+
+                // 切回其他 iframe 页面时隐藏原生趋势图并恢复 iframe
+                const nativeBox = element.querySelector(".bangumi-native-trend-container");
+                if (nativeBox) {
+                  nativeBox.style.display = "none";
+                }
+                if (iframe && iframe.parentElement) {
+                  iframe.parentElement.style.display = "";
+                }
 
                 if (page.key === "browser") {
                   const currentUrl =
@@ -7365,8 +7596,11 @@ var BatchTagManagerModal = class extends Modal {
         titleEl.style.fontWeight = "500";
         titleEl.textContent = it.name;
 
+        const stateClass = (this.plugin && typeof this.plugin.getWatchStateClass === "function")
+          ? this.plugin.getWatchStateClass(it.state)
+          : (it.state || "未设置");
         const stateBadge = row.createSpan({
-          cls: `bangumi-grid-state-badge is-${this.plugin.getWatchStateClass(it.state)}`,
+          cls: `bangumi-grid-state-badge is-${stateClass}`,
           text: it.state || "未设置"
         });
         stateBadge.style.fontSize = "11px";

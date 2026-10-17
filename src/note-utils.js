@@ -81,13 +81,59 @@ function extractWatchedEpisodes(content) {
   }
   return 0;
 }
+function extractEpisodeNumberFromFileName(fileName) {
+  if (!fileName) return null;
+  const baseName = fileName.replace(/\.[^/.]+$/, "");
+  const epPattern = /(?:ep|episode|e|第)\s*(\d{1,4})(?:\s*话|\s*集|\b)/i;
+  const match1 = baseName.match(epPattern);
+  if (match1 && match1[1]) {
+    return parseInt(match1[1], 10);
+  }
+  const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:[\s_\-\]\)])/;
+  const match2 = baseName.match(delimPattern);
+  if (match2 && match2[1]) {
+    return parseInt(match2[1], 10);
+  }
+  const tailPattern = /(\d{1,3})$/;
+  const match3 = baseName.match(tailPattern);
+  if (match3 && match3[1]) {
+    return parseInt(match3[1], 10);
+  }
+  return null;
+}
+
+let electronShell = null;
+try {
+  electronShell = require("electron").shell;
+} catch (e) {}
+
+async function openLocalPathSafely(targetPath) {
+  if (!targetPath) return false;
+  try {
+    if (electronShell && typeof electronShell.openPath === "function") {
+      const errMsg = await electronShell.openPath(targetPath);
+      if (!errMsg) return true;
+    }
+  } catch (e) {}
+  try {
+    const normalized = String(targetPath).replace(/\\/g, "/");
+    window.open("file:///" + encodeURI(normalized));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function inspectLocalFolder(downloadPath, watchedEpisodes) {
   if (!downloadPath || downloadPath === "\u65E0") {
     return {
       error: "\u65E0\u4E0B\u8F7D\u8DEF\u5F84",
       downloadPath: "",
       fileCount: 0,
-      newCount: 0
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
     };
   }
   if (!fs.existsSync(downloadPath)) {
@@ -95,33 +141,77 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
       error: "\u6587\u4EF6\u5939\u4E0D\u5B58\u5728",
       downloadPath,
       fileCount: 0,
-      newCount: 0
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
     };
   }
-  const entries = fs.readdirSync(
-    downloadPath,
-    {
-      withFileTypes: true
-    }
-  );
-  const fileCount = entries.filter((entry) => {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(downloadPath, { withFileTypes: true });
+  } catch (err) {
+    return {
+      error: "\u6587\u4EF6\u5939\u8BFB\u53D6\u5931\u8D25",
+      downloadPath,
+      fileCount: 0,
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
+    };
+  }
+  const rawVideoEntries = entries.filter((entry) => {
     if (!entry.isFile()) {
       return false;
     }
     return VIDEO_EXTENSIONS.includes(
-      path.extname(
-        entry.name
-      ).toLowerCase()
+      path.extname(entry.name).toLowerCase()
     );
-  }).length;
+  });
+  const videoFiles = rawVideoEntries.map((entry, index) => {
+    const fullPath = path.join(downloadPath, entry.name);
+    const parsedEp = extractEpisodeNumberFromFileName(entry.name);
+    return {
+      name: entry.name,
+      path: fullPath,
+      episode: parsedEp !== null ? parsedEp : (index + 1)
+    };
+  });
+  videoFiles.sort((a, b) => {
+    if (a.episode !== b.episode) {
+      return a.episode - b.episode;
+    }
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  });
+
+  const currentWatched = Number(watchedEpisodes) || 0;
+  const targetNextEp = currentWatched + 1;
+  let nextEpisodeFile = null;
+  let nextEpisodeNumber = null;
+  const matched = videoFiles.find(vf => vf.episode === targetNextEp);
+  if (matched) {
+    nextEpisodeFile = matched.path;
+    nextEpisodeNumber = matched.episode;
+  } else if (currentWatched < videoFiles.length) {
+    const fallback = videoFiles[currentWatched];
+    if (fallback) {
+      nextEpisodeFile = fallback.path;
+      nextEpisodeNumber = fallback.episode;
+    }
+  }
+
   return {
     error: null,
     downloadPath,
-    fileCount,
+    fileCount: videoFiles.length,
     newCount: Math.max(
       0,
-      fileCount - watchedEpisodes
-    )
+      videoFiles.length - currentWatched
+    ),
+    videoFiles,
+    nextEpisodeFile,
+    nextEpisodeNumber
   };
 }
 function getLocalStatusText(result) {
@@ -1073,5 +1163,7 @@ module.exports = {
   updateCalloutTableRow,
   syncNoteCalloutFromFrontmatter,
   addNoteTag,
-  removeNoteTag
+  removeNoteTag,
+  extractEpisodeNumberFromFileName,
+  openLocalPathSafely
 };
