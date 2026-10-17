@@ -1226,6 +1226,62 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
+      .setName("显示追番全景与时长统计")
+      .setDesc("统计累计观看话数、追番投入时长估算以及各观看状态彩带分布。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowProgressStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowProgressStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示年代与番季分布")
+      .setDesc("按开播年份收录柱状图与四大番季（1月/4月/7月/10月）收录情况统计。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowYearStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowYearStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示评分差异与偏好分析")
+      .setDesc("对比个人评分与 Bangumi 大众评分差异（Δ），展示个人最偏爱与最严苛作品榜单。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowScoreDelta !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowScoreDelta = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
+      .setName("显示制作公司与改编类型")
+      .setDesc("统计各大动画制作公司收录数与平均分，以及原作类型（原创/漫改/轻改/游戏改等）分布。")
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.dashboardShowStudioStats !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.dashboardShowStudioStats = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(container)
       .setName("自定义查询分区")
       .setDesc("根据标签、状态、评分门槛及年代创建个性化的动态聚合分区。")
       .addButton((btn) => {
