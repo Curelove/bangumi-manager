@@ -7813,5 +7813,7 @@ var BatchTagManagerModal = class extends Modal {
   }
 };
 
+BangumiManagerPlugin.Dashboard3DSpace = Dashboard3DSpace;
 module.exports = BangumiManagerPlugin;
+module.exports.Dashboard3DSpace = Dashboard3DSpace;
 
