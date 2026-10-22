@@ -106,9 +106,11 @@ function checkRoxyHdPortraitsStatus(plugin) {
     missingFiles.push(...uniqueFiles);
   }
 
+  const foundCount = uniqueFiles.length - missingFiles.length;
   return {
     installed: missingFiles.length === 0,
-    existingCount: uniqueFiles.length - missingFiles.length,
+    foundCount,
+    existingCount: foundCount,
     totalCount: uniqueFiles.length,
     missingFiles,
     relDir,
@@ -138,7 +140,7 @@ async function downloadRoxyHdPortraitPack(plugin, onProgress) {
   for (let i = 0; i < uniqueFiles.length; i++) {
     const fileName = uniqueFiles[i];
     if (typeof onProgress === "function") {
-      onProgress({ current: i + 1, total: uniqueFiles.length, fileName });
+      onProgress(i + 1, uniqueFiles.length, fileName);
     }
 
     const candidateUrls = [
@@ -162,12 +164,20 @@ async function downloadRoxyHdPortraitPack(plugin, onProgress) {
 
     if (fileBuffer) {
       try {
+        let wrote = false;
         if (absDir) {
           fs.writeFileSync(path.join(absDir, fileName), Buffer.from(fileBuffer));
-        } else if (plugin?.app?.vault?.adapter?.writeBinary) {
-          await plugin.app.vault.adapter.writeBinary(`${relDir}/${fileName}`, fileBuffer);
+          wrote = true;
         }
-        downloadedCount++;
+        if (plugin?.app?.vault?.adapter?.writeBinary) {
+          await plugin.app.vault.adapter.writeBinary(`${relDir}/${fileName}`, fileBuffer).catch(() => {});
+          wrote = true;
+        }
+        if (wrote) {
+          downloadedCount++;
+        } else {
+          failedFiles.push(fileName);
+        }
       } catch (writeErr) {
         failedFiles.push(fileName);
       }
@@ -179,14 +189,27 @@ async function downloadRoxyHdPortraitPack(plugin, onProgress) {
   const coord = ensureRoxyCoordinator(plugin);
   const status = checkRoxyHdPortraitsStatus(plugin);
   if (coord) {
+    coord.assetCacheBust = Date.now();
     coord.hdPortraitsAvailable = status.installed;
     coord.preloaded = false;
     preloadAllRoxyPortraits(plugin, coord);
   }
 
+  // 若番剧档案馆二维页面当前已处于打开状态，立即热刷新舞台立绘，无需用户手动切开关
+  if (typeof document !== "undefined") {
+    document.querySelectorAll(".curator-roxy-widget").forEach((w) => {
+      if (typeof w._refreshRoxyStageMode === "function") {
+        w._refreshRoxyStageMode();
+      }
+    });
+  }
+
   return {
     ok: status.installed,
-    downloadedCount,
+    success: status.installed,
+    downloaded: status.foundCount,
+    downloadedCount: status.foundCount,
+    total: uniqueFiles.length,
     totalCount: uniqueFiles.length,
     failedFiles,
     status
@@ -210,7 +233,12 @@ function resolveRoxyAssetUrl(plugin, relativeFile) {
       plugin.app.vault.adapter &&
       typeof plugin.app.vault.adapter.getResourcePath === "function"
     ) {
-      return plugin.app.vault.adapter.getResourcePath(cleanRel);
+      let resourceUrl = plugin.app.vault.adapter.getResourcePath(cleanRel);
+      const bust = plugin._roxyCoordinator && plugin._roxyCoordinator.assetCacheBust;
+      if (resourceUrl && bust) {
+        resourceUrl += (resourceUrl.includes("?") ? "&" : "?") + `v=${bust}`;
+      }
+      return resourceUrl;
     }
   } catch (err) {
     // ignore
@@ -1071,16 +1099,25 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   const applyStageMode = (targetState) => {
     const pose = ROXY_PORTRAIT_FILES[targetState] ? targetState : "explain";
     const file = ROXY_PORTRAIT_FILES[pose] || ROXY_PORTRAIT_FILES.explain;
+    if (!coord.hdPortraitsAvailable) {
+      const latestStatus = checkRoxyHdPortraitsStatus(plugin);
+      if (latestStatus.installed) {
+        coord.hdPortraitsAvailable = true;
+        coord.preloaded = false;
+        preloadAllRoxyPortraits(plugin, coord);
+      }
+    }
     const canUseHd = Boolean(coord.hdPortraitsAvailable) && !plugin.settings.roxyForceLightweight2D;
     if (canUseHd) {
       const nextUrl =
         (coord.resolvedUrls && coord.resolvedUrls[file]) || resolveRoxyAssetUrl(plugin, file);
       if (nextUrl) {
+        const wasFallback = widget.classList.contains("is-pixel-fallback-mode");
         widget.classList.add("is-hd-portrait-mode");
         widget.classList.remove("is-pixel-fallback-mode");
         portraitImg.style.display = "block";
         pixelFallbackHost.style.display = "none";
-        if (portraitImg.getAttribute("src") !== nextUrl) {
+        if (wasFallback || portraitImg.getAttribute("src") !== nextUrl) {
           portraitImg.src = nextUrl;
         }
         return;
@@ -1163,6 +1200,14 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   disableBtn.title = "永久关闭二维记录员（可在插件设置或顶栏重新启用）";
 
   applyStageMode(initState);
+  widget._refreshRoxyStageMode = () => {
+    const latest = checkRoxyHdPortraitsStatus(plugin);
+    coord.hdPortraitsAvailable = latest.installed;
+    if (packDownloadBtn) {
+      packDownloadBtn.style.display = latest.installed ? "none" : "inline-flex";
+    }
+    applyStageMode(widget.dataset.roxyState || "explain");
+  };
 
   let bubbleTimer = null;
   let cancelPinballAnim = null;
