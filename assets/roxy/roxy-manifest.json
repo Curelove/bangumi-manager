@@ -1,0 +1,66 @@
+{
+  "generatedAt": "2026-10-21T22:35:56.645Z",
+  "sourceRoot": "C:\\Users\\qq634\\Desktop\\万物\\数据库\\洛琪希Video",
+  "namingMode": "en",
+  "portraits": {
+    "explain": {
+      "zh": "洛琪希讲解.png",
+      "en": "roxy_explain.png",
+      "preferred": "roxy_explain.png",
+      "description": "单手轻托/讲解姿态（常驻默认/idle 与知识讲解）"
+    },
+    "surprised": {
+      "zh": "洛琪希吃惊.png",
+      "en": "roxy_surprised.png",
+      "preferred": "roxy_surprised.png",
+      "description": "睁大眼睛惊讶姿态（发现异常、问题呈现、转折）"
+    },
+    "panic": {
+      "zh": "洛琪希慌张.png",
+      "en": "roxy_panic.png",
+      "preferred": "roxy_panic.png",
+      "description": "慌张冒汗姿态（紧急报错、高危预警、突发状况）"
+    },
+    "warn": {
+      "zh": "洛琪希禁止.png",
+      "en": "roxy_warn.png",
+      "preferred": "roxy_warn.png",
+      "description": "单手叉腰举禁止牌（常规警告、注意事项、拦截提示）"
+    },
+    "warn2": {
+      "zh": "洛琪希禁止2.png",
+      "en": "roxy_warn2.png",
+      "preferred": "roxy_warn2.png",
+      "description": "双手举禁止牌强调姿态（强拦截、二次确认警告）"
+    },
+    "blocked": {
+      "zh": "洛琪希无奈.png",
+      "en": "roxy_blocked.png",
+      "preferred": "roxy_blocked.png",
+      "description": "闭眼无奈叹气姿态（受阻、权限受限、踩坑叹气）"
+    },
+    "success": {
+      "zh": "洛琪希欣慰开心.png",
+      "en": "roxy_success.png",
+      "preferred": "roxy_success.png",
+      "description": "欣慰微笑开心姿态（问题解决、任务完成、片尾致谢）"
+    }
+  },
+  "chibi": {
+    "script": "roxy-pixel.js",
+    "globalClass": "RoxyPixelAvatar",
+    "states": [
+      "idle",
+      "explain",
+      "warn",
+      "blocked",
+      "surprised",
+      "panic",
+      "success"
+    ],
+    "viewBox": {
+      "width": 220,
+      "height": 250
+    }
+  }
+}

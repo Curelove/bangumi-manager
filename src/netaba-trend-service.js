@@ -371,8 +371,15 @@ function renderNativeTrendSvg(container, normData, options = {}) {
 
   // 初始模式：默认为“播出期间”，若点数较少则自动切换为“全部周期”
   let currentMode = (normData.airingPoints.length >= 8 && !options.defaultFull) ? "airing" : "all";
+  const isAtelier = Boolean(
+    options.compact ||
+    options.variant === "atelier" ||
+    (container.classList && container.classList.contains("atelier-trend-host"))
+  );
 
-  const wrapper = container.createDiv("bangumi-trend-component");
+  const wrapper = container.createDiv(
+    `bangumi-trend-component${isAtelier ? " is-atelier" : ""}`
+  );
 
   // 顶栏控制区：标题徽章 + 模式切换 Toggle
   const header = wrapper.createDiv("bangumi-trend-header");
@@ -405,6 +412,9 @@ function renderNativeTrendSvg(container, normData, options = {}) {
     text: "全周期"
   });
 
+  // 3D 原画室详情面板专属：4 格关键趋势指标摘要条（解决小面板只看曲线难以速读极值与涨跌的问题）
+  const statsStrip = isAtelier ? wrapper.createDiv("atelier-trend-stats-grid") : null;
+
   // 主图表画布容器（具备相对定位以承载 Tooltip）
   const chartBox = wrapper.createDiv("bangumi-trend-chart-box");
   chartBox.style.position = "relative";
@@ -431,9 +441,41 @@ function renderNativeTrendSvg(container, normData, options = {}) {
       return;
     }
 
-    const width = 680;
-    const height = 260;
-    const padding = { top: 25, right: 35, bottom: 35, left: 45 };
+    if (statsStrip) {
+      statsStrip.empty();
+      const firstScore = points[0].score;
+      const lastPt = points[points.length - 1];
+      const lastScore = lastPt.score;
+      const delta = lastScore - firstScore;
+      let peakScore = -Infinity;
+      for (const p of points) {
+        if (p.score > peakScore) peakScore = p.score;
+      }
+      const rankNum = normData.currentRank || lastPt.rank;
+      const deltaSign = delta > 0.005 ? "+" : "";
+      const deltaCls = delta > 0.02 ? "is-up" : delta < -0.02 ? "is-down" : "";
+
+      const cells = [
+        ["区间首分", `${firstScore.toFixed(2)}`, ""],
+        ["区间峰值", `${peakScore.toFixed(2)}`, ""],
+        ["最新走势", `${lastScore.toFixed(2)} (${deltaSign}${delta.toFixed(2)})`, deltaCls],
+        ["排名 / 样本", `${rankNum ? `#${rankNum}` : "—"} · ${points.length}点`, ""]
+      ];
+      cells.forEach(([label, val, cls]) => {
+        const cell = statsStrip.createDiv("atelier-trend-stat-cell");
+        cell.createDiv({ cls: "atelier-trend-stat-label", text: label });
+        cell.createDiv({
+          cls: `atelier-trend-stat-val${cls ? ` ${cls}` : ""}`,
+          text: val
+        });
+      });
+    }
+
+    const width = isAtelier ? 430 : 680;
+    const height = isAtelier ? 188 : 260;
+    const padding = isAtelier
+      ? { top: 16, right: 46, bottom: 34, left: 38 }
+      : { top: 25, right: 35, bottom: 35, left: 45 };
     const innerW = width - padding.left - padding.right;
     const innerH = height - padding.top - padding.bottom;
 
@@ -446,6 +488,13 @@ function renderNativeTrendSvg(container, normData, options = {}) {
 
     const getX = (ts) => padding.left + ((ts - tMin) / tSpan) * innerW;
     const getY = (val) => padding.top + innerH - ((val - sMin) / sSpan) * innerH;
+
+    const accentStroke = isAtelier ? "#8f683d" : "var(--interactive-accent, #3b82f6)";
+    const personalStroke = isAtelier ? "#b87314" : "var(--text-accent, #e5a00d)";
+    const axisTextFill = isAtelier ? "#4a443b" : "var(--text-muted, #888)";
+    const gridLineStroke = isAtelier
+      ? "rgba(143, 104, 61, 0.22)"
+      : "var(--background-modifier-border, rgba(128,128,128,0.2))";
 
     // 创建 SVG 根节点
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -461,8 +510,8 @@ function renderNativeTrendSvg(container, normData, options = {}) {
     const gradientId = "trend-grad-" + Math.random().toString(36).slice(2, 9);
     defs.innerHTML = `
       <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="var(--interactive-accent, #3b82f6)" stop-opacity="0.32" />
-        <stop offset="100%" stop-color="var(--interactive-accent, #3b82f6)" stop-opacity="0.0" />
+        <stop offset="0%" stop-color="${accentStroke}" stop-opacity="${isAtelier ? "0.28" : "0.32"}" />
+        <stop offset="100%" stop-color="${accentStroke}" stop-opacity="0.0" />
       </linearGradient>
     `;
     svg.appendChild(defs);
@@ -478,16 +527,17 @@ function renderNativeTrendSvg(container, normData, options = {}) {
       line.setAttribute("y1", yPos);
       line.setAttribute("x2", width - padding.right);
       line.setAttribute("y2", yPos);
-      line.setAttribute("stroke", "var(--background-modifier-border, rgba(128,128,128,0.2))");
+      line.setAttribute("stroke", gridLineStroke);
       line.setAttribute("stroke-dasharray", "3,3");
       yGridGroup.appendChild(line);
 
       const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      text.setAttribute("x", padding.left - 8);
+      text.setAttribute("x", padding.left - 7);
       text.setAttribute("y", yPos + 4);
       text.setAttribute("text-anchor", "end");
-      text.setAttribute("font-size", "11");
-      text.setAttribute("fill", "var(--text-muted, #888)");
+      text.setAttribute("font-size", isAtelier ? "12" : "11");
+      if (isAtelier) text.setAttribute("font-weight", "600");
+      text.setAttribute("fill", axisTextFill);
       text.textContent = s.toFixed(1);
       yGridGroup.appendChild(text);
     }
@@ -501,24 +551,27 @@ function renderNativeTrendSvg(container, normData, options = {}) {
       pLine.setAttribute("y1", py);
       pLine.setAttribute("x2", width - padding.right);
       pLine.setAttribute("y2", py);
-      pLine.setAttribute("stroke", "var(--text-accent, #e5a00d)");
-      pLine.setAttribute("stroke-width", "1.5");
+      pLine.setAttribute("stroke", personalStroke);
+      pLine.setAttribute("stroke-width", isAtelier ? "1.8" : "1.5");
       pLine.setAttribute("stroke-dasharray", "5,4");
       svg.appendChild(pLine);
 
       const pLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
       pLabel.setAttribute("x", width - padding.right + 4);
-      pLabel.setAttribute("y", py + 3);
-      pLabel.setAttribute("font-size", "10");
-      pLabel.setAttribute("font-weight", "600");
-      pLabel.setAttribute("fill", "var(--text-accent, #e5a00d)");
-      pLabel.textContent = `我的: ${normData.personalScore.toFixed(1)}`;
+      pLabel.setAttribute("y", py + 4);
+      pLabel.setAttribute("font-size", isAtelier ? "11" : "10");
+      pLabel.setAttribute("font-weight", "700");
+      pLabel.setAttribute("fill", personalStroke);
+      pLabel.textContent = isAtelier
+        ? `★ ${normData.personalScore.toFixed(1)}`
+        : `我的: ${normData.personalScore.toFixed(1)}`;
       svg.appendChild(pLabel);
     }
 
-    // 3. X 轴时间刻度（均匀采样 4~5 个时间标签）
+    // 3. X 轴时间刻度（均匀采样 4~5 个时间标签，跨年全周期显示 YY-MM，播出期显示 MM-DD）
     const xGridGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    const numLabels = 5;
+    const numLabels = isAtelier ? 4 : 5;
+    const isMultiYearSpan = tSpan > 240 * 86400000;
     for (let i = 0; i < numLabels; i++) {
       const ratio = i / (numLabels - 1);
       const ptIndex = Math.min(points.length - 1, Math.round(ratio * (points.length - 1)));
@@ -527,11 +580,14 @@ function renderNativeTrendSvg(container, normData, options = {}) {
 
       const tText = document.createElementNS("http://www.w3.org/2000/svg", "text");
       tText.setAttribute("x", xPos);
-      tText.setAttribute("y", height - 12);
+      tText.setAttribute("y", isAtelier ? height - 6 : height - 12);
       tText.setAttribute("text-anchor", "middle");
-      tText.setAttribute("font-size", "10");
-      tText.setAttribute("fill", "var(--text-muted, #888)");
-      tText.textContent = p.formattedDate.slice(5); // MM-DD
+      tText.setAttribute("font-size", isAtelier ? "11.5" : "10");
+      if (isAtelier) tText.setAttribute("font-weight", "600");
+      tText.setAttribute("fill", axisTextFill);
+      tText.textContent = isMultiYearSpan
+        ? p.formattedDate.slice(2, 7) // YY-MM
+        : p.formattedDate.slice(5);   // MM-DD
       xGridGroup.appendChild(tText);
     }
     svg.appendChild(xGridGroup);
@@ -568,41 +624,48 @@ function renderNativeTrendSvg(container, normData, options = {}) {
       const linePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
       linePath.setAttribute("d", pathD);
       linePath.setAttribute("fill", "none");
-      linePath.setAttribute("stroke", "var(--interactive-accent, #3b82f6)");
-      linePath.setAttribute("stroke-width", "2.4");
+      linePath.setAttribute("stroke", accentStroke);
+      linePath.setAttribute("stroke-width", isAtelier ? "2.6" : "2.4");
       linePath.setAttribute("stroke-linecap", "round");
       linePath.setAttribute("stroke-linejoin", "round");
       svg.appendChild(linePath);
     }
 
-    // 5. 分集首播节点标尺（eps markers）
+    // 5. 分集首播节点标尺（eps markers，自动防重叠）
     const epMarkerGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
     epMarkerGroup.setAttribute("class", "trend-ep-markers");
+    let lastEpLabelX = -Infinity;
+    const minEpLabelGap = isAtelier ? 28 : 24;
     for (const ep of normData.eps) {
       if (!ep.timestamp || ep.timestamp < tMin || ep.timestamp > tMax) continue;
+      if (Number(ep.sort) <= 0) continue;
       const ex = getX(ep.timestamp);
 
-      // 垂直小刻度虚线
+      // 垂直小刻度线
       const epLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
       epLine.setAttribute("x1", ex);
-      epLine.setAttribute("y1", padding.top + innerH - 6);
+      epLine.setAttribute("y1", padding.top + innerH - 5);
       epLine.setAttribute("x2", ex);
       epLine.setAttribute("y2", padding.top + innerH);
-      epLine.setAttribute("stroke", "var(--interactive-accent, #3b82f6)");
-      epLine.setAttribute("stroke-width", "1.5");
+      epLine.setAttribute("stroke", accentStroke);
+      epLine.setAttribute("stroke-width", "1.4");
       epMarkerGroup.appendChild(epLine);
 
-      // 标记文字（例如 "1", "3", "12"）
-      if (ep.sort === 1 || ep.sort === normData.eps.length || ep.sort % 3 === 0) {
+      // 标记文字（例如 "E1", "E3", "E12"），强制最小间距防止全周期模式下挤成一团
+      if (
+        (ep.sort === 1 || ep.sort === normData.eps.length || ep.sort % 3 === 0) &&
+        ex - lastEpLabelX >= minEpLabelGap
+      ) {
         const epText = document.createElementNS("http://www.w3.org/2000/svg", "text");
         epText.setAttribute("x", ex);
-        epText.setAttribute("y", padding.top + innerH + 12);
+        epText.setAttribute("y", padding.top + innerH + (isAtelier ? 13 : 12));
         epText.setAttribute("text-anchor", "middle");
-        epText.setAttribute("font-size", "9");
-        epText.setAttribute("font-weight", "600");
-        epText.setAttribute("fill", "var(--interactive-accent, #3b82f6)");
+        epText.setAttribute("font-size", isAtelier ? "10" : "9");
+        epText.setAttribute("font-weight", "700");
+        epText.setAttribute("fill", accentStroke);
         epText.textContent = `E${ep.sort}`;
         epMarkerGroup.appendChild(epText);
+        lastEpLabelX = ex;
       }
     }
     svg.appendChild(epMarkerGroup);
@@ -611,7 +674,7 @@ function renderNativeTrendSvg(container, normData, options = {}) {
     const crosshair = document.createElementNS("http://www.w3.org/2000/svg", "line");
     crosshair.setAttribute("y1", padding.top);
     crosshair.setAttribute("y2", padding.top + innerH);
-    crosshair.setAttribute("stroke", "var(--text-accent, #3b82f6)");
+    crosshair.setAttribute("stroke", accentStroke);
     crosshair.setAttribute("stroke-width", "1.2");
     crosshair.setAttribute("stroke-dasharray", "4,3");
     crosshair.style.display = "none";
@@ -619,8 +682,8 @@ function renderNativeTrendSvg(container, normData, options = {}) {
 
     const activeDot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     activeDot.setAttribute("r", "4.5");
-    activeDot.setAttribute("fill", "var(--background-primary, #fff)");
-    activeDot.setAttribute("stroke", "var(--interactive-accent, #3b82f6)");
+    activeDot.setAttribute("fill", isAtelier ? "#faf6ee" : "var(--background-primary, #fff)");
+    activeDot.setAttribute("stroke", accentStroke);
     activeDot.setAttribute("stroke-width", "2.5");
     activeDot.style.display = "none";
     svg.appendChild(activeDot);
@@ -698,10 +761,10 @@ function renderNativeTrendSvg(container, normData, options = {}) {
       const pixelX = cx * scaleX;
       const pixelY = cy * scaleY;
 
-      // 防贴边翻转
-      const isRight = pixelX > rect.width * 0.65;
-      tooltip.style.left = isRight ? `${pixelX - 145}px` : `${pixelX + 15}px`;
-      tooltip.style.top = `${Math.max(10, pixelY - 45)}px`;
+      // 防贴边翻转且避免遮挡底部 X 轴刻度
+      const isRight = pixelX > rect.width * 0.52;
+      tooltip.style.left = isRight ? `${Math.max(8, pixelX - 152)}px` : `${pixelX + 14}px`;
+      tooltip.style.top = `${Math.max(4, Math.min(rect.height - 112, pixelY - 50))}px`;
     };
 
     overlay.onpointerleave = () => {

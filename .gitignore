@@ -25,6 +25,7 @@ _backup-*/
 # Operating system files
 .DS_Store
 Thumbs.db
+
 # Local archives and maintenance folders
 archive/
 backups/
@@ -36,3 +37,6 @@ NOTICE.md
 bangumi-manager-v0.3.1/
 stage report/
 scratch/
+assets/QQ/
+blender/
+snapshot/

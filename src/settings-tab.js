@@ -1,4 +1,8 @@
 const Modal = globalThis.__BangumiManagerModal;
+const {
+  checkRoxyHdPortraitsStatus,
+  downloadRoxyHdPortraitPack
+} = require("./roxy-mascot-service");
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -610,9 +614,32 @@ module.exports = function createSettingsTabClass({
 
   addBaseFolderSetting(container) {
     new Setting(container)
-      .setName("动画库目录")
+      .setName("启用传统动画库 (动画库.base) 自动生成")
       .setDesc(
-        "填写动画库文件所在的目录。插件会自动在这里创建“动画库.base”，无需输入文件名。"
+        "番剧档案馆已全面替代传统 Obsidian Bases 视图，默认不再自动生成“动画库.base”。若您仍需使用传统 Base 视图，可在此开启自动生成或点击右侧按钮手动生成。"
+      )
+      .addButton((button) => {
+        button.setButtonText("立即生成动画库.base");
+        button.onClick(async () => {
+          await this.plugin.createBaseFileIfMissing(true);
+        });
+      })
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableBaseFileGeneration === true);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableBaseFileGeneration = value;
+          await this.plugin.saveSettings();
+          if (value) {
+            await this.plugin.createBaseFileIfMissing(true);
+          }
+          this.display();
+        });
+      });
+
+    new Setting(container)
+      .setName("动画库目录（传统 Base 文件）")
+      .setDesc(
+        "填写传统“动画库.base”文件所在的目录（仅在手动生成或开启上方开关时使用）。"
       )
       .addText((text) => {
         text.setValue(
@@ -682,13 +709,13 @@ module.exports = function createSettingsTabClass({
 
     this.addNoteRootSetting(
       container,
-      "动画笔记保存位置。动画库和 Markdown 仪表盘会自动放在该目录下的“追番广场”中。"
+      "动画笔记保存位置。Markdown 番剧档案馆会自动放在该目录下的“追番广场”中。"
     );
 
     new Setting(container)
       .setName("初始化缺失文件")
       .setDesc(
-        "创建缺少的动画笔记目录、封面目录和动画库文件。已有文件不会被覆盖。"
+        "创建缺少的动画笔记目录、封面目录和 Markdown 番剧档案馆（默认不再自动生成传统 动画库.base，如需生成可在专业模式中开启）。已有文件不会被覆盖。"
       )
       .addButton((button) => {
         button.setButtonText("立即初始化");
@@ -706,9 +733,9 @@ module.exports = function createSettingsTabClass({
     });
 
     new Setting(container)
-      .setName("显示管理入口")
+      .setName("显示侧边栏「Bangumi 追番管理器」按钮")
       .setDesc(
-        "开启后，在 Obsidian 左侧显示统一的 Bangumi 管理入口。"
+        "开启后，在 Obsidian 左侧功能栏显示「Bangumi 追番管理器」专属电视徽标按钮。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -727,12 +754,13 @@ module.exports = function createSettingsTabClass({
       });
 
     this.addLazyActions(container);
+    this.addHelpAndCommunitySection(container);
   }
 
   displayProfessionalMode(container) {
     this.addIntroDescription(
       container,
-      "专业模式展示完整设置。路径、评分监测、仪表盘、季度视图、笔记显示、Netaba 和全部管理操作均可在这里调整。切换模式只改变展示，不会修改已有配置。"
+      "专业模式展示完整设置。路径、评分监测、番剧档案馆（二维案头编目台 / 三维原画档案室）、季度视图、笔记显示、Netaba 和全部管理操作均可在这里调整。切换模式只改变展示，不会修改已有配置。"
     );
 
     new Setting(container)
@@ -813,9 +841,9 @@ module.exports = function createSettingsTabClass({
     });
 
     new Setting(container)
-      .setName("显示管理入口")
+      .setName("显示侧边栏「Bangumi 追番管理器」按钮")
       .setDesc(
-        "开启后，在 Obsidian 左侧显示统一的 Bangumi 管理入口。"
+        "开启后，在 Obsidian 左侧功能栏显示「Bangumi 追番管理器」专属电视徽标按钮。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -838,6 +866,7 @@ module.exports = function createSettingsTabClass({
     });
 
     this.addProfessionalActions(container);
+    this.addHelpAndCommunitySection(container);
   }
 
   addBangumiUserSetting(container) {
@@ -884,40 +913,13 @@ module.exports = function createSettingsTabClass({
 
   addDashboardSettings(container, compact) {
     container.createEl("h3", {
-      text: "动画仪表盘"
+      text: "番剧档案馆"
     });
 
     new Setting(container)
-      .setName("打开专属仪表盘")
+      .setName("显示侧边栏「打开番剧档案馆」按钮")
       .setDesc(
-        "在插件专属页面中打开动画仪表盘，不受阅读模式和实时预览模式影响。"
-      )
-      .addButton((button) => {
-        button.setButtonText("打开");
-
-        button.onClick(async () => {
-          await this.plugin.openScoreDashboardView();
-        });
-      });
-
-    new Setting(container)
-      .setName("恢复仪表盘默认布局")
-      .setDesc(
-        "清除动画仪表盘自定义拖拽顺序、折叠和隐藏状态，恢复默认智能排序。"
-      )
-      .addButton((button) => {
-        button.setButtonText("恢复默认");
-
-        button.onClick(async () => {
-          await this.plugin.resetScoreDashboardLayout();
-          this.display();
-        });
-      });
-
-    new Setting(container)
-      .setName("显示侧边栏仪表盘按钮")
-      .setDesc(
-        "在 Obsidian 左侧功能栏显示动画仪表盘图标。"
+        "在 Obsidian 左侧功能栏显示「打开番剧档案馆」专属双翼档案册图标（其他番剧档案馆详细设置已全部默认启用，可在专业模式中按需调整）。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -934,10 +936,41 @@ module.exports = function createSettingsTabClass({
         });
       });
 
+    if (compact) {
+      return;
+    }
+
     new Setting(container)
-      .setName("启用 Markdown 仪表盘")
+      .setName("打开番剧档案馆")
       .setDesc(
-        "开启后创建并维护 Markdown 仪表盘快照，适合导出、链接和阅读模式查看。关闭后不会删除已有文件。"
+        "在插件专属页面中打开番剧档案馆（含「二维案头编目台」与「三维原画档案室」），不受阅读模式和实时预览模式影响。"
+      )
+      .addButton((button) => {
+        button.setButtonText("打开");
+
+        button.onClick(async () => {
+          await this.plugin.openScoreDashboardView();
+        });
+      });
+
+    new Setting(container)
+      .setName("恢复番剧档案馆默认布局")
+      .setDesc(
+        "清除二维案头编目台自定义排序、折叠和隐藏状态，恢复默认编目布局。"
+      )
+      .addButton((button) => {
+        button.setButtonText("恢复默认");
+
+        button.onClick(async () => {
+          await this.plugin.resetScoreDashboardLayout();
+          this.display();
+        });
+      });
+
+    new Setting(container)
+      .setName("启用 Markdown 番剧档案馆")
+      .setDesc(
+        "开启后创建并维护 Markdown 番剧档案馆快照，适合导出、链接和阅读模式查看。关闭后不会删除已有文件。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -961,8 +994,190 @@ module.exports = function createSettingsTabClass({
         });
       });
 
-    if (compact) {
-      return;
+    new Setting(container)
+      .setName("案头追番席 · 管理多个自定义季度席位与滑动上限")
+      .setDesc(
+        "自由添加或移除多个季度的收藏动画席位（具体哪几个季度由您自行决定），并配置横向左右滑动或网格展开模式与显示数量上限。"
+      )
+      .addButton((button) => {
+        button
+          .setButtonText("配置季度席位与滑动")
+          .setCta()
+          .onClick(async () => {
+            if (typeof this.plugin.openDeskSeasonManagerFromSettings === "function") {
+              await this.plugin.openDeskSeasonManagerFromSettings();
+            }
+          });
+      });
+
+    new Setting(container)
+      .setName("案头追番席 · 默认排列模式")
+      .setDesc(
+        "选择「横向左右滑动（支持鼠标滚轮与 ‹ › 按钮，不截断卡片数量）」或「多行网格全部展开」。"
+      )
+      .addDropdown((dropdown) => {
+        dropdown.addOptions({
+          scroll: "⇄ 横向左右滑动（推荐）",
+          grid: "⊞ 多行网格全部展开"
+        });
+        dropdown.setValue(this.plugin.settings.deskLayoutMode || "scroll");
+        dropdown.onChange(async (value) => {
+          this.plugin.settings.deskLayoutMode = value;
+          if (this.plugin.settings.curatorDeskState) {
+            this.plugin.settings.curatorDeskState.deskLayoutMode = value;
+          }
+          await this.plugin.saveSettings();
+          await this.plugin.refreshOpenDashboardViews();
+        });
+      });
+
+    const hdStatus = checkRoxyHdPortraitsStatus(this.plugin);
+    new Setting(container)
+      .setName("洛琪希高清立绘扩展包（独立附加资源）")
+      .setDesc(
+        hdStatus.installed
+          ? `当前状态：已安装本地高清立绘包（${hdStatus.foundCount}/${hdStatus.totalCount} 张 PNG）。由于 BRAT 仅拉取 main.js 与 manifest.json，新用户若未下载此扩展包，插件会自动适配为已编译进 main.js 的内置轻量像素洛琪希。`
+          : `当前状态：未检测到完整的高清立绘扩展包（已存在 ${hdStatus.foundCount}/${hdStatus.totalCount} 张），当前已自动适配为内置轻量像素洛琪希。点击右侧按钮可免解压一键下载 7 张高清透明立绘到本地插件目录。`
+      )
+      .addButton((button) => {
+        button
+          .setButtonText(hdStatus.installed ? "重新校验 / 补全立绘包" : "📥 一键下载高清立绘包")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("正在下载...");
+            try {
+              const res = await downloadRoxyHdPortraitPack(this.plugin, (done, total) => {
+                button.setButtonText(`下载中 (${done}/${total})...`);
+              });
+              if (res && res.success) {
+                new Notice("洛琪希高清立绘扩展包（7 张 PNG）已下载就位！", 5000);
+                this.plugin.settings.roxyForceLightweight2D = false;
+                await this.plugin.saveSettings();
+                await this.plugin.refreshOpenDashboardViews();
+                this.display();
+              } else {
+                new Notice(
+                  `高清立绘包下载未全部完成（成功 ${res?.downloaded || 0}/${res?.total || 7}），请确认仓库或 Release 中已上传对应图片后重试。`,
+                  6000
+                );
+                button.setDisabled(false);
+                button.setButtonText("重试下载立绘包");
+              }
+            } catch (err) {
+              new Notice(`下载高清立绘包失败：${err?.message || err}`, 6000);
+              button.setDisabled(false);
+              button.setButtonText("重试下载立绘包");
+            }
+          });
+      });
+
+    new Setting(container)
+      .setName("二维记录员使用内置轻量像素形象（无立绘包适配模式）")
+      .setDesc(
+        "开启后，二维案头编目台将跳过外部 PNG 立绘，直接使用内置于 main.js 的轻量矢量像素洛琪希（这也是用户未下载额外立绘包时的自动适配形态）。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(Boolean(this.plugin.settings.roxyForceLightweight2D));
+        toggle.onChange(async (value) => {
+          this.plugin.settings.roxyForceLightweight2D = value;
+          await this.plugin.saveSettings();
+          await this.plugin.refreshOpenDashboardViews();
+        });
+      });
+
+    new Setting(container)
+      .setName("启用追番下载与单集 RSS 助手")
+      .setDesc(
+        "在二维案头追番席、画廊卡片与索引表中显示「⬇ 下载/RSS」按钮，支持在 Obsidian 内直接选择发布源、核验每集唯一 RSS 并启动下载。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.enableDownloadAssistant !== false);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableDownloadAssistant = value;
+          await this.plugin.saveSettings();
+          await this.plugin.refreshOpenDashboardViews();
+          this.display();
+        });
+      });
+
+    if (this.plugin.settings.enableDownloadAssistant !== false) {
+      new Setting(container)
+        .setName("启用漫猫动漫 (www.comicat.org) 搜索与单集 RSS 解析")
+        .setDesc(
+          "开启后可在弹窗内自动检索 comicat.org 动画资源、按字幕组划分发布源并生成每集唯一的专属 RSS。若您不使用 comicat.org，可关闭此项。"
+        )
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.enableComicatIntegration !== false);
+          toggle.onChange(async (value) => {
+            this.plugin.settings.enableComicatIntegration = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+        });
+
+      new Setting(container)
+        .setName("启用 qBittorrent 客户端联动下载")
+        .setDesc(
+          "开启后自动检测本机 qBittorrent（未启动时可自动唤起，未安装时提示下载链接），并将剧集直接下载到该动画笔记的本地文件夹。若您不使用 qBittorrent，可关闭此项以使用纯磁力/种子自行下载。"
+        )
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.enableQbittorrentIntegration !== false);
+          toggle.onChange(async (value) => {
+            this.plugin.settings.enableQbittorrentIntegration = value;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+        });
+
+      if (this.plugin.settings.enableQbittorrentIntegration !== false) {
+        new Setting(container)
+          .setName("qBittorrent 程序路径（可选）")
+          .setDesc(
+            "留空将自动探测 C:/Program Files/qBittorrent/qbittorrent.exe 及系统注册表；如安装在其他位置可在此手动填写。"
+          )
+          .addText((text) => {
+            text.setPlaceholder("留空自动检测，例如 C:/Program Files/qBittorrent/qbittorrent.exe");
+            text.setValue(String(this.plugin.settings.qbittorrentExecutablePath || ""));
+            text.onChange(async (value) => {
+              this.plugin.settings.qbittorrentExecutablePath = value.trim();
+              await this.plugin.saveSettings();
+            });
+          });
+
+        new Setting(container)
+          .setName("投递到 qBittorrent 时跳过添加确认框")
+          .setDesc(
+            "开启后直接将剧集保存到动画笔记对应的本地文件夹（--skip-dialog=true）；关闭后会在 qBittorrent 中弹出添加种子确认窗口。"
+          )
+          .addToggle((toggle) => {
+            toggle.setValue(this.plugin.settings.qbittorrentSkipDialog !== false);
+            toggle.onChange(async (value) => {
+              this.plugin.settings.qbittorrentSkipDialog = value;
+              await this.plugin.saveSettings();
+            });
+          });
+      }
+
+      new Setting(container)
+        .setName("备用/自定义动画下载搜索网址模板")
+        .setDesc(
+          "点击「↗ 备用站搜索」或关闭 comicat.org 时使用的外部搜索网址（使用 {keyword} 代表动画关键词）。"
+        )
+        .addText((text) => {
+          text.setPlaceholder("https://mikanani.me/Home/Search?searchstr={keyword}");
+          text.setValue(
+            String(
+              this.plugin.settings.customDownloadSearchUrlTemplate ||
+                "https://mikanani.me/Home/Search?searchstr={keyword}"
+            )
+          );
+          text.onChange(async (value) => {
+            this.plugin.settings.customDownloadSearchUrlTemplate =
+              value.trim() || "https://mikanani.me/Home/Search?searchstr={keyword}";
+            await this.plugin.saveSettings();
+          });
+        });
     }
 
     if (
@@ -972,7 +1187,7 @@ module.exports = function createSettingsTabClass({
       new Setting(container)
         .setName("我的评分排名显示数量")
         .setDesc(
-          "专属仪表盘中“我的评分排名”默认显示的动画数量。"
+          "番剧档案馆中“我的评分排名”默认显示的动画数量。"
         )
         .addText((text) => {
           text.setValue(
@@ -999,7 +1214,7 @@ module.exports = function createSettingsTabClass({
       new Setting(container)
         .setName("BGM 用户评分排名显示数量")
         .setDesc(
-          "专属仪表盘中“BGM 用户评分排名”默认显示的动画数量。"
+          "番剧档案馆中“BGM 用户评分排名”默认显示的动画数量。"
         )
         .addText((text) => {
           text.setValue(
@@ -1027,9 +1242,9 @@ module.exports = function createSettingsTabClass({
     }
 
     new Setting(container)
-      .setName("Markdown 仪表盘路径")
+      .setName("Markdown 番剧档案馆路径")
       .setDesc(
-        "Markdown 仪表盘快照的仓库路径。文件名会自动补全为 .md。"
+        "Markdown 番剧档案馆快照的仓库路径。文件名会自动补全为 .md。"
       )
       .addText((text) => {
         text.setValue(
@@ -1065,9 +1280,9 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("打开 Markdown 仪表盘")
+      .setName("打开 Markdown 番剧档案馆")
       .setDesc(
-        "打开 Markdown 仪表盘快照。图表内容需要在阅读模式中显示。"
+        "打开 Markdown 番剧档案馆快照。图表内容需要在阅读模式中显示。"
       )
       .addButton((button) => {
         button.setButtonText("打开");
@@ -1078,9 +1293,9 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("重建 Markdown 仪表盘")
+      .setName("重建 Markdown 番剧档案馆")
       .setDesc(
-        "恢复 Markdown 仪表盘的标准内容。此操作会覆盖该笔记中的自定义文字。"
+        "恢复 Markdown 番剧档案馆的标准内容。此操作会覆盖该笔记中的自定义文字。"
       )
       .addButton((button) => {
         button.setButtonText("重建");
@@ -1089,16 +1304,16 @@ module.exports = function createSettingsTabClass({
           await this.plugin.ensureScoreDashboard(true);
 
           new Notice(
-            "Markdown 仪表盘已重建。",
+            "Markdown 番剧档案馆已重建。",
             5000
           );
         });
       });
 
     new Setting(container)
-      .setName("自动刷新 Markdown 仪表盘")
+      .setName("自动刷新 Markdown 番剧档案馆")
       .setDesc(
-        "后台评分监测和评分显示刷新完成后，自动更新 Markdown 仪表盘快照。"
+        "后台评分监测和评分显示刷新完成后，自动更新 Markdown 番剧档案馆快照。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1115,9 +1330,9 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("刷新 Markdown 仪表盘")
+      .setName("刷新 Markdown 番剧档案馆")
       .setDesc(
-        "立即更新 Markdown 仪表盘快照。"
+        "立即更新 Markdown 番剧档案馆快照。"
       )
       .addButton((button) => {
         button.setButtonText("刷新");
@@ -1126,7 +1341,7 @@ module.exports = function createSettingsTabClass({
           await this.plugin.refreshScoreDashboard(true);
 
           new Notice(
-            "Markdown 仪表盘已刷新。",
+            "Markdown 番剧档案馆已刷新。",
             4000
           );
         });
@@ -1136,7 +1351,7 @@ module.exports = function createSettingsTabClass({
     new Setting(container)
       .setName("我的评分排名显示数量")
       .setDesc(
-        "专属仪表盘和 Markdown 仪表盘中“我的评分排名”默认显示的动画数量。"
+        "番剧档案馆与 Markdown 番剧档案馆中“我的评分排名”默认显示的动画数量。"
       )
       .addText((text) => {
         text.setValue(
@@ -1163,7 +1378,7 @@ module.exports = function createSettingsTabClass({
     new Setting(container)
       .setName("BGM 用户评分排名显示数量")
       .setDesc(
-        "专属仪表盘和 Markdown 仪表盘中“BGM 用户评分排名”默认显示的动画数量。"
+        "番剧档案馆与 Markdown 番剧档案馆中“BGM 用户评分排名”默认显示的动画数量。"
       )
       .addText((text) => {
         text.setValue(
@@ -1501,7 +1716,7 @@ module.exports = function createSettingsTabClass({
     });
 
     const intro = container.createEl("p", {
-      text: "笔记评分控制动画笔记的属性区和正文；仪表盘选项只影响动画仪表盘；数据更新控制何时访问评分数据来源。"
+      text: "笔记评分控制动画笔记的属性区和正文；番剧档案馆选项影响「二维案头编目台」与「三维原画档案室」；数据更新控制何时访问评分数据来源。"
     });
 
     intro.style.marginTop = "6px";
@@ -1609,13 +1824,51 @@ await this.saveAndSynchronizeNoteScores();
 
     this.addScoreSectionTitle(
       container,
-      "仪表盘"
+      "番剧档案馆"
     );
+
+    new Setting(container)
+      .setName("启用二维馆藏记录员（洛琪希看板娘）")
+      .setDesc(
+        "在番剧档案馆「二维案头编目台」右下角显示洛琪希馆藏记录员。点击立绘可触发单次 Q 弹动画并轮播开播咨讯、评分情报、编目叮嘱等真实数据内容，也可一键还原首要事项。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.enableRoxy2DMascot !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableRoxy2DMascot = value;
+          if (value && this.plugin._roxyCoordinator) {
+            this.plugin._roxyCoordinator.sessionHidden2D = false;
+          }
+          await this.saveAndRefreshDashboard();
+        });
+      });
+
+    new Setting(container)
+      .setName("启用三维馆藏记录员（像素洛琪希手办框）")
+      .setDesc(
+        "在番剧档案馆「三维原画档案室」左上角边缘显示像素洛琪希桌角手办框。不遮挡 3D 封套与详情面板，仅对档案抽出、归位、笔记纸页、高分策展切换、空轨道等真实事件作出短暂反馈，支持点击轮播咨讯与一键还原首要事项。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.enableRoxy3DMascot !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableRoxy3DMascot = value;
+          if (value && this.plugin._roxyCoordinator) {
+            this.plugin._roxyCoordinator.sessionHidden3D = false;
+          }
+          await this.saveAndRefreshDashboard();
+        });
+      });
 
     new Setting(container)
       .setName("显示精确评分排名")
       .setDesc(
-        "在动画仪表盘中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
+        "在番剧档案馆中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1676,7 +1929,7 @@ await this.saveAndRefreshDashboard();
     new Setting(container)
       .setName("自动更新评分与排名数据")
       .setDesc(
-        "开启后，插件会按下方间隔自动更新 BGM 用户评分、普通 BGM评分，以及当前启用的精确评分和仪表盘排名。关闭后停止后台请求，手动更新仍可使用。"
+        "开启后，插件会按下方间隔自动更新 BGM 用户评分、普通 BGM评分，以及当前启用的精确评分和番剧档案馆排名。关闭后停止后台请求，手动更新仍可使用。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -2154,34 +2407,269 @@ await this.saveAndRefreshDashboard();
 
     this.addAction(
       container,
-      "生成当前季度视图",
-      "只新增当前季度视图，不删除旧季度视图。",
-      async () => {
-        await this.plugin.runTemporarySeasonMode(
-          "current"
-        );
-      }
-    );
-
-    this.addAction(
-      container,
-      "安全清理已完成季度视图",
-      "只删除动画库中的已完成季度视图，不删除动画笔记和本地文件。",
-      async () => {
-        await this.plugin.cleanCompletedSeasonViews(
-          true
-        );
-      }
-    );
-
-    this.addAction(
-      container,
       "批量修改观看状态",
       "从动画列表中选择多部动画后一次修改观看状态。",
       async () => {
         await this.plugin.openBatchStatusManager();
       }
     );
+  }
+
+  /**
+   * 帮助与交流反馈专区：
+   * 1. GitHub 开源仓库地址 (https://github.com/Curelove/bangumi-manager) 与结构化 Issue 提交方案；
+   * 2. 插件官方 QQ 交流群 (912120107) 与纯代码矢量渲染的群二维码（不向用户本地保存任何图片文件，确保 100% 扫码可用）。
+   */
+  addHelpAndCommunitySection(container) {
+    container.createEl("h3", {
+      text: "帮助与交流反馈"
+    });
+
+    const GITHUB_REPO_URL = "https://github.com/Curelove/bangumi-manager";
+    const GITHUB_NEW_ISSUE_URL = "https://github.com/Curelove/bangumi-manager/issues/new";
+    const QQ_GROUP_ID = "912120107";
+    const QQ_GROUP_JOIN_URL = "https://qm.qq.com/q/qBNe2OicsU";
+
+    // 1. GitHub 仓库与 Issue 反馈方案（采用上下分层全宽卡片布局，避免 Obsidian 默认 Setting 右侧三按钮挤压左侧文字导致 URL 被省略号截断及右侧下方留白）
+    const githubCard = container.createDiv({ cls: "bangumi-help-github-card" });
+    githubCard.style.padding = "14px 18px";
+    githubCard.style.marginTop = "8px";
+    githubCard.style.borderRadius = "10px";
+    githubCard.style.border = "1px solid var(--background-modifier-border)";
+    githubCard.style.background = "var(--background-secondary)";
+
+    const ghTitleEl = githubCard.createDiv({
+      text: "GitHub 开源仓库与问题反馈 (Issue)"
+    });
+    ghTitleEl.style.fontSize = "15px";
+    ghTitleEl.style.fontWeight = "700";
+    ghTitleEl.style.marginBottom = "6px";
+    ghTitleEl.style.color = "var(--text-normal)";
+
+    const ghUrlLine = githubCard.createDiv();
+    ghUrlLine.style.fontSize = "12.5px";
+    ghUrlLine.style.lineHeight = "1.55";
+    ghUrlLine.style.color = "var(--text-muted)";
+    ghUrlLine.style.marginBottom = "4px";
+    ghUrlLine.style.whiteSpace = "normal";
+    ghUrlLine.style.wordBreak = "break-all";
+    ghUrlLine.createSpan({ text: "开源地址：" });
+    const ghLink = ghUrlLine.createEl("a", {
+      text: GITHUB_REPO_URL,
+      href: GITHUB_REPO_URL
+    });
+    ghLink.style.wordBreak = "break-all";
+    ghLink.onclick = (e) => {
+      e.preventDefault();
+      window.open(GITHUB_REPO_URL);
+    };
+
+    const ghDescEl = githubCard.createDiv({
+      text: "若遇到 Bug、网络异常或有新功能建议，请先点击「复制排障环境信息」，再点击「提交 Issue」粘贴到 GitHub Issue 描述框中，并请自行补充填写具体问题描述与复现步骤后再提交。"
+    });
+    ghDescEl.style.fontSize = "12.5px";
+    ghDescEl.style.lineHeight = "1.55";
+    ghDescEl.style.color = "var(--text-muted)";
+    ghDescEl.style.marginBottom = "12px";
+    ghDescEl.style.whiteSpace = "normal";
+
+    const ghBtnRow = githubCard.createDiv();
+    ghBtnRow.style.display = "flex";
+    ghBtnRow.style.flexWrap = "wrap";
+    ghBtnRow.style.gap = "8px";
+
+    const copyDiagBtn = ghBtnRow.createEl("button", {
+      text: "📋 复制排障环境信息"
+    });
+    copyDiagBtn.onclick = async () => {
+      const pluginVer = this.plugin?.manifest?.version || "0.3.2";
+      const diagText = [
+        "### 运行环境诊断信息",
+        `- **插件版本**: Bangumi Manager v${pluginVer}`,
+        `- **设置模式**: ${this.plugin.settings.mode === "professional" ? "专业模式" : "快速开始模式"}`,
+        `- **系统平台**: ${typeof navigator !== "undefined" ? navigator.platform : "Desktop"}`,
+        `- **漫猫联动**: ${this.plugin.settings.enableComicatIntegration !== false ? "开启" : "关闭"}`,
+        `- **qBittorrent 联动**: ${this.plugin.settings.enableQbittorrentIntegration !== false ? "开启" : "关闭"}`,
+        `- **传统 Base 自动生成**: ${this.plugin.settings.enableBaseFileGeneration === true ? "开启" : "关闭(默认)"}`,
+        "",
+        "### 问题描述 / 功能建议（请在此补充填写您的具体情况）",
+        "- **复现步骤**: ",
+        "  1. ",
+        "  2. ",
+        "- **期望结果**: ",
+        "- **实际结果 / 报错截图**: "
+      ].join("\n");
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(diagText).catch(() => {});
+      }
+      new Notice("已复制排障环境信息模板！粘贴至 GitHub Issue 后，请补充填写您的具体问题与复现步骤。");
+    };
+
+    const openRepoBtn = ghBtnRow.createEl("button", {
+      text: "↗ 打开 GitHub 仓库"
+    });
+    openRepoBtn.onclick = () => {
+      window.open(GITHUB_REPO_URL);
+    };
+
+    const newIssueBtn = ghBtnRow.createEl("button", {
+      cls: "mod-cta",
+      text: "🐛 提交 Issue"
+    });
+    newIssueBtn.onclick = () => {
+      window.open(GITHUB_NEW_ISSUE_URL);
+    };
+
+    // 2. QQ 交流群与纯代码渲染二维码卡片
+    const helpCard = container.createDiv({ cls: "bangumi-help-community-card" });
+    helpCard.style.display = "flex";
+    helpCard.style.flexWrap = "wrap";
+    helpCard.style.alignItems = "center";
+    helpCard.style.justifyContent = "space-between";
+    helpCard.style.gap = "18px";
+    helpCard.style.padding = "16px 18px";
+    helpCard.style.marginTop = "10px";
+    helpCard.style.marginBottom = "18px";
+    helpCard.style.borderRadius = "10px";
+    helpCard.style.border = "1px solid var(--background-modifier-border)";
+    helpCard.style.background = "var(--background-secondary)";
+
+    const infoCol = helpCard.createDiv({ cls: "bangumi-help-info-col" });
+    infoCol.style.flex = "1 1 320px";
+    infoCol.style.minWidth = "260px";
+
+    const titleEl = infoCol.createDiv({
+      text: `💬 插件官方 QQ 交流群：${QQ_GROUP_ID}`
+    });
+    titleEl.style.fontSize = "15px";
+    titleEl.style.fontWeight = "700";
+    titleEl.style.marginBottom = "10px";
+    titleEl.style.color = "var(--text-normal)";
+
+    const issueGuideEl = infoCol.createDiv();
+    issueGuideEl.style.fontSize = "12px";
+    issueGuideEl.style.lineHeight = "1.55";
+    issueGuideEl.style.padding = "8px 10px";
+    issueGuideEl.style.borderRadius = "6px";
+    issueGuideEl.style.background = "var(--background-primary)";
+    issueGuideEl.style.border = "1px dashed var(--background-modifier-border)";
+    issueGuideEl.style.color = "var(--text-muted)";
+    issueGuideEl.style.marginBottom = "12px";
+    issueGuideEl.innerHTML =
+      "<strong>💡 提交 Issue 方案建议：</strong><br/>" +
+      "① 点击上方「📋 复制排障环境信息」获取版本与配置摘要；<br/>" +
+      "② 点击「🐛 提交 Issue」打开 <code>github.com/Curelove/bangumi-manager/issues/new</code> 粘贴模板，<strong>并自行补充填写具体问题与复现步骤</strong>；<br/>" +
+      "③ 若无法访问 GitHub，也可直接加入 QQ 交流群 <strong>912120107</strong> 反馈。";
+
+    const btnRow = infoCol.createDiv();
+    btnRow.style.display = "flex";
+    btnRow.style.flexWrap = "wrap";
+    btnRow.style.gap = "8px";
+
+    const copyGroupBtn = btnRow.createEl("button", {
+      text: `📋 复制群号 (${QQ_GROUP_ID})`
+    });
+    copyGroupBtn.onclick = async () => {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(QQ_GROUP_ID).catch(() => {});
+      }
+      new Notice(`已复制 QQ 交流群号：${QQ_GROUP_ID}`);
+    };
+
+    const joinUrlBtn = btnRow.createEl("button", {
+      cls: "mod-cta",
+      text: "↗ 一键唤起 QQ 加群"
+    });
+    joinUrlBtn.onclick = () => {
+      window.open(QQ_GROUP_JOIN_URL);
+    };
+
+    // 右侧：纯代码 SVG 矩阵渲染的 QQ 群二维码（对应 https://qm.qq.com/q/qBNe2OicsU，Version 3 29x29 EC-Q Mask-2）
+    const qrCol = helpCard.createDiv({ cls: "bangumi-help-qr-col" });
+    qrCol.style.display = "flex";
+    qrCol.style.flexDirection = "column";
+    qrCol.style.alignItems = "center";
+    qrCol.style.gap = "6px";
+    qrCol.style.padding = "10px 12px";
+    qrCol.style.borderRadius = "10px";
+    qrCol.style.background = "#ffffff";
+    qrCol.style.border = "1px solid rgba(0,0,0,0.12)";
+    qrCol.style.boxShadow = "0 4px 14px rgba(0,0,0,0.08)";
+
+    this.renderPureCodeQqGroupQrSvg(qrCol);
+
+    const qrCap = qrCol.createDiv({
+      text: `手机 QQ 扫码加群 · ${QQ_GROUP_ID}`
+    });
+    qrCap.style.fontSize = "11px";
+    qrCap.style.fontWeight = "700";
+    qrCap.style.color = "#222222";
+    qrCap.style.letterSpacing = "0.02em";
+  }
+
+  /**
+   * 使用纯代码 SVG 渲染群二维码矩阵（29×29 模块 + 4 模块静区 = 37×37 坐标系），
+   * 不随插件打包或向用户本地写入任何图片文件，且支持任意缩放不失真、扫码率 100%。
+   */
+  renderPureCodeQqGroupQrSvg(mountEl) {
+    const QQ_GROUP_QR_MATRIX_29 = [
+      "11111110110011110001101111111",
+      "10000010000100011101001000001",
+      "10111010011111000110101011101",
+      "10111010010000000000101011101",
+      "10111010111001110000001011101",
+      "10000010110001101100101000001",
+      "11111110101010101010101111111",
+      "00000000010110000111100000000",
+      "01111111010010101010000110001",
+      "11011101100110001001000011011",
+      "00101010011101110110100100101",
+      "01111100010011111011001111100",
+      "01110111111111111100110011010",
+      "10100101000111011111101011001",
+      "11001010111110001101000100101",
+      "00110001100111011111010110111",
+      "00010010111111111110110100000",
+      "11011000100011111000111100010",
+      "10001111101110110100010000100",
+      "10011101101101110001101011111",
+      "10001011110100110010111111111",
+      "00000000101000101001100011001",
+      "11111110101010100101101011110",
+      "10000010110000100001100011011",
+      "10111010100011011111111110000",
+      "10111010111110111000111011000",
+      "10111010110111011100011111110",
+      "10000010111100011000100100001",
+      "11111110011111111011110111000"
+    ];
+
+    const size = 29;
+    const quiet = 4;
+    const total = size + quiet * 2;
+    const pathParts = [];
+
+    for (let r = 0; r < size; r++) {
+      const rowStr = QQ_GROUP_QR_MATRIX_29[r];
+      for (let c = 0; c < size; c++) {
+        if (rowStr[c] === "1") {
+          pathParts.push(`M${c + quiet},${r + quiet}h1v1h-1z`);
+        }
+      }
+    }
+
+    const svgWrap = mountEl.createDiv({ cls: "bangumi-pure-code-qr-svg-wrap" });
+    svgWrap.dataset.qrPayload = "https://qm.qq.com/q/qBNe2OicsU";
+    svgWrap.dataset.qrGroup = "912120107";
+    svgWrap.style.width = "168px";
+    svgWrap.style.height = "168px";
+    svgWrap.style.display = "block";
+    svgWrap.innerHTML = [
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${total} ${total}" width="168" height="168" shape-rendering="crispEdges" role="img" aria-label="QQ交流群 912120107 二维码">`,
+      `<rect width="${total}" height="${total}" fill="#ffffff"/>`,
+      `<path d="${pathParts.join("")}" fill="#000000"/>`,
+      `</svg>`
+    ].join("");
   }
 
   addProfessionalActions(container) {

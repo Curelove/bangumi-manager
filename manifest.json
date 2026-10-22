@@ -1,9 +1,9 @@
 {
   "id": "bangumi-manager",
   "name": "Bangumi 追番管理器",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "minAppVersion": "1.4.0",
-  "description": "管理 Bangumi 动画笔记、本地视频状态和动画库季度视图。",
+  "description": "面向 Obsidian 桌面版的 Bangumi 动画笔记、二维案头编目台、三维原画档案室、漫猫单集 RSS 追番下载与本地视频状态管理插件。",
   "author": "苦惹爱",
   "isDesktopOnly": true
 }

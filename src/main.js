@@ -5,8 +5,39 @@ const {
   Notice,
   Modal,
   ItemView,
-  Menu
+  Menu,
+  addIcon
 } = require("obsidian");
+
+const BANGUMI_TV_MANAGER_ICON_ID = "bangumi-tv-manager";
+const BANGUMI_ARCHIVE_HALL_ICON_ID = "bangumi-archive-hall";
+
+function registerBangumiCustomIcons() {
+  if (typeof addIcon !== "function") return;
+  // 简约复古小电视 + 播放徽记（专属“Bangumi 追番管理器”侧边栏图标）
+  addIcon(
+    BANGUMI_TV_MANAGER_ICON_ID,
+    [
+      '<path d="M31 10 L47 25" fill="none" stroke="currentColor" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M69 10 L53 25" fill="none" stroke="currentColor" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<rect x="12" y="25" width="76" height="56" rx="14" fill="none" stroke="currentColor" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M40 42 L61 53 L40 64 Z" fill="currentColor" stroke="currentColor" stroke-width="4.5" stroke-linejoin="round"/>',
+      '<path d="M30 90 L70 90" fill="none" stroke="currentColor" stroke-width="6.8" stroke-linecap="round"/>'
+    ].join("")
+  );
+
+  // 简约双翼透视档案册 + 馆藏星芒（专属“打开番剧档案馆”侧边栏与标签页图标，融合 2D 编目台与 3D 档案室意象）
+  addIcon(
+    BANGUMI_ARCHIVE_HALL_ICON_ID,
+    [
+      '<path d="M12 23 L48 15 L48 81 L12 88 Z" fill="none" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M48 15 L88 23 L88 88 L48 81 Z" fill="none" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round"/>',
+      '<path d="M22 40 L38 37" fill="none" stroke="currentColor" stroke-width="6.2" stroke-linecap="round"/>',
+      '<path d="M22 56 L38 53" fill="none" stroke="currentColor" stroke-width="6.2" stroke-linecap="round"/>',
+      '<path d="M68 37 L71.8 47.2 L81 51 L71.8 54.8 L68 65 L64.2 54.8 L55 51 L64.2 47.2 Z" fill="currentColor"/>'
+    ].join("")
+  );
+}
 
 
 globalThis.__BangumiManagerModal = Modal;
@@ -48,6 +79,8 @@ let {
 const netabaTrendService = require("./netaba-trend-service.js");
 const NetabaTrendModal = netabaTrendService.createNetabaTrendModalClass({ Modal, Notice });
 const { Dashboard3DSpace } = require("./dashboard-3d-view.js");
+const curatorDesk = require("./dashboard-2d-desk.js");
+const roxyMascotService = require("./roxy-mascot-service.js");
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -64,6 +97,7 @@ var DEFAULT_SETTINGS = {
   baseFilePath: "动画笔记/追番广场/动画库.base",
   baseFolderPath: "动画笔记/追番广场",
   baseFolderPathManuallySet: false,
+  enableBaseFileGeneration: false,
   localAnimeRoot: "D:/ACG/Obsidian ACG",
   checkIntervalSeconds: 60,
   checkOnStartup: true,
@@ -131,7 +165,24 @@ var DEFAULT_SETTINGS = {
   dashboardShowScoreDelta: true,
   dashboardShowStudioStats: true,
   customQuerySections: [],
-  customCollectionSections: []
+  customCollectionSections: [],
+  enableRoxy2DMascot: true,
+  roxy2DMinimized: false,
+  roxyForceLightweight2D: false,
+  enableRoxy3DMascot: true,
+  roxy3DMinimized: false,
+  deskLayoutMode: "scroll",
+  deskDisplayLimit: 0,
+  deskPinnedSeasons: [],
+  deskPinnedSeasonsCustomized: false,
+  enableDownloadAssistant: true,
+  enableComicatIntegration: true,
+  comicatBaseUrl: "http://www.comicat.org",
+  customDownloadSearchUrlTemplate: "https://mikanani.me/Home/Search?searchstr={keyword}",
+  enableQbittorrentIntegration: true,
+  qbittorrentExecutablePath: "",
+  qbittorrentSkipDialog: true,
+  qbittorrentAutoCreateFolder: true
 };
 
 var DEFAULT_PRESET_QUERY_SECTION = {
@@ -170,11 +221,11 @@ var BangumiScoreDashboardView = class extends ItemView {
   }
 
   getDisplayText() {
-    return "动画仪表盘";
+    return "番剧档案馆";
   }
 
   getIcon() {
-    return "chart-no-axes-combined";
+    return BANGUMI_ARCHIVE_HALL_ICON_ID;
   }
 
   async onOpen() {
@@ -183,109 +234,66 @@ var BangumiScoreDashboardView = class extends ItemView {
       "bangumi-score-dashboard-view"
     );
 
-    const toolbar = this.contentEl.createDiv(
-      "bangumi-dashboard-view-toolbar"
-    );
-
-    toolbar.createEl("h2", {
-      text: "动画仪表盘"
-    });
-
-    const controls = toolbar.createDiv(
-      "bangumi-dashboard-view-controls"
-    );
-
-    const addSectionButton = controls.createEl("button", {
-      text: "+ 新建查询分区",
-      cls: "mod-cta"
-    });
-
-    const addCollectionButton = controls.createEl("button", {
-      text: "+ 新建收藏展柜",
-      cls: "mod-cta"
-    });
-
-    const refreshButton = controls.createEl("button", {
-      text: "刷新"
-    });
-
-    const resetButton = controls.createEl("button", {
-      text: "恢复默认布局"
-    });
-
-    const markdownButton = controls.createEl("button", {
-      text: "打开 Markdown"
-    });
-
-    const toggle3DBtn = controls.createEl("button", {
-      text: "🧊 3D 档案空间",
-      cls: "mod-cta"
-    });
-    this.toggle3DBtn = toggle3DBtn;
-
     const dashboard = this.contentEl.createDiv(
       "bangumi-score-dashboard"
     );
     this.dashboardEl = dashboard;
 
-    toggle3DBtn.onclick = async () => {
-      if (this.space3DInstance) {
-        this.destroy3D();
-        this.dashboardEl.style.display = "";
-        toggle3DBtn.textContent = "🧊 3D 档案空间";
-        toggle3DBtn.classList.add("mod-cta");
-        await this.refresh();
-      } else {
-        this.dashboardEl.style.display = "none";
-        toggle3DBtn.textContent = "🔲 返回 2D 仪表盘";
-        toggle3DBtn.classList.remove("mod-cta");
-        const items = await this.plugin.collectDashboardItems();
-        this.space3DContainer = this.contentEl.createDiv("bangumi-3d-wrapper");
-        this.space3DInstance = new Dashboard3DSpace(this.space3DContainer, this.plugin, {
-          items,
-          filterMode: "watching"
-        });
-        this.space3DInstance.onExit3D = () => {
-          toggle3DBtn.click();
-        };
+    this.toggle3DBtn = {
+      click: () => {
+        if (this.space3DInstance) {
+          this.exit3D();
+        } else {
+          this.enter3D();
+        }
       }
-    };
-
-    addSectionButton.onclick = () => {
-      this.plugin.openCustomQuerySectionModal(null, async () => {
-        await this.refresh();
-      });
-    };
-
-    addCollectionButton.onclick = () => {
-      this.plugin.openCustomCollectionModal(null, async () => {
-        await this.refresh();
-      });
-    };
-
-    refreshButton.onclick = async () => {
-      refreshButton.disabled = true;
-
-      try {
-        await this.plugin.refreshScoreDashboard(true);
-        await this.refresh();
-      } finally {
-        refreshButton.disabled = false;
-      }
-    };
-
-    resetButton.onclick = async () => {
-      await this.plugin.resetScoreDashboardLayout(
-        dashboard,
-        { isMarkdown: false }
-      );
-    };
-
-    markdownButton.onclick = async () => {
-      await this.plugin.openScoreDashboard();
     };
 
     await this.refresh();
+  }
+
+  async enter3D() {
+    if (this.space3DInstance) return;
+    this.saved2DScrollTop = this.contentEl ? this.contentEl.scrollTop : 0;
+    if (this.dashboardEl) {
+      this.dashboardEl.style.display = "none";
+    }
+    const roxyEl = this.contentEl ? this.contentEl.querySelector(".curator-roxy-widget") : null;
+    if (roxyEl) {
+      roxyEl.style.display = "none";
+    }
+    const items = await this.plugin.collectDashboardItems();
+    this.space3DContainer = this.contentEl.createDiv("bangumi-3d-wrapper");
+    this.space3DInstance = new Dashboard3DSpace(this.space3DContainer, this.plugin, {
+      items,
+      filterMode: "watching"
+    });
+    if (this.space3DInstance && this.space3DInstance.exitButton) {
+      this.space3DInstance.exitButton.textContent = "↖ 返回二维案头编目台";
+      this.space3DInstance.exitButton.title = "返回番剧档案馆 · 二维案头编目台";
+    }
+    this.space3DInstance.onExit3D = () => {
+      this.exit3D();
+    };
+    roxyMascotService.mountRoxy3DMascot(this.plugin, this.space3DInstance);
+  }
+
+  async exit3D() {
+    if (!this.space3DInstance) return;
+    const restoreScroll = this.saved2DScrollTop || 0;
+    this.destroy3D();
+    if (this.dashboardEl) {
+      this.dashboardEl.style.display = "";
+    }
+    await this.refresh();
+    if (this.contentEl && restoreScroll > 0) {
+      this.contentEl.scrollTop = restoreScroll;
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (this.contentEl) this.contentEl.scrollTop = restoreScroll;
+        });
+      }
+    }
   }
 
   destroy3D() {
@@ -300,8 +308,18 @@ var BangumiScoreDashboardView = class extends ItemView {
   }
 
   async refresh() {
+    if (this.space3DInstance) {
+      roxyMascotService.mountRoxy3DMascot(this.plugin, this.space3DInstance);
+      return;
+    }
     if (this.dashboardEl && !this.space3DInstance) {
-      await this.plugin.renderScoreDashboard(this.dashboardEl, { isMarkdown: false });
+      await this.plugin.renderScoreDashboard(this.dashboardEl, {
+        isMarkdown: false,
+        onEnter3D: () => this.enter3D(),
+        bindToggle3DBtn: (btnEl) => {
+          this.topBar3DBtn = btnEl;
+        }
+      });
     }
   }
 
@@ -318,6 +336,7 @@ var BangumiManagerPlugin = class extends Plugin {
   }
 
   async onload() {
+    registerBangumiCustomIcons();
     const savedSettings =
       await this.loadData();
 
@@ -526,7 +545,7 @@ var BangumiManagerPlugin = class extends Plugin {
     );
     this.addCommand({
       id: "open-score-dashboard",
-      name: "打开动画仪表盘",
+      name: "打开番剧档案馆（二维案头编目台）",
       callback: async () => {
         await this.openScoreDashboardView();
       }
@@ -534,7 +553,7 @@ var BangumiManagerPlugin = class extends Plugin {
 
     this.addCommand({
       id: "open-bangumi-3d-space",
-      name: "打开 3D 交互式动画档案空间",
+      name: "打开番剧档案馆（三维原画档案室）",
       callback: async () => {
         await this.openScoreDashboardView();
         const leaves = this.app.workspace.getLeavesOfType(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE);
@@ -716,6 +735,11 @@ var BangumiManagerPlugin = class extends Plugin {
       this.calloutSyncTimers.clear();
     }
 
+    if (this.managerRibbon) {
+      this.managerRibbon.remove();
+      this.managerRibbon = null;
+    }
+
     if (this.dashboardRibbon) {
       this.dashboardRibbon.remove();
       this.dashboardRibbon = null;
@@ -789,8 +813,8 @@ var BangumiManagerPlugin = class extends Plugin {
       return;
     }
     this.managerRibbon = this.addRibbonIcon(
-      "library",
-      "Bangumi \u8FFD\u756A\u7BA1\u7406\u5668",
+      BANGUMI_TV_MANAGER_ICON_ID,
+      "Bangumi 追番管理器",
       () => {
         new ManagerRibbonModal(
           this.app,
@@ -812,8 +836,8 @@ var BangumiManagerPlugin = class extends Plugin {
     }
 
     this.dashboardRibbon = this.addRibbonIcon(
-      "chart-no-axes-combined",
-      "打开动画仪表盘",
+      BANGUMI_ARCHIVE_HALL_ICON_ID,
+      "打开番剧档案馆",
       async () => {
         await this.openScoreDashboardView();
       }
@@ -868,7 +892,9 @@ getCurrentSeasonName() {
     await this.ensureVaultFolder(
       this.settings.coverFolder
     );
-    await this.createBaseFileIfMissing();
+    if (this.settings.enableBaseFileGeneration === true) {
+      await this.createBaseFileIfMissing(false);
+    }
 
     if (
       this.settings.markdownDashboardEnabled !==
@@ -878,7 +904,7 @@ getCurrentSeasonName() {
     }
 
     new Notice(
-      "\u5DF2\u6309\u5F53\u524D\u8DEF\u5F84\u8BBE\u7F6E\u5B8C\u6210\u521D\u59CB\u5316\u68C0\u67E5\u3002\u5DF2\u6709\u6587\u4EF6\u4E0D\u4F1A\u8986\u76D6\u3002",
+      "已按当前路径设置完成初始化检查（已跳过默认不生成的 动画库.base）。已有文件不会覆盖。",
       6e3
     );
   }
@@ -903,7 +929,7 @@ getCurrentSeasonName() {
       }
     }
   }
-  async createBaseFileIfMissing() {
+  async createBaseFileIfMissing(showNotice = false) {
     const baseFolderPath = String(
       this.settings.baseFolderPath || ""
     )
@@ -927,6 +953,9 @@ getCurrentSeasonName() {
     if (this.app.vault.getAbstractFileByPath(
       filePath
     )) {
+      if (showNotice) {
+        new Notice(`动画库文件已存在：${filePath}`, 4500);
+      }
       return;
     }
     const lastSlash =
@@ -959,6 +988,9 @@ views:
         filePath,
         content
       );
+      if (showNotice) {
+        new Notice(`已生成传统动画库文件：${filePath}`, 5000);
+      }
     } catch (error) {
       console.error(
         "创建动画库 Base 文件失败:",
@@ -1803,7 +1835,7 @@ if (this.settings.seasonViewMode === "current") {
       "  - bangumi-dashboard",
       "---",
       "",
-      "# 动画仪表盘",
+      "# 番剧档案馆",
       "",
       "<div class=\"bangumi-score-dashboard\" data-bangumi-dashboard=\"true\"></div>",
       ""
@@ -1858,7 +1890,7 @@ if (this.settings.seasonViewMode === "current") {
       false
     ) {
       new Notice(
-        "Markdown 仪表盘当前已关闭，请在插件设置中重新启用。",
+        "Markdown 番剧档案馆当前已关闭，请在插件设置中重新启用。",
         5000
       );
       return;
@@ -1923,6 +1955,10 @@ if (this.settings.seasonViewMode === "current") {
 
       const bgmLink = cleanValue(parsed.fields.BGM链接);
       const subjectId = bangumiApi.getSubjectId(bgmLink);
+      const airDateMatch = String(content || "").match(/^\|\s*开播日期\s*\|\s*([^|\r\n]+?)\s*\|/m);
+      const airDateText =
+        cleanValue(parsed.fields.开播日期) ||
+        (airDateMatch ? cleanValue(airDateMatch[1]) : "");
 
       result.push({
         file,
@@ -1951,6 +1987,7 @@ if (this.settings.seasonViewMode === "current") {
         ),
         year: cleanValue(parsed.fields.开播年份),
         season: cleanValue(parsed.fields.开播季度),
+        airDate: airDateText,
         tags: rawTags,
         totalEpisodes: cleanValue(parsed.fields.总集数),
         watchedEpisodes: extractWatchedEpisodes(content),
@@ -1961,11 +1998,21 @@ if (this.settings.seasonViewMode === "current") {
         director: cleanValue(parsed.fields.监督),
         downloadPath: cleanValue(parsed.fields.下载路径),
         localUpdateStatus: cleanValue(parsed.fields.本地更新状态),
+        downloadSourceKeyword: cleanValue(parsed.fields.下载源关键词),
+        rssUrl: cleanValue(parsed.fields.RSS订阅),
+        downloadStreamId: cleanValue(parsed.fields.发布源标识),
         netabaUrl: cleanValue(parsed.fields.Netaba链接)
       });
     }
 
     return result;
+  }
+
+  async openDeskSeasonManagerFromSettings() {
+    const items = await this.collectDashboardItems();
+    curatorDesk.openDeskSeasonManagerModal(this, items, async () => {
+      await this.refreshOpenDashboardViews();
+    });
   }
 
   createDashboardCard(container, label, value) {
@@ -3966,6 +4013,13 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   confirmDeleteCustomQuerySection(section, onDeleted) {
+    roxyMascotService.emitRoxyEvent(this, {
+      type: "action:delete_confirm",
+      state: "warn2",
+      category: "删除确认",
+      priority: roxyMascotService.PRIORITY.HIGH,
+      message: `请稍微确认一下，真的要移除查询分区“${section.title}”吗？不过请放心，这不会删掉您的动画笔记本身。`
+    });
     new ConfirmDeleteSectionModal(this.app, section.title, async () => {
       this.settings.customQuerySections = (this.settings.customQuerySections || []).filter(
         (s) => s.id !== section.id
@@ -4000,6 +4054,13 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   confirmDeleteCustomCollection(collectionConfig, onDeleted) {
+    roxyMascotService.emitRoxyEvent(this, {
+      type: "action:delete_confirm",
+      state: "warn2",
+      category: "删除确认",
+      priority: roxyMascotService.PRIORITY.HIGH,
+      message: `请确认一下，要移除收藏展柜“${collectionConfig.title}”吗？展柜里的动画笔记文件都会安全保留下来的。`
+    });
     new ConfirmDeleteSectionModal(
       this.app,
       collectionConfig.title,
@@ -4113,7 +4174,7 @@ if (this.settings.seasonViewMode === "current") {
             if (this.isPluginWritingNote) {
               this.isPluginWritingNote.delete(file.path);
             }
-          }, 1000);
+          }, 2400);
         }
       }
     } catch (err) {
@@ -4155,6 +4216,10 @@ if (this.settings.seasonViewMode === "current") {
         newContent = removeNoteTag(newContent, updates.removeTag);
       }
 
+      if (updates.downloadPath !== undefined) {
+        newContent = updateFrontmatterField(newContent, "下载路径", String(updates.downloadPath || "无"));
+      }
+
       if (newContent !== content) {
         if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
         this.isPluginWritingNote.add(file.path);
@@ -4177,6 +4242,9 @@ if (this.settings.seasonViewMode === "current") {
       }
       if (updates.score !== undefined) {
         item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+      }
+      if (updates.downloadPath !== undefined) {
+        item.downloadPath = updates.downloadPath;
       }
       if (updates.addTag || updates.removeTag) {
         const parsedAfter = parseFrontmatter(newContent);
@@ -4212,12 +4280,46 @@ if (this.settings.seasonViewMode === "current") {
         }
       }
 
-      await this.refreshOpenDashboardViews();
+      await this.applyQuickUpdateToOpenDashboards(item, updates);
       return true;
     } catch (err) {
       console.error("[Bangumi Manager] 快捷修改动画笔记失败:", err);
+      roxyMascotService.emitRoxyEvent(this, {
+        type: "error:note_write",
+        state: "panic",
+        category: "写入异常",
+        priority: roxyMascotService.PRIORITY.CRITICAL,
+        force: true,
+        message: `哇啊……非常抱歉，在往动画笔记里写入记录时好像出了一点差错：${err.message}`
+      });
       new Notice(`修改笔记失败: ${err.message}`);
       return false;
+    }
+  }
+
+  async applyQuickUpdateToOpenDashboards(item, updates) {
+    const leaves = this.app.workspace.getLeavesOfType(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view && view.dashboardEl && !view.space3DInstance) {
+        const applied = curatorDesk.applyIncrementalDashboardUpdate(this, view.dashboardEl, item, updates);
+        if (!applied) {
+          await view.refresh();
+        }
+      }
+    }
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      const domDashboards = document.querySelectorAll(
+        ".bangumi-score-dashboard[data-markdown-dashboard='true'], [data-bangumi-dashboard='true']"
+      );
+      for (const el of domDashboards) {
+        if (el) {
+          const applied = curatorDesk.applyIncrementalDashboardUpdate(this, el, item, updates);
+          if (!applied) {
+            await this.renderScoreDashboard(el, el._dashboardOptions || { isMarkdown: true });
+          }
+        }
+      }
     }
   }
 
@@ -4520,7 +4622,7 @@ if (this.settings.seasonViewMode === "current") {
     if (container) {
       await this.renderScoreDashboard(container, options);
     }
-    new Notice("已恢复动画仪表盘默认布局。");
+    new Notice("已恢复番剧档案馆默认布局。");
   }
 
   getDashboardScrollParent(el) {
@@ -4556,629 +4658,17 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   async renderScoreDashboard(container, options = {}) {
-    const scrollParent = this.getDashboardScrollParent(container);
-    const savedScrollTop = scrollParent ? scrollParent.scrollTop : 0;
-    const prevHeight = (container.getBoundingClientRect && typeof container.getBoundingClientRect === "function")
-      ? container.getBoundingClientRect().height
-      : 0;
-    if (prevHeight > 0) {
-      container.style.minHeight = prevHeight + "px";
-    }
-
-    container.empty();
-    const isMarkdown = Boolean(options && options.isMarkdown);
-    if (isMarkdown) {
-      container.dataset.markdownDashboard = "true";
-      container._dashboardOptions = options;
-    }
-
-    const items = await this.collectDashboardItems();
-
-    const personalItems = items
-      .filter(
-        (item) => item.personalScore !== null
-      )
-      .sort(
-        (a, b) =>
-          b.personalScore - a.personalScore ||
-          a.name.localeCompare(b.name, "zh-CN")
-      );
-
-    const bangumiItems = items
-      .filter(
-        (item) => item.bangumiScore !== null
-      )
-      .sort(
-        (a, b) =>
-          b.bangumiScore - a.bangumiScore ||
-          a.name.localeCompare(b.name, "zh-CN")
-      );
-
-    const preciseItems = items
-      .filter((item) => {
-        return item.preciseScore !== null;
-      })
-      .sort((a, b) => {
-        return b.preciseScore - a.preciseScore ||
-          a.name.localeCompare(b.name, "zh-CN");
-      });
-
-    const scoredItems = items.filter(
-      (item) => item.personalScore !== null
-    );
-
-    const personalAverage = personalItems.length
-      ? (
-          personalItems.reduce(
-            (sum, item) =>
-              sum + item.personalScore,
-            0
-          ) / personalItems.length
-        ).toFixed(1)
-      : "—";
-
-    const bangumiAverage = bangumiItems.length
-      ? (
-          bangumiItems.reduce(
-            (sum, item) =>
-              sum + item.bangumiScore,
-            0
-          ) / bangumiItems.length
-        ).toFixed(1)
-      : "—";
-
-    const header = container.createDiv(
-      "bangumi-dashboard-header"
-    );
-
-    const headerMain = header.createDiv("bangumi-dashboard-header-main");
-
-    headerMain.createEl("h1", {
-      text: "动画仪表盘"
+    return await curatorDesk.renderCuratorDesk(this, container, options, {
+      openSetEpisodesModal: (item) => new SetEpisodesModal(this.app, this, item).open(),
+      openQuickAddTagModal: (item) => new QuickAddTagModal(this.app, this, item).open(),
+      openTrendModal: (item) => {
+        if (!item?.subjectId) {
+          new Notice("该动画未关联有效的 Bangumi 编号，无法获取 Netaba 趋势。");
+          return;
+        }
+        new NetabaTrendModal(this.app, this, item).open();
+      }
     });
-
-    headerMain.createDiv({
-      text: "数据来自当前动画笔记；打开页面时自动重新统计。",
-      cls: "bangumi-dashboard-subtitle"
-    });
-
-    const headerActions = header.createDiv("bangumi-dashboard-header-actions");
-    const addQueryBtn = headerActions.createEl("button", {
-      cls: "bangumi-dashboard-header-btn",
-      text: "+ 新建查询分区"
-    });
-
-    addQueryBtn.onclick = () => {
-      this.openCustomQuerySectionModal(null, async () => {
-        await this.renderScoreDashboard(container, options);
-      });
-    };
-
-    const addCollectionBtn = headerActions.createEl("button", {
-      cls: "bangumi-dashboard-header-btn",
-      text: "+ 新建收藏展柜"
-    });
-
-    addCollectionBtn.onclick = () => {
-      this.openCustomCollectionModal(null, async () => {
-        await this.renderScoreDashboard(container, options);
-      });
-    };
-
-    if (isMarkdown) {
-      const banner = container.createDiv(
-        "bangumi-dashboard-compat-banner"
-      );
-
-      const text = banner.createDiv({
-        cls: "bangumi-dashboard-compat-text"
-      });
-
-      text.createSpan({
-        text: "提示：当前为 Markdown 嵌入模式。为避免实时预览光标干扰并获得最佳拖拽排版体验，推荐在"
-      });
-
-      text.createEl("strong", {
-        text: "专属页面"
-      });
-
-      text.createSpan({
-        text: "中打开。"
-      });
-
-      const actions = banner.createDiv(
-        "bangumi-dashboard-compat-actions"
-      );
-
-      const openBtn = actions.createEl("button", {
-        cls: "bangumi-dashboard-compat-btn",
-        text: "打开专属仪表盘"
-      });
-
-      openBtn.onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await this.openScoreDashboardView();
-      };
-
-      const resetBtn = actions.createEl("button", {
-        cls: "bangumi-dashboard-compat-reset-btn",
-        text: "恢复默认布局"
-      });
-
-      resetBtn.onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await this.resetScoreDashboardLayout(container, options);
-      };
-    }
-
-    const cards = container.createDiv(
-      "bangumi-dashboard-cards"
-    );
-
-    this.createDashboardCard(
-      cards,
-      "动画总数",
-      items.length
-    );
-
-    this.createDashboardCard(
-      cards,
-      "我的评分数",
-      personalItems.length
-    );
-
-    this.createDashboardCard(
-      cards,
-      "我的平均评分",
-      personalAverage
-    );
-
-    this.createDashboardCard(
-      cards,
-      "BGM 用户平均评分",
-      bangumiAverage
-    );
-
-    const personalLimit = Math.max(
-      1,
-      Number(
-        this.settings.dashboardPersonalRankLimit
-      ) || 10
-    );
-
-    const bangumiLimit = Math.max(
-      1,
-      Number(
-        this.settings.dashboardBangumiRankLimit
-      ) || 10
-    );
-
-    const preciseLimit = Math.max(
-      1,
-      Number(
-        this.settings.dashboardBangumiRankLimit
-      ) || 10
-    );
-
-    const builtInSectionDefs = [
-      {
-        id: "personalRank",
-        title: "我的评分排名",
-        badgeText: personalItems.length ? `${personalItems.length} 部` : "",
-        hasData: personalItems.length > 0,
-        emptyText: "暂无可显示的评分记录（笔记未填写“我的评分”）",
-        spanFull: false,
-        renderBody: (body) => {
-          const list = body.createDiv("bangumi-dashboard-rank-list");
-          this.renderRankListRows(
-            list,
-            personalItems,
-            "personalScore",
-            "bangumiScore",
-            personalLimit
-          );
-        }
-      },
-      {
-        id: "bangumiRank",
-        title: "BGM 用户评分排名",
-        badgeText: bangumiItems.length ? `${bangumiItems.length} 部` : "",
-        hasData: bangumiItems.length > 0,
-        emptyText: "暂无可显示的评分记录",
-        spanFull: false,
-        renderBody: (body) => {
-          const list = body.createDiv("bangumi-dashboard-rank-list");
-          this.renderRankListRows(
-            list,
-            bangumiItems,
-            "bangumiScore",
-            "personalScore",
-            bangumiLimit
-          );
-        }
-      },
-      {
-        id: "preciseRank",
-        title: "BGM 精确评分排名",
-        badgeText: preciseItems.length ? `${preciseItems.length} 部` : "",
-        hasData: preciseItems.length > 0,
-        emptyText: "暂无可显示的精确评分记录",
-        spanFull: false,
-        renderBody: (body) => {
-          const list = body.createDiv("bangumi-dashboard-rank-list");
-          this.renderPreciseRankListRows(
-            list,
-            preciseItems,
-            preciseLimit
-          );
-        }
-      },
-      {
-        id: "distribution",
-        title: "我的评分分布",
-        badgeText: scoredItems.length ? `${scoredItems.length} 部` : "",
-        hasData: scoredItems.length > 0,
-        emptyText: "填写“我的评分”后会显示评分分布",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderDistributionBars(body, items);
-        }
-      },
-      {
-        id: "watchState",
-        title: "观看状态",
-        badgeText: items.length ? `${items.length} 部` : "",
-        hasData: items.length > 0,
-        emptyText: "暂无观看状态记录",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderWatchStateCards(body, items);
-        }
-      }
-    ];
-
-    const collectionConfigs = Array.isArray(this.settings.customCollectionSections)
-      ? this.settings.customCollectionSections
-      : [];
-
-    const collectionSectionDefs = [];
-    for (const colConfig of collectionConfigs) {
-      const colItems = this.resolveCollectionItems(colConfig, items);
-      collectionSectionDefs.push({
-        id: `collection_${colConfig.id}`,
-        title: colConfig.title || "自定义展柜",
-        badgeText: colItems.length ? `${colItems.length} 部` : "",
-        hasData: colItems.length > 0,
-        emptyText: "展柜内暂无动画（点击右上角“管理”添加）",
-        spanFull: true,
-        isCollection: true,
-        collectionConfig: colConfig,
-        renderBody: (body) => {
-          if (colConfig.displayMode === "list") {
-            this.renderCollectionList(body, colItems, colConfig, container, options);
-          } else {
-            this.renderCollectionGrid(body, colItems, colConfig, container, options);
-          }
-        }
-      });
-    }
-
-    const customConfigs = Array.isArray(this.settings.customQuerySections)
-      ? this.settings.customQuerySections
-      : [];
-
-    const customSectionDefs = [];
-    for (const customConfig of customConfigs) {
-      const filtered = this.filterCustomQueryItems(items, customConfig);
-      const sorted = this.sortCustomQueryItems(filtered, customConfig.sortBy);
-      const limit = Number(customConfig.limit) || 0;
-      const displayItems = limit > 0 ? sorted.slice(0, limit) : sorted;
-
-      customSectionDefs.push({
-        id: customConfig.id,
-        title: customConfig.title || "自定义查询",
-        badgeText: filtered.length ? `${filtered.length} 部` : "",
-        hasData: filtered.length > 0,
-        emptyText: "暂无匹配的动画记录",
-        spanFull: true,
-        isCustom: true,
-        config: customConfig,
-        renderBody: (body) => {
-          if (customConfig.displayMode === "grid") {
-            this.renderCustomGrid(body, displayItems, customConfig);
-          } else {
-            this.renderCustomList(body, displayItems, customConfig);
-          }
-        }
-      });
-    }
-
-    const analyticsSectionDefs = [
-      {
-        id: "progressStats",
-        title: "追番全景与时长统计",
-        badgeText: items.length ? `${items.length} 部` : "",
-        hasData: items.length > 0,
-        emptyText: "暂无动画数据",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderProgressStats(body, items);
-        }
-      },
-      {
-        id: "yearStats",
-        title: "年代与番季分布",
-        badgeText: items.some((it) => it.year) ? "年代统计" : "",
-        hasData: items.some((it) => it.year),
-        emptyText: "笔记中暂无开播年份或季度信息",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderYearStats(body, items);
-        }
-      },
-      {
-        id: "scoreDelta",
-        title: "评分差异与偏好分析",
-        badgeText: items.some((it) => it.personalScore !== null && (it.bangumiScore !== null || it.preciseScore !== null)) ? "对比分析" : "",
-        hasData: items.some((it) => it.personalScore !== null && (it.bangumiScore !== null || it.preciseScore !== null)),
-        emptyText: "需要同时拥有“我的评分”与“BGM评分”方可进行对比分析",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderScoreDelta(body, items);
-        }
-      },
-      {
-        id: "studioStats",
-        title: "制作公司与改编类型",
-        badgeText: items.some((it) => it.studio || it.animeType) ? "深度统计" : "",
-        hasData: items.some((it) => it.studio || it.animeType),
-        emptyText: "笔记中暂无制作公司或改编类型信息",
-        spanFull: true,
-        renderBody: (body) => {
-          this.renderStudioStats(body, items);
-        }
-      }
-    ];
-
-    const sectionDefs = [...collectionSectionDefs, ...customSectionDefs, ...analyticsSectionDefs, ...builtInSectionDefs];
-
-    const hiddenMap = this.settings.dashboardSectionHidden || {};
-
-    const isSectionHidden = (id) => {
-      if (typeof hiddenMap[id] === "boolean") {
-        return hiddenMap[id];
-      }
-      if (id === "preciseRank") {
-        return this.settings.dashboardShowPreciseRank === false;
-      }
-      if (id === "distribution") {
-        return this.settings.dashboardShowDistribution === false;
-      }
-      if (id === "watchState") {
-        return this.settings.dashboardShowWatchState === false;
-      }
-      if (id === "progressStats") {
-        return this.settings.dashboardShowProgressStats === false;
-      }
-      if (id === "yearStats") {
-        return this.settings.dashboardShowYearStats === false;
-      }
-      if (id === "scoreDelta") {
-        return this.settings.dashboardShowScoreDelta === false;
-      }
-      if (id === "studioStats") {
-        return this.settings.dashboardShowStudioStats === false;
-      }
-      return false;
-    };
-
-    const userOrder = Array.isArray(
-      this.settings.dashboardSectionOrder
-    )
-      ? this.settings.dashboardSectionOrder.filter((id) =>
-          sectionDefs.some((s) => s.id === id)
-        )
-      : [];
-
-    let orderedDefs = [];
-
-    if (userOrder.length > 0) {
-      for (const id of userOrder) {
-        const def = sectionDefs.find((s) => s.id === id);
-        if (def && !orderedDefs.includes(def)) {
-          orderedDefs.push(def);
-        }
-      }
-      for (const def of sectionDefs) {
-        if (!orderedDefs.includes(def)) {
-          orderedDefs.push(def);
-        }
-      }
-    } else {
-      const withData = sectionDefs.filter((s) => s.hasData);
-      const withoutData = sectionDefs.filter((s) => !s.hasData);
-      orderedDefs = [...withData, ...withoutData];
-    }
-
-    const visibleDefs = orderedDefs.filter(
-      (s) => !isSectionHidden(s.id)
-    );
-
-    const hiddenDefs = sectionDefs.filter((s) =>
-      isSectionHidden(s.id)
-    );
-
-    const sectionsContainer = container.createDiv(
-      "bangumi-dashboard-sections"
-    );
-
-    const collapsedMap =
-      this.settings.dashboardSectionCollapsed || {};
-
-    for (const def of visibleDefs) {
-      const isCollapsed = Boolean(collapsedMap[def.id]);
-
-      this.createDashboardSection(sectionsContainer, {
-        def,
-        isCollapsed,
-        onToggleCollapse: async () => {
-          const next = Object.assign(
-            {},
-            this.settings.dashboardSectionCollapsed
-          );
-          next[def.id] = !isCollapsed;
-          this.settings.dashboardSectionCollapsed = next;
-          await this.saveSettings();
-          await this.renderScoreDashboard(container, options);
-        },
-        onHide: async () => {
-          const next = Object.assign(
-            {},
-            this.settings.dashboardSectionHidden
-          );
-          next[def.id] = true;
-          this.settings.dashboardSectionHidden = next;
-          await this.saveSettings();
-          await this.renderScoreDashboard(container, options);
-          new Notice(
-            `已隐藏“${def.title}”分区。可在底部或设置中恢复。`
-          );
-        },
-        onReorder: async (sourceId, targetId) => {
-          const currentOrder = visibleDefs.map((d) => d.id);
-          const fromIdx = currentOrder.indexOf(sourceId);
-          const toIdx = currentOrder.indexOf(targetId);
-
-          if (fromIdx >= 0 && toIdx >= 0 && fromIdx !== toIdx) {
-            currentOrder.splice(fromIdx, 1);
-            currentOrder.splice(toIdx, 0, sourceId);
-
-            for (const s of sectionDefs) {
-              if (!currentOrder.includes(s.id)) {
-                currentOrder.push(s.id);
-              }
-            }
-
-            this.settings.dashboardSectionOrder = currentOrder;
-            await this.saveSettings();
-            await this.renderScoreDashboard(container, options);
-            new Notice("已更新分区排序。");
-          }
-        },
-        onManage: def.isCollection
-          ? async () => {
-              this.openCollectionItemsManagerModal(def.collectionConfig, async () => {
-                await this.renderScoreDashboard(container, options);
-              });
-            }
-          : null,
-        onEdit: def.isCollection
-          ? async () => {
-              this.openCustomCollectionModal(def.collectionConfig, async () => {
-                await this.renderScoreDashboard(container, options);
-              });
-            }
-          : (def.isCustom
-            ? async () => {
-                this.openCustomQuerySectionModal(def.config, async () => {
-                  await this.renderScoreDashboard(container, options);
-                });
-              }
-            : null),
-        onDelete: def.isCollection
-          ? async () => {
-              this.confirmDeleteCustomCollection(def.collectionConfig, async () => {
-                await this.renderScoreDashboard(container, options);
-              });
-            }
-          : (def.isCustom
-            ? async () => {
-                this.confirmDeleteCustomQuerySection(def.config, async () => {
-                  await this.renderScoreDashboard(container, options);
-                });
-              }
-            : null)
-      });
-    }
-
-    if (hiddenDefs.length > 0) {
-      const restoreBar = container.createDiv(
-        "bangumi-dashboard-restore-bar"
-      );
-
-      restoreBar.createSpan({
-        text: "已隐藏分区："
-      });
-
-      for (const hDef of hiddenDefs) {
-        const chip = restoreBar.createEl("button", {
-          cls: "bangumi-dashboard-restore-chip",
-          text: `+ 恢复 ${hDef.title}`
-        });
-
-        chip.onclick = async (e) => {
-          e.preventDefault();
-          const next = Object.assign(
-            {},
-            this.settings.dashboardSectionHidden
-          );
-          next[hDef.id] = false;
-
-          if (hDef.id === "preciseRank") {
-            this.settings.dashboardShowPreciseRank = true;
-          }
-          if (hDef.id === "distribution") {
-            this.settings.dashboardShowDistribution = true;
-          }
-          if (hDef.id === "watchState") {
-            this.settings.dashboardShowWatchState = true;
-          }
-          if (hDef.id === "progressStats") {
-            this.settings.dashboardShowProgressStats = true;
-          }
-          if (hDef.id === "yearStats") {
-            this.settings.dashboardShowYearStats = true;
-          }
-          if (hDef.id === "scoreDelta") {
-            this.settings.dashboardShowScoreDelta = true;
-          }
-          if (hDef.id === "studioStats") {
-            this.settings.dashboardShowStudioStats = true;
-          }
-
-          this.settings.dashboardSectionHidden = next;
-          await this.saveSettings();
-          await this.renderScoreDashboard(container, options);
-          new Notice(`已恢复显示“${hDef.title}”分区。`);
-        };
-      }
-
-      const resetBtn = restoreBar.createEl("button", {
-        cls: "bangumi-dashboard-restore-chip bangumi-dashboard-restore-all",
-        text: "恢复默认布局"
-      });
-
-      resetBtn.onclick = async (e) => {
-        e.preventDefault();
-        await this.resetScoreDashboardLayout(container, options);
-      };
-    }
-
-    if (prevHeight > 0) {
-      container.style.minHeight = "";
-    }
-    if (scrollParent && savedScrollTop > 0) {
-      scrollParent.scrollTop = savedScrollTop;
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => {
-          if (scrollParent) {
-            scrollParent.scrollTop = savedScrollTop;
-          }
-        });
-      }
-    }
   }
 
   async refreshScoreDashboard(force) {
@@ -5339,7 +4829,7 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-grid-ep-label{cursor:pointer;font-family:var(--font-monospace);white-space:nowrap;padding:0 3px;text-shadow:0 1px 2px rgba(0,0,0,0.85);font-weight:500;transition:color .12s ease;}",
       ".bangumi-grid-ep-label:hover{color:var(--text-accent);text-decoration:underline;}",
       ".bangumi-grid-info{padding:8px 10px 10px;display:flex;flex-direction:column;min-width:0;}",
-      ".bangumi-grid-title{font-size:.88em;font-weight:600;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35;}",
+      ".bangumi-grid-title{font-size:.88em;font-weight:600;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;word-break:break-word;line-height:1.34;min-height:2.68em;}",
       ".bangumi-grid-meta{font-size:.76em;color:var(--text-muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
       ".bangumi-grid-tags-row{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;align-items:center;}",
       ".bangumi-grid-tag-chip{font-size:10px;padding:1px 5px;border-radius:3px;background:var(--background-secondary-alt);color:var(--text-muted);border:1px solid var(--background-modifier-border);display:inline-flex;align-items:center;gap:2px;line-height:1.2;}",
@@ -5478,58 +4968,8 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-local-action-btn.is-folder:hover{background:var(--background-modifier-hover);}",
       ".bangumi-grid-ep-btn.is-trend{margin-left:auto;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);font-size:.78em;padding:2px 6px;}",
       ".bangumi-3d-wrapper{width:100%;height:100%;min-height:640px;position:relative;}",
-      ".bangumi-3d-root{--rl-bg:#eae5e1;--rl-surface:rgba(245,243,238,0.94);--rl-surface-hover:#e4d5c1;--rl-border:#c8c4b8;--rl-text:#1a1a1a;--rl-text-muted:#666257;--rl-accent:#d49b35;--rl-active-bg:#1a1a1a;--rl-active-text:#ffffff;--rl-card-bg:#ffffff;--rl-card-border:#ddd8ce;--rl-shadow:0 16px 36px rgba(0,0,0,0.08);color:var(--rl-text);}",
-      ".bangumi-3d-root.theme-dark-space{--rl-bg:#14161a;--rl-surface:rgba(24,27,33,0.94);--rl-surface-hover:rgba(255,255,255,0.12);--rl-border:rgba(255,255,255,0.16);--rl-text:#f0ede6;--rl-text-muted:#9aa0a6;--rl-accent:#d49b35;--rl-active-bg:#ffffff;--rl-active-text:#111111;--rl-card-bg:rgba(30,34,42,0.9);--rl-card-border:rgba(255,255,255,0.1);--rl-shadow:0 16px 36px rgba(0,0,0,0.45);color:var(--rl-text);}",
-      ".bangumi-3d-toolbar{position:absolute;top:12px;left:16px;right:16px;display:flex;justify-content:space-between;align-items:center;z-index:20;pointer-events:none;}",
-      ".toolbar-section-left,.toolbar-section-right{display:flex;align-items:center;gap:8px;pointer-events:auto;flex-wrap:wrap;}",
-      ".bangumi-3d-btn{background:var(--rl-surface);backdrop-filter:blur(8px);border:1px solid var(--rl-border);color:var(--rl-text);padding:5px 12px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease;line-height:1.4;}",
-      ".bangumi-3d-btn:hover{background:var(--rl-surface-hover);color:var(--rl-text);border-color:var(--rl-accent);}",
-      ".bangumi-3d-btn.is-active{background:var(--rl-active-bg);color:var(--rl-active-text);border-color:var(--rl-active-bg);}",
-      ".bangumi-3d-btn.is-active::after{content:'';width:5px;height:5px;background:var(--rl-accent);border-radius:50%;display:inline-block;}",
-      ".bangumi-3d-title-badge{font-size:11px;font-weight:700;letter-spacing:1.5px;padding:5px 12px;border-radius:4px;background:var(--rl-surface);color:var(--rl-text);border:1px solid var(--rl-border);display:inline-flex;align-items:center;gap:6px;backdrop-filter:blur(8px);}",
-      ".bangumi-3d-title-badge i{font-style:normal;color:var(--rl-accent);}",
-      ".bangumi-3d-select{background:var(--rl-surface);backdrop-filter:blur(8px);border:1px solid var(--rl-border);color:var(--rl-text);padding:4px 10px;border-radius:4px;font-size:12px;font-weight:500;outline:none;cursor:pointer;}",
-      ".bangumi-3d-select option{background:var(--rl-bg);color:var(--rl-text);}",
-      ".bangumi-3d-perf-group{display:flex;background:var(--rl-surface);backdrop-filter:blur(8px);border:1px solid var(--rl-border);border-radius:4px;overflow:hidden;padding:2px;gap:2px;}",
-      ".bangumi-perf-btn{background:transparent;border:0;color:var(--rl-text-muted);font-size:11px;font-weight:600;padding:3px 9px;cursor:pointer;border-radius:3px;transition:all .15s ease;}",
-      ".bangumi-perf-btn:hover{color:var(--rl-text);}",
-      ".bangumi-perf-btn.is-active{background:var(--rl-active-bg);color:var(--rl-active-text);}",
-      ".bangumi-perf-btn.is-active::after{content:'';width:4px;height:4px;background:var(--rl-accent);border-radius:50%;display:inline-block;margin-left:4px;vertical-align:middle;}",
-      ".bangumi-3d-status-pill{position:absolute;bottom:14px;right:18px;font-size:11px;font-weight:500;padding:4px 12px;border-radius:999px;background:var(--rl-surface);backdrop-filter:blur(6px);border:1px solid var(--rl-border);color:var(--rl-text-muted);z-index:20;pointer-events:none;transition:all .2s ease;}",
-      ".bangumi-3d-status-pill.is-sleeping{color:var(--rl-accent);border-color:rgba(212,155,53,0.4);font-weight:600;}",
-      ".bangumi-3d-hud-panel{position:absolute;top:64px;right:24px;width:440px;max-width:calc(100% - 48px);max-height:calc(100% - 84px);overflow-y:auto;background:var(--rl-surface);backdrop-filter:blur(16px);border:1px solid var(--rl-border);box-shadow:var(--rl-shadow);border-radius:8px;padding:20px;pointer-events:auto;color:var(--rl-text);z-index:25;animation:hudFadeIn .22s cubic-bezier(0.16,1,0.3,1);}",
-      "@keyframes hudFadeIn{from{opacity:0;transform:translateX(16px);}to{opacity:1;transform:translateX(0);}}",
-      ".hud-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px;}",
-      ".hud-eyebrow{font-size:10px;font-weight:700;letter-spacing:1.5px;color:var(--rl-accent);text-transform:uppercase;margin-bottom:4px;}",
-      ".hud-title{font-size:18px;font-weight:700;line-height:1.3;color:var(--rl-text);margin:0;}",
-      ".hud-sub{font-size:12px;color:var(--rl-text-muted);margin-bottom:12px;line-height:1.4;}",
-      ".hud-score-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;}",
-      ".hud-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;border:1px solid transparent;}",
-      ".hud-pill.is-personal{background:rgba(212,155,53,0.15);color:var(--rl-accent);border-color:rgba(212,155,53,0.35);}",
-      ".hud-pill.is-bgm{background:rgba(0,123,255,0.12);color:#007bff;border-color:rgba(0,123,255,0.25);}",
-      ".hud-pill.is-state{background:var(--rl-surface-hover);color:var(--rl-text);border-color:var(--rl-border);}",
-      ".hud-progress-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding:10px 0;border-top:1px solid var(--rl-border);border-bottom:1px solid var(--rl-border);}",
-      ".hud-ep-label{font-size:13px;font-weight:600;color:var(--rl-text);}",
-      ".hud-action-btn{font-size:12px;font-weight:600;padding:4px 10px;border-radius:4px;cursor:pointer;background:var(--rl-surface);border:1px solid var(--rl-border);color:var(--rl-text);transition:all .15s ease;display:inline-flex;align-items:center;gap:4px;}",
-      ".hud-action-btn:hover{background:var(--rl-surface-hover);border-color:var(--rl-accent);}",
-      ".hud-action-btn.is-primary{background:var(--rl-active-bg);color:var(--rl-active-text);border-color:var(--rl-active-bg);}",
-      ".hud-action-btn.is-primary:hover{filter:brightness(1.15);}",
-      ".hud-local-bar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}",
-      ".hud-trend-box{margin:14px 0;background:var(--rl-card-bg);border:1px solid var(--rl-card-border);border-radius:6px;padding:10px;overflow:hidden;}",
-      ".hud-footer-actions{display:flex;gap:8px;margin-top:14px;}",
-      ".hud-close-btn{flex:1;font-size:12px;font-weight:600;padding:6px 0;border-radius:4px;cursor:pointer;background:var(--rl-surface);border:1px solid var(--rl-border);color:var(--rl-text-muted);transition:all .15s ease;text-align:center;}",
-      ".hud-close-btn:hover{background:var(--rl-surface-hover);color:var(--rl-text);}",
-      ".bangumi-3d-explode-hud{position:absolute;inset:0;pointer-events:none;z-index:22;}",
-      ".explode-parts-sidebar{position:absolute;left:24px;top:72px;width:240px;background:var(--rl-surface);backdrop-filter:blur(16px);border:1px solid var(--rl-border);box-shadow:var(--rl-shadow);border-radius:8px;padding:16px;pointer-events:auto;}",
-      ".explode-parts-title{font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--rl-accent);margin-bottom:10px;text-transform:uppercase;}",
-      ".explode-part-item{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--rl-card-border);font-size:12px;}",
-      ".explode-part-item:last-child{border-bottom:none;}",
-      ".explode-part-num{font-weight:700;color:var(--rl-accent);margin-right:8px;font-family:monospace;}",
-      ".explode-part-label{font-weight:600;color:var(--rl-text);flex:1;}",
-      ".explode-part-en{font-size:10px;color:var(--rl-text-muted);font-family:monospace;}",
-      ".explode-bottom-bar{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:12px;background:var(--rl-surface);backdrop-filter:blur(16px);border:1px solid var(--rl-border);box-shadow:var(--rl-shadow);border-radius:30px;padding:6px 18px;pointer-events:auto;}",
-      ".explode-help-hint{font-size:11px;color:var(--rl-text-muted);display:flex;gap:12px;align-items:center;}"
-    ].join("");
+      curatorDesk.getCuratorDeskStyles()
+    ].join("\n");
 
     document.head.appendChild(style);
 
@@ -6444,6 +5884,14 @@ var ManagerRibbonModal = class extends Modal {
       "p",
       {
         text: "\u8BF7\u9009\u62E9\u8981\u6267\u884C\u7684\u64CD\u4F5C\u3002"
+      }
+    );
+    this.addButton(
+      contentEl,
+      "打开番剧档案馆（二维案头编目台 / 三维原画档案室）",
+      async () => {
+        this.close();
+        await this.plugin.openScoreDashboardView();
       }
     );
     this.addButton(
@@ -7813,5 +7261,7 @@ var BatchTagManagerModal = class extends Modal {
   }
 };
 
+BangumiManagerPlugin.Dashboard3DSpace = Dashboard3DSpace;
 module.exports = BangumiManagerPlugin;
+module.exports.Dashboard3DSpace = Dashboard3DSpace;
 
