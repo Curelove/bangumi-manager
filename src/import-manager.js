@@ -214,7 +214,7 @@ var SingleAnimeImportModal = class extends Modal {
     detailArea.createEl(
       "p",
       {
-        text: "\u65E5\u6587\u540D\uFF1A" + info.JP + "\n\u7C7B\u578B\uFF1A" + info.type + "\n\u603B\u96C6\u6570\uFF1A" + info.episode + "\n\u5F00\u64AD\u65E5\u671F\uFF1A" + info.date + "\nBGM\u8BC4\u5206\uFF1A" + info.rating
+        text: "\u65E5\u6587\u540D\uFF1A" + info.JP + "\n\u7C7B\u578B\uFF1A" + info.type + "\n\u603B\u96C6\u6570\uFF1A" + info.episode + "\n\u5F00\u64AD\u65E5\u671F\uFF1A" + info.date + "\nBGM \u8BC4\u5206\uFF1A" + info.rating
       }
     );
     const stateLabel = detailArea.createEl(

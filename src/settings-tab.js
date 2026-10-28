@@ -1,8 +1,10 @@
 const Modal = globalThis.__BangumiManagerModal;
 const {
   checkRoxyHdPortraitsStatus,
-  downloadRoxyHdPortraitPack
+  downloadRoxyHdPortraitPack,
+  normalizeRoxy2DModeSettings
 } = require("./roxy-mascot-service");
+const reviewStudioService = require("./review-studio-service");
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -802,6 +804,13 @@ module.exports = function createSettingsTabClass({
       "本地封面保存目录。"
     );
 
+    this.addPathSetting(
+      container,
+      "观片手札图片目录",
+      "reviewImageFolder",
+      "观片手札粘贴截图（Ctrl+V）与上传附图保存的独立仓库目录（默认：附件/观片手札图片，与动画封面目录完全隔离）。"
+    );
+
     new Setting(container)
       .setName("本地动画根目录")
       .setDesc(
@@ -867,6 +876,93 @@ module.exports = function createSettingsTabClass({
 
     this.addProfessionalActions(container);
     this.addHelpAndCommunitySection(container);
+  }
+
+  addReviewAndPlayerSettings(container, compact) {
+    let playerInfo = null;
+    try {
+      playerInfo = reviewStudioService.detectInstalledVideoPlayers(this.plugin);
+    } catch (e) {
+      playerInfo = null;
+    }
+    const detectedEntries = playerInfo && playerInfo.detected
+      ? Object.values(playerInfo.detected).filter((d) => d && d.installed)
+      : [];
+    const detectedSummary =
+      detectedEntries.length > 0
+        ? "当前本机已自动探测到：" +
+          detectedEntries
+            .map((p) => {
+              const nameMap = {
+                potplayer: "PotPlayer",
+                dandanplay: "弹弹play",
+                mpv: "MPV",
+                vlc: "VLC",
+                mpc: "MPC-HC/BE"
+              };
+              return `${nameMap[p.kind] || p.kind} (${p.exePath})`;
+            })
+            .join(" ； ") +
+          (playerInfo?.activeLabel
+            ? `\n👉 当前生效播放器：${playerInfo.activeLabel}${playerInfo.activeExePath ? " (" + playerInfo.activeExePath + ")" : ""}`
+            : "")
+        : "当前未在默认路径探测到 PotPlayer / 弹弹play，可在下方手动指定 .exe 或 .lnk 快捷方式路径。";
+
+    new Setting(container)
+      .setName("本地视频播放器联动（剧集播放与手札时间点空降）")
+      .setDesc(
+        "点击观片手札上的「▶ EP03 · 14:22」时间点徽章或卡片上的「▶ 播放」按钮时调用的本地播放器。PotPlayer 支持直接空降到对应时间点（/seek=）；弹弹play 支持直接打开对应话数视频并自动复制时间码到剪贴板。\n" +
+          detectedSummary
+      )
+      .addDropdown((dropdown) => {
+        dropdown.addOptions({
+          auto: "⚡ 自动检测（优先 PotPlayer 空降，其次 弹弹play）",
+          potplayer: "🎬 PotPlayer（打开视频并精确空降到时间点）",
+          dandanplay: "💬 弹弹play（打开视频并自动复制时间码）",
+          mpv: "🎞️ MPV（--start= 精确空降）",
+          vlc: "🔶 VLC（--start-time= 精确空降）",
+          mpc: "📽️ MPC-HC / MPC-BE（/startpos 精确空降）",
+          custom: "🛠️ 自定义播放器路径（支持 .exe 或 .lnk）",
+          system: "🖥️ 系统默认关联程序"
+        });
+        dropdown.setValue(this.plugin.settings.localVideoPlayerMode || "auto");
+        dropdown.onChange(async (value) => {
+          this.plugin.settings.localVideoPlayerMode = value;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+      });
+
+    const rawCustomPath = String(this.plugin.settings.localVideoPlayerCustomPath || "").trim();
+    let resolvedHint = "";
+    if (rawCustomPath) {
+      const resolved = reviewStudioService.resolveExecutableOrShortcutPath(rawCustomPath);
+      if (resolved) {
+        resolvedHint =
+          rawCustomPath.toLowerCase().endsWith(".lnk")
+            ? `\n✅ 已自动从快捷方式解析真实程序路径：${resolved}`
+            : `\n✅ 程序路径有效：${resolved}`;
+      } else {
+        resolvedHint = `\n⚠️ 未找到该路径对应的程序文件，请检查路径是否正确。`;
+      }
+    }
+
+    if (!compact || this.plugin.settings.localVideoPlayerMode === "custom" || rawCustomPath) {
+      new Setting(container)
+        .setName("自定义视频播放器路径（支持 .exe 或 .lnk 快捷方式）")
+        .setDesc(
+          "可填写播放器可执行文件（如 D:\\PotPlayer\\PotPlayerMini64.exe、%APPDATA%\\弹弹play\\dandanplay.exe）或桌面/开始菜单快捷方式（如 C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\PotPlayer\\PotPlayer 64 bit.lnk），插件会自动解析 .lnk 指向的真实 .exe。" +
+            resolvedHint
+        )
+        .addText((text) => {
+          text.setPlaceholder("留空则自动探测本机安装的播放器（支持 .exe 或 .lnk）");
+          text.setValue(rawCustomPath);
+          text.onChange(async (value) => {
+            this.plugin.settings.localVideoPlayerCustomPath = value.trim();
+            await this.plugin.saveSettings();
+          });
+        });
+    }
   }
 
   addBangumiUserSetting(container) {
@@ -935,6 +1031,8 @@ module.exports = function createSettingsTabClass({
           this.plugin.refreshDashboardRibbon();
         });
       });
+
+    this.addReviewAndPlayerSettings(container, compact);
 
     if (compact) {
       return;
@@ -1031,7 +1129,9 @@ module.exports = function createSettingsTabClass({
         });
       });
 
-    const hdStatus = checkRoxyHdPortraitsStatus(this.plugin);
+    const roxyModeInfo = normalizeRoxy2DModeSettings(this.plugin);
+    const hdStatus = roxyModeInfo.hdStatus;
+
     new Setting(container)
       .setName("洛琪希高清立绘扩展包（独立附加资源）")
       .setDesc(
@@ -1053,6 +1153,7 @@ module.exports = function createSettingsTabClass({
               if (res && res.success) {
                 new Notice("洛琪希高清立绘扩展包（7 张 PNG）已下载就位！", 5000);
                 this.plugin.settings.roxyForceLightweight2D = false;
+                this.plugin.settings.enableRoxy2DMascot = true;
                 await this.plugin.saveSettings();
                 await this.plugin.refreshOpenDashboardViews();
                 this.display();
@@ -1072,17 +1173,112 @@ module.exports = function createSettingsTabClass({
           });
       });
 
-    new Setting(container)
-      .setName("二维记录员使用内置轻量像素形象（无立绘包适配模式）")
+    const isHdMascotOn = hdStatus.installed && Boolean(this.plugin.settings.enableRoxy2DMascot);
+    const isPixelModeOn = Boolean(this.plugin.settings.roxyForceLightweight2D);
+    const disableHdToggle = !hdStatus.installed || isPixelModeOn;
+    const hdToggleTooltip = !hdStatus.installed
+      ? "需要先下载“洛琪希高清立绘扩展包”"
+      : isPixelModeOn
+        ? "请先关闭二维像素小人模式"
+        : "";
+
+    const hdMascotSetting = new Setting(container)
+      .setName("启用二维馆藏记录员（洛琪希看板娘）")
       .setDesc(
-        "开启后，二维案头编目台将跳过外部 PNG 立绘，直接使用内置于 main.js 的轻量矢量像素洛琪希（这也是用户未下载额外立绘包时的自动适配形态）。"
+        "在番剧档案馆「二维案头编目台」右下角显示高清立绘版洛琪希馆藏记录员。需先安装上方高清立绘扩展包，且与下方轻量像素模式互斥；若两项同时关闭则隐藏二维记录员。"
       )
       .addToggle((toggle) => {
-        toggle.setValue(Boolean(this.plugin.settings.roxyForceLightweight2D));
+        toggle.setValue(isHdMascotOn);
+        toggle.setDisabled(disableHdToggle);
+        if (toggle.toggleEl) {
+          toggle.toggleEl.classList.toggle("is-disabled", disableHdToggle);
+          const inp = toggle.toggleEl.querySelector("input");
+          if (inp) inp.disabled = disableHdToggle;
+          if (hdToggleTooltip) {
+            toggle.toggleEl.title = hdToggleTooltip;
+            toggle.toggleEl.setAttribute("aria-label", hdToggleTooltip);
+          }
+        }
         toggle.onChange(async (value) => {
+          if (!hdStatus.installed || this.plugin.settings.roxyForceLightweight2D) {
+            return;
+          }
+          this.plugin.settings.enableRoxy2DMascot = value;
+          if (value) {
+            this.plugin.settings.roxyForceLightweight2D = false;
+            if (this.plugin._roxyCoordinator) {
+              this.plugin._roxyCoordinator.sessionHidden2D = false;
+            }
+          }
+          await this.saveAndRefreshDashboard();
+          this.display();
+        });
+      });
+    hdMascotSetting.setDisabled(disableHdToggle);
+    if (hdToggleTooltip) {
+      hdMascotSetting.settingEl.title = hdToggleTooltip;
+      hdMascotSetting.settingEl.style.opacity = "0.65";
+      if (hdMascotSetting.controlEl) hdMascotSetting.controlEl.title = hdToggleTooltip;
+    }
+
+    const disablePixelToggle = isHdMascotOn;
+    const pixelToggleTooltip = disablePixelToggle ? "请先关闭“启用二维馆藏记录员（洛琪希看板娘）”" : "";
+
+    const pixelMascotSetting = new Setting(container)
+      .setName("二维记录员使用内置轻量像素形象（无立绘包适配模式）")
+      .setDesc(
+        "开启后，二维案头编目台将使用内置于 main.js 的轻量矢量像素洛琪希（未下载高清立绘包时默认开启；与上方高清立绘看板娘互斥，两项均关闭时完全停用二维记录员）。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(isPixelModeOn);
+        toggle.setDisabled(disablePixelToggle);
+        if (toggle.toggleEl) {
+          toggle.toggleEl.classList.toggle("is-disabled", disablePixelToggle);
+          const inp = toggle.toggleEl.querySelector("input");
+          if (inp) inp.disabled = disablePixelToggle;
+          if (pixelToggleTooltip) {
+            toggle.toggleEl.title = pixelToggleTooltip;
+            toggle.toggleEl.setAttribute("aria-label", pixelToggleTooltip);
+          }
+        }
+        toggle.onChange(async (value) => {
+          if (isHdMascotOn) {
+            return;
+          }
           this.plugin.settings.roxyForceLightweight2D = value;
-          await this.plugin.saveSettings();
-          await this.plugin.refreshOpenDashboardViews();
+          if (value) {
+            this.plugin.settings.enableRoxy2DMascot = false;
+            if (this.plugin._roxyCoordinator) {
+              this.plugin._roxyCoordinator.sessionHidden2D = false;
+            }
+          }
+          await this.saveAndRefreshDashboard();
+          this.display();
+        });
+      });
+    pixelMascotSetting.setDisabled(disablePixelToggle);
+    if (pixelToggleTooltip) {
+      pixelMascotSetting.settingEl.title = pixelToggleTooltip;
+      pixelMascotSetting.settingEl.style.opacity = "0.65";
+      if (pixelMascotSetting.controlEl) pixelMascotSetting.controlEl.title = pixelToggleTooltip;
+    }
+
+    new Setting(container)
+      .setName("启用三维馆藏记录员（像素洛琪希手办框）")
+      .setDesc(
+        "在番剧档案馆「三维原画档案室」左上角边缘显示像素洛琪希桌角手办框。不遮挡 3D 封套与详情面板，仅对档案抽出、归位、笔记纸页、高分策展切换、空轨道等真实事件作出短暂反馈。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.enableRoxy3DMascot !== false
+        );
+
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableRoxy3DMascot = value;
+          if (value && this.plugin._roxyCoordinator) {
+            this.plugin._roxyCoordinator.sessionHidden3D = false;
+          }
+          await this.saveAndRefreshDashboard();
         });
       });
 
@@ -1185,54 +1381,30 @@ module.exports = function createSettingsTabClass({
       false
     ) {
       new Setting(container)
-        .setName("我的评分排名显示数量")
+        .setName("综合评分排行榜默认显示数量")
         .setDesc(
-          "番剧档案馆中“我的评分排名”默认显示的动画数量。"
+          "番剧档案馆中“综合评分排行榜”（我的评分 / 你在 BGM 上的评分 / BGM 评分）默认显示的动画数量。"
         )
         .addText((text) => {
           text.setValue(
             String(
+              this.plugin.settings.dashboardScoreRankLimit ||
               this.plugin.settings.dashboardPersonalRankLimit ||
               10
             )
           );
 
           text.onChange(async (value) => {
-            this.plugin.settings.dashboardPersonalRankLimit =
-              Math.max(
-                1,
-                Math.min(
-                  50,
-                  Number(value) || 10
-                )
-              );
-
-            await this.plugin.saveSettings();
-          });
-        });
-
-      new Setting(container)
-        .setName("BGM 用户评分排名显示数量")
-        .setDesc(
-          "番剧档案馆中“BGM 用户评分排名”默认显示的动画数量。"
-        )
-        .addText((text) => {
-          text.setValue(
-            String(
-              this.plugin.settings.dashboardBangumiRankLimit ||
-              10
-            )
-          );
-
-          text.onChange(async (value) => {
-            this.plugin.settings.dashboardBangumiRankLimit =
-              Math.max(
-                1,
-                Math.min(
-                  50,
-                  Number(value) || 10
-                )
-              );
+            const lim = Math.max(
+              1,
+              Math.min(
+                50,
+                Number(value) || 10
+              )
+            );
+            this.plugin.settings.dashboardScoreRankLimit = lim;
+            this.plugin.settings.dashboardPersonalRankLimit = lim;
+            this.plugin.settings.dashboardBangumiRankLimit = lim;
 
             await this.plugin.saveSettings();
           });
@@ -1349,54 +1521,30 @@ module.exports = function createSettingsTabClass({
 
 
     new Setting(container)
-      .setName("我的评分排名显示数量")
+      .setName("综合评分排行榜默认显示数量")
       .setDesc(
-        "番剧档案馆与 Markdown 番剧档案馆中“我的评分排名”默认显示的动画数量。"
+        "番剧档案馆与 Markdown 番剧档案馆中“综合评分排行榜”（我的评分 / 你在 BGM 上的评分 / BGM 评分）默认显示的动画数量。"
       )
       .addText((text) => {
         text.setValue(
           String(
+            this.plugin.settings.dashboardScoreRankLimit ||
             this.plugin.settings.dashboardPersonalRankLimit ||
             10
           )
         );
 
         text.onChange(async (value) => {
-          this.plugin.settings.dashboardPersonalRankLimit =
-            Math.max(
-              1,
-              Math.min(
-                50,
-                Number(value) || 10
-              )
-            );
-
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(container)
-      .setName("BGM 用户评分排名显示数量")
-      .setDesc(
-        "番剧档案馆与 Markdown 番剧档案馆中“BGM 用户评分排名”默认显示的动画数量。"
-      )
-      .addText((text) => {
-        text.setValue(
-          String(
-            this.plugin.settings.dashboardBangumiRankLimit ||
-            10
-          )
-        );
-
-        text.onChange(async (value) => {
-          this.plugin.settings.dashboardBangumiRankLimit =
-            Math.max(
-              1,
-              Math.min(
-                50,
-                Number(value) || 10
-              )
-            );
+          const lim = Math.max(
+            1,
+            Math.min(
+              50,
+              Number(value) || 10
+            )
+          );
+          this.plugin.settings.dashboardScoreRankLimit = lim;
+          this.plugin.settings.dashboardPersonalRankLimit = lim;
+          this.plugin.settings.dashboardBangumiRankLimit = lim;
 
           await this.plugin.saveSettings();
         });
@@ -1470,7 +1618,7 @@ module.exports = function createSettingsTabClass({
 
     new Setting(container)
       .setName("显示评分差异与偏好分析")
-      .setDesc("对比个人评分与 Bangumi 大众评分差异（Δ），展示个人最偏爱与最严苛作品榜单。")
+      .setDesc("对比个人评分与 Bangumi 社区评分差异（Δ），展示个人最偏爱与最严苛作品榜单。")
       .addToggle((toggle) => {
         toggle.setValue(
           this.plugin.settings.dashboardShowScoreDelta !== false
@@ -1520,7 +1668,7 @@ module.exports = function createSettingsTabClass({
         if (section.tag) descParts.push(`标签: ${section.tag}`);
         if (section.watchStatus && section.watchStatus !== "all") descParts.push(`状态: ${section.watchStatus}`);
         if (section.minMyScore) descParts.push(`个人评分≥${section.minMyScore}`);
-        if (section.minBgmScore) descParts.push(`BGM评分≥${section.minBgmScore}`);
+        if (section.minBgmScore) descParts.push(`BGM 评分≥${section.minBgmScore}`);
         if (section.year) descParts.push(`年份: ${section.year}`);
         if (section.season) descParts.push(`季度: ${section.season}`);
         descParts.push(section.displayMode === "grid" ? "海报网格" : "榜单列表");
@@ -1716,7 +1864,7 @@ module.exports = function createSettingsTabClass({
     });
 
     const intro = container.createEl("p", {
-      text: "笔记评分控制动画笔记的属性区和正文；番剧档案馆选项影响「二维案头编目台」与「三维原画档案室」；数据更新控制何时访问评分数据来源。"
+      text: "笔记评分控制动画笔记的属性区和正文；数据更新控制何时访问 Bangumi 与 Netaba 评分数据来源。"
     });
 
     intro.style.marginTop = "6px";
@@ -1731,9 +1879,9 @@ module.exports = function createSettingsTabClass({
     );
 
     new Setting(container)
-      .setName("显示 BGM 用户评分")
+      .setName("显示你在 BGM 上的评分")
       .setDesc(
-        "在动画笔记的属性区和正文中显示你的 Bangumi 评分。关闭后会从笔记隐藏该项，但不会影响 Bangumi 网站上的评分。"
+        "在动画笔记的属性区和正文中显示你在 Bangumi 网站上打出的个人评分。关闭后会从笔记隐藏该项，但不会影响 Bangumi 网站上的评分。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1771,9 +1919,9 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("使用精确 BGM评分")
+      .setName("使用精确 BGM 评分")
       .setDesc(
-        "开启后，笔记中的唯一“BGM评分”改为精确评分；关闭后恢复普通 Bangumi 页面评分。不会创建“BGM精确评分”属性。"
+        "开启后，笔记中的唯一“BGM 评分”改为精确评分；关闭后恢复普通 Bangumi 页面评分。不会创建“BGM 精确评分”属性。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1793,9 +1941,9 @@ await this.saveAndSynchronizeNoteScores();
       });
 
     new Setting(container)
-      .setName("精确 BGM评分显示小数位数")
+      .setName("精确 BGM 评分显示小数位数")
       .setDesc(
-        "仅在启用精确 BGM评分后影响笔记正文和精确评分排名的显示。原始评分不会被修改。"
+        "影响笔记正文以及番剧档案馆“综合评分排行榜”中 BGM 评分的默认小数位数显示。原始评分不会被修改。"
       )
       .addDropdown((dropdown) => {
         dropdown.addOptions({
@@ -1821,72 +1969,10 @@ await this.saveAndSynchronizeNoteScores();
         });
       });
 
-
     this.addScoreSectionTitle(
       container,
-      "番剧档案馆"
+      "评分数据同步与更新"
     );
-
-    new Setting(container)
-      .setName("启用二维馆藏记录员（洛琪希看板娘）")
-      .setDesc(
-        "在番剧档案馆「二维案头编目台」右下角显示洛琪希馆藏记录员。点击立绘可触发单次 Q 弹动画并轮播开播咨讯、评分情报、编目叮嘱等真实数据内容，也可一键还原首要事项。"
-      )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          this.plugin.settings.enableRoxy2DMascot !== false
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.enableRoxy2DMascot = value;
-          if (value && this.plugin._roxyCoordinator) {
-            this.plugin._roxyCoordinator.sessionHidden2D = false;
-          }
-          await this.saveAndRefreshDashboard();
-        });
-      });
-
-    new Setting(container)
-      .setName("启用三维馆藏记录员（像素洛琪希手办框）")
-      .setDesc(
-        "在番剧档案馆「三维原画档案室」左上角边缘显示像素洛琪希桌角手办框。不遮挡 3D 封套与详情面板，仅对档案抽出、归位、笔记纸页、高分策展切换、空轨道等真实事件作出短暂反馈，支持点击轮播咨讯与一键还原首要事项。"
-      )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          this.plugin.settings.enableRoxy3DMascot !== false
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.enableRoxy3DMascot = value;
-          if (value && this.plugin._roxyCoordinator) {
-            this.plugin._roxyCoordinator.sessionHidden3D = false;
-          }
-          await this.saveAndRefreshDashboard();
-        });
-      });
-
-    new Setting(container)
-      .setName("显示精确评分排名")
-      .setDesc(
-        "在番剧档案馆中显示按精确 BGM评分排序的排名。此项不改变笔记属性或正文。"
-      )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          this.plugin.settings.dashboardShowPreciseRank ===
-          true
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.dashboardShowPreciseRank =
-            value;
-await this.saveAndRefreshDashboard();
-
-          if (value) {
-            await this.refreshEnabledScoreDataAfterSettingChange();
-          }
-        });
-      });
-
 
     new Setting(container)
       .setName("评分设置变更后的处理方式")
@@ -1929,7 +2015,7 @@ await this.saveAndRefreshDashboard();
     new Setting(container)
       .setName("自动更新评分与排名数据")
       .setDesc(
-        "开启后，插件会按下方间隔自动更新 BGM 用户评分、普通 BGM评分，以及当前启用的精确评分和番剧档案馆排名。关闭后停止后台请求，手动更新仍可使用。"
+        "开启后，插件会按下方间隔自动更新你在 BGM 上的评分、普通 BGM 评分，以及当前启用的精确评分和番剧档案馆排名。关闭后停止后台请求，手动更新仍可使用。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1973,7 +2059,7 @@ await this.saveAndRefreshDashboard();
     new Setting(container)
       .setName("立即更新评分数据")
       .setDesc(
-        "读取普通 BGM评分、BGM 用户评分，以及当前启用的精确评分。同步过程中可以关闭窗口并让任务在后台继续。"
+        "读取普通 BGM 评分、你在 BGM 上的评分，以及当前启用的精确评分。同步过程中可以关闭窗口并让任务在后台继续。"
       )
       .addButton((button) => {
         button.setButtonText("立即更新");

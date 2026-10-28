@@ -81,6 +81,7 @@ const NetabaTrendModal = netabaTrendService.createNetabaTrendModalClass({ Modal,
 const { Dashboard3DSpace } = require("./dashboard-3d-view.js");
 const curatorDesk = require("./dashboard-2d-desk.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
+const seasonalRadarService = require("./seasonal-radar-service.js");
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -169,6 +170,9 @@ var DEFAULT_SETTINGS = {
   enableRoxy2DMascot: true,
   roxy2DMinimized: false,
   roxyForceLightweight2D: false,
+  roxyPullToTopHintDismissed: false,
+  dashboardScoreRankTab: "personal",
+  dashboardScoreRankLimit: 10,
   enableRoxy3DMascot: true,
   roxy3DMinimized: false,
   deskLayoutMode: "scroll",
@@ -182,7 +186,19 @@ var DEFAULT_SETTINGS = {
   enableQbittorrentIntegration: true,
   qbittorrentExecutablePath: "",
   qbittorrentSkipDialog: true,
-  qbittorrentAutoCreateFolder: true
+  qbittorrentAutoCreateFolder: true,
+  workspaceDefaultMode: "auto",
+  workspaceModeCustomized: false,
+  reviewImageFolder: "附件/观片手札图片",
+  reviewEnterToSubmit: true,
+  reviewCopyWithHeader: false,
+  roxyGrimoireDismissed: false,
+  seasonalTotalCountCache: {},
+  seasonalRadarCache: {},
+  characterCollection: [],
+  characterNoteFolder: "动画笔记/角色典藏",
+  localVideoPlayerMode: "auto",
+  localVideoPlayerCustomPath: ""
 };
 
 var DEFAULT_PRESET_QUERY_SECTION = {
@@ -693,6 +709,17 @@ var BangumiManagerPlugin = class extends Plugin {
 
         clearTimeout(this.dashboardAutoRefreshTimer);
         this.dashboardAutoRefreshTimer = setTimeout(async () => {
+          if (
+            this._activeReviewStudioModal &&
+            this._activeReviewStudioModal.item?.file?.path === file.path
+          ) {
+            try {
+              await this._activeReviewStudioModal.reloadReviewsFromNote();
+              this._activeReviewStudioModal.render({ focusComposerText: false });
+            } catch (err) {
+              console.warn("刷新观片手札弹窗失败:", err);
+            }
+          }
           await this.refreshOpenDashboardViews();
         }, 800);
       })
@@ -891,6 +918,9 @@ getCurrentSeasonName() {
     );
     await this.ensureVaultFolder(
       this.settings.coverFolder
+    );
+    await this.ensureVaultFolder(
+      this.settings.reviewImageFolder || "附件/观片手札图片"
     );
     if (this.settings.enableBaseFileGeneration === true) {
       await this.createBaseFileIfMissing(false);
@@ -1166,7 +1196,10 @@ views:
           );
 
         const oldBangumiScore = cleanValue(
+          parsed.fields["你在 BGM 上的评分"] ||
+          parsed.fields["你在BGM上的评分"] ||
           parsed.fields.BGM用户评分 ||
+          parsed.fields["BGM 用户评分"] ||
           parsed.fields.Bangumi用户评分
         );
 
@@ -1351,7 +1384,10 @@ views:
 
         const oldBangumiScore =
           cleanValue(
+            parsed.fields["你在 BGM 上的评分"] ||
+            parsed.fields["你在BGM上的评分"] ||
             parsed.fields.BGM用户评分 ||
+            parsed.fields["BGM 用户评分"] ||
             parsed.fields.Bangumi用户评分
           );
 
@@ -1974,8 +2010,17 @@ if (this.settings.seasonViewMode === "current") {
           parsed.fields.我的评分
         ),
         bangumiScore: this.parseDashboardScore(
+          parsed.fields["你在 BGM 上的评分"] ||
+          parsed.fields["你在BGM上的评分"] ||
           parsed.fields.BGM用户评分 ||
-          parsed.fields.Bangumi用户评分
+          parsed.fields["BGM 用户评分"] ||
+          parsed.fields.Bangumi用户评分 ||
+          (this.settings.bangumiRatingCache || {})[subjectId]
+        ),
+        publicScore: this.parseDashboardScore(
+          (this.settings.bangumiPublicRatingCache || {})[subjectId] ||
+          parsed.fields.BGM评分 ||
+          parsed.fields["BGM 评分"]
         ),
         preciseScore: this.parseDashboardScore(
           (
@@ -1983,7 +2028,11 @@ if (this.settings.seasonViewMode === "current") {
             {}
           )[
             subjectId
-          ] || parsed.fields.BGM精确评分
+          ] ||
+          parsed.fields.BGM精确评分 ||
+          (this.settings.bangumiPublicRatingCache || {})[subjectId] ||
+          parsed.fields.BGM评分 ||
+          parsed.fields["BGM 评分"]
         ),
         year: cleanValue(parsed.fields.开播年份),
         season: cleanValue(parsed.fields.开播季度),
@@ -2001,7 +2050,8 @@ if (this.settings.seasonViewMode === "current") {
         downloadSourceKeyword: cleanValue(parsed.fields.下载源关键词),
         rssUrl: cleanValue(parsed.fields.RSS订阅),
         downloadStreamId: cleanValue(parsed.fields.发布源标识),
-        netabaUrl: cleanValue(parsed.fields.Netaba链接)
+        netabaUrl: cleanValue(parsed.fields.Netaba链接),
+        reviews: noteUtils.parseNoteReviewsSection(content)
       });
     }
 
@@ -2266,12 +2316,20 @@ if (this.settings.seasonViewMode === "current") {
       (item) => item.personalScore !== null
     );
 
-    if (!scoredItems.length) {
+    if (!items.length) {
       chartContainer.createEl("p", {
         text: "填写“我的评分”后会显示评分分布。",
         cls: "bangumi-dashboard-empty"
       });
       return;
+    }
+
+    if (!scoredItems.length) {
+      chartContainer.createDiv({
+        text: `已收录 ${items.length} 部作品，暂未登记「我的评分」· 在卡片点击 ★ 打分后自动点亮区间分布`,
+        cls: "curator-almanac-submeta",
+        attr: { style: "margin-bottom:8px;" }
+      });
     }
 
     const chart = chartContainer.createDiv(
@@ -2304,7 +2362,7 @@ if (this.settings.seasonViewMode === "current") {
       );
 
       bar.style.width =
-        count / scoredItems.length * 100 + "%";
+        scoredItems.length > 0 ? count / scoredItems.length * 100 + "%" : "0%";
 
       row.createDiv({
         text: String(count),
@@ -2336,28 +2394,121 @@ if (this.settings.seasonViewMode === "current") {
       "抛弃"
     ];
 
+    const counts = {
+      "已看": 0,
+      "在看": 0,
+      "想看": 0,
+      "抛弃": 0
+    };
+
+    let watchingWatchedEp = 0;
+    let watchingTotalEp = 0;
+    let planTotalEp = 0;
+    let totalEpSum = 0;
+    let totalEpCount = 0;
+
+    items.forEach((item) => {
+      if (Object.prototype.hasOwnProperty.call(counts, item.state)) {
+        counts[item.state] += 1;
+      }
+      const w = Number(item.watchedEpisodes) || 0;
+      const t = Number(item.totalEpisodes) || 0;
+      if (t > 0) {
+        totalEpSum += t;
+        totalEpCount += 1;
+      }
+      if (item.state === "在看") {
+        watchingWatchedEp += w;
+        watchingTotalEp += t > 0 ? t : Math.max(w, 12);
+      } else if (item.state === "想看") {
+        planTotalEp += t > 0 ? t : 12;
+      }
+    });
+
+    const totalItems = Math.max(1, items.length);
+
     const grid = gridContainer.createDiv(
       "bangumi-dashboard-state-grid"
     );
 
     states.forEach((state) => {
-      const count = items.filter(
-        (item) => item.state === state
-      ).length;
+      const count = counts[state] || 0;
+      const pct = items.length > 0 ? Math.round((count / totalItems) * 100) : 0;
 
       const card = grid.createDiv(
-        "bangumi-dashboard-state-card"
+        `bangumi-dashboard-state-card is-state-${state}`
       );
 
-      card.createDiv({
+      const topRow = card.createDiv("bangumi-dashboard-state-head");
+      topRow.createSpan({
         text: state,
         cls: "bangumi-dashboard-state-label"
+      });
+      topRow.createSpan({
+        text: `${pct}%`,
+        cls: "bangumi-dashboard-state-pct curator-mono"
       });
 
       card.createDiv({
         text: String(count),
-        cls: "bangumi-dashboard-state-value"
+        cls: "bangumi-dashboard-state-value curator-mono"
       });
+    });
+
+    // 状态构成光谱条与馆藏推进遥测摘要（使「观看状态概览」信息密度与相邻的「我的评分分布」自然齐平）
+    const extraWrap = gridContainer.createDiv("curator-watchstate-extra");
+    const spectrumHead = extraWrap.createDiv("curator-watchstate-spectrum-head");
+    spectrumHead.createSpan({
+      cls: "curator-watchstate-spectrum-title",
+      text: "馆藏状态构成光谱"
+    });
+    const activeRatio = items.length > 0 ? Math.round(((counts["已看"] + counts["在看"]) / totalItems) * 100) : 0;
+    spectrumHead.createSpan({
+      cls: "curator-watchstate-spectrum-meta curator-mono",
+      text: `完结与在看占比 ${activeRatio}%`
+    });
+
+    const spectrumBar = extraWrap.createDiv("curator-watchstate-spectrum-bar");
+    const segDefs = [
+      { key: "已看", cls: "is-completed", label: "已看" },
+      { key: "在看", cls: "is-watching", label: "在看" },
+      { key: "想看", cls: "is-plan", label: "想看" },
+      { key: "抛弃", cls: "is-dropped", label: "抛弃" }
+    ];
+    segDefs.forEach((seg) => {
+      const c = counts[seg.key] || 0;
+      if (c <= 0) return;
+      const widthPct = ((c / totalItems) * 100).toFixed(2);
+      const segEl = spectrumBar.createDiv(`curator-watchstate-seg ${seg.cls}`);
+      segEl.style.width = `${widthPct}%`;
+      segEl.title = `${seg.label}：${c} 部 (${Math.round((c / totalItems) * 100)}%)`;
+    });
+
+    const telemetryGrid = extraWrap.createDiv("curator-watchstate-telemetry-grid");
+    const watchingProgressPct =
+      watchingTotalEp > 0 ? Math.min(100, Math.round((watchingWatchedEp / watchingTotalEp) * 100)) : 0;
+    const planHours = ((planTotalEp * 24) / 60).toFixed(1);
+    const avgEp = totalEpCount > 0 ? (totalEpSum / totalEpCount).toFixed(1) : "12.0";
+
+    const teleItems = [
+      {
+        label: "在看剧集推进度",
+        val: counts["在看"] > 0 ? `${watchingProgressPct}% (${watchingWatchedEp}/${watchingTotalEp}话)` : "暂无在看"
+      },
+      {
+        label: "想看储备池预估",
+        val: counts["想看"] > 0 ? `${counts["想看"]} 部 · 约 ${planHours}h` : "0 部待看"
+      },
+      {
+        label: "馆藏单部均长",
+        val: `${avgEp} 话 / 部`
+      }
+    ];
+
+    teleItems.forEach((tItem) => {
+      const cell = telemetryGrid.createDiv("curator-watchstate-telemetry-cell");
+      cell.createDiv({ cls: "curator-watchstate-tele-label", text: tItem.label });
+      cell.createDiv({ cls: "curator-watchstate-tele-val curator-mono", text: tItem.val });
     });
   }
 
@@ -2389,9 +2540,39 @@ if (this.settings.seasonViewMode === "current") {
       "抛弃": 0,
       "未设置": 0
     };
+    const stateWatchedEp = {
+      "已看": 0,
+      "在看": 0,
+      "想看": 0,
+      "抛弃": 0,
+      "未设置": 0
+    };
+    const statePlannedEp = {
+      "已看": 0,
+      "在看": 0,
+      "想看": 0,
+      "抛弃": 0,
+      "未设置": 0
+    };
+    const stateEpSum = {
+      "已看": 0,
+      "在看": 0,
+      "想看": 0,
+      "抛弃": 0,
+      "未设置": 0
+    };
+    const stateEpCount = {
+      "已看": 0,
+      "在看": 0,
+      "想看": 0,
+      "抛弃": 0,
+      "未设置": 0
+    };
 
     let totalWatchedEpisodes = 0;
     let totalPlannedEpisodes = 0;
+    let allEpSum = 0;
+    let allEpCount = 0;
 
     for (const item of items) {
       const state = item.state && stateCounts.hasOwnProperty(item.state) ? item.state : "未设置";
@@ -2400,8 +2581,17 @@ if (this.settings.seasonViewMode === "current") {
       const watched = Number(item.watchedEpisodes) || 0;
       const total = Number(item.totalEpisodes) || 0;
       totalWatchedEpisodes += watched;
+      stateWatchedEp[state] = (stateWatchedEp[state] || 0) + watched;
+
+      const effectiveTotal = total > 0 ? total : (state === "在看" ? Math.max(watched, 12) : 12);
+      statePlannedEp[state] = (statePlannedEp[state] || 0) + effectiveTotal;
+
       if (total > 0) {
         totalPlannedEpisodes += total;
+        allEpSum += total;
+        allEpCount += 1;
+        stateEpSum[state] = (stateEpSum[state] || 0) + total;
+        stateEpCount[state] = (stateEpCount[state] || 0) + 1;
       }
     }
 
@@ -2412,6 +2602,10 @@ if (this.settings.seasonViewMode === "current") {
     const completionRate = items.length > 0
       ? Math.round((stateCounts["已看"] / items.length) * 100)
       : 0;
+    const activeRatio = items.length > 0
+      ? Math.round(((stateCounts["已看"] + stateCounts["在看"]) / items.length) * 100)
+      : 0;
+    const allAvgEp = allEpCount > 0 ? (allEpSum / allEpCount).toFixed(1) : "12.0";
 
     // 1. KPI 概览卡片
     const statGrid = container.createDiv("bangumi-analytics-stat-grid");
@@ -2442,14 +2636,23 @@ if (this.settings.seasonViewMode === "current") {
     const rateCard = statGrid.createDiv("bangumi-analytics-stat-card");
     rateCard.createDiv({ cls: "bangumi-analytics-stat-label", text: "动画完结率" });
     rateCard.createDiv({ cls: "bangumi-analytics-stat-value", text: `${completionRate}%` });
-    rateCard.createDiv({ cls: "bangumi-analytics-stat-sub", text: `已看 ${stateCounts["已看"]} / 总收录 ${items.length} 部` });
+    rateCard.createDiv({ cls: "bangumi-analytics-stat-sub", text: `已看 ${stateCounts["已看"]} / 所有收藏 ${items.length} 部` });
 
-    // 2. 彩带堆叠进度条
+    // 2. 追番状态分布带（融合观看状态概览可点击色段与联动详情展板）
     const barWrap = container.createDiv("bangumi-stacked-bar-wrap");
-    barWrap.createDiv({ cls: "bangumi-stacked-bar-title", text: "追番状态分布带" });
+    const barHead = barWrap.createDiv("bangumi-stacked-bar-head");
+    barHead.createDiv({
+      cls: "bangumi-stacked-bar-title",
+      text: "追番状态分布带（点击色段或图例切换状态详情）"
+    });
+    barHead.createDiv({
+      cls: "bangumi-stacked-bar-meta curator-mono",
+      text: `完结与在看占比 ${activeRatio}% · 所有收藏单部均长 ${allAvgEp} 话/部`
+    });
 
-    const stackedBar = barWrap.createDiv("bangumi-stacked-bar");
-    const legendWrap = barWrap.createDiv("bangumi-stacked-legend");
+    const stackedBar = barWrap.createDiv("bangumi-stacked-bar is-interactive");
+    const legendWrap = barWrap.createDiv("bangumi-stacked-legend is-interactive");
+    const linkedStage = barWrap.createDiv("curator-watchstate-linked-stage");
 
     const statesConfig = [
       { key: "已看", color: "var(--color-green, #28a745)", label: "已看" },
@@ -2459,130 +2662,188 @@ if (this.settings.seasonViewMode === "current") {
       { key: "未设置", color: "var(--background-modifier-border, #888888)", label: "未设置" }
     ];
 
+    // 默认选中「已看」，若「已看」为0则选当前占比最高的状态
+    if (!this._selectedWatchState || !stateCounts.hasOwnProperty(this._selectedWatchState)) {
+      if (stateCounts["已看"] > 0) {
+        this._selectedWatchState = "已看";
+      } else {
+        const sortedStates = Object.keys(stateCounts).sort((a, b) => (stateCounts[b] || 0) - (stateCounts[a] || 0));
+        this._selectedWatchState = sortedStates[0] || "已看";
+      }
+    }
+
+    const segmentEls = new Map();
+    const legendEls = new Map();
+
+    const getAvgEpForState = (st) => {
+      if ((stateEpCount[st] || 0) > 0) {
+        return (stateEpSum[st] / stateEpCount[st]).toFixed(1);
+      }
+      return (stateCounts[st] || 0) > 0 ? allAvgEp : "0.0";
+    };
+
+    const renderLinkedDetail = (stKey, animate = false) => {
+      const prevRect = animate ? linkedStage.getBoundingClientRect() : null;
+      linkedStage.empty();
+
+      const count = stateCounts[stKey] || 0;
+      const pct = items.length > 0 ? ((count / items.length) * 100).toFixed(1) : "0.0";
+
+      const board = linkedStage.createDiv(
+        `curator-watchstate-linked-board ${animate ? "is-animating-in" : ""}`
+      );
+
+      // 左侧大字状态卡（原「观看状态概览」视觉风格）
+      const leftCard = board.createDiv(`bangumi-dashboard-state-card is-state-${stKey} is-linked-hero`);
+      const topRow = leftCard.createDiv("bangumi-dashboard-state-head");
+      topRow.createSpan({
+        text: stKey,
+        cls: "bangumi-dashboard-state-label"
+      });
+      topRow.createSpan({
+        text: `占比 ${pct}% · ${count} 部`,
+        cls: "bangumi-dashboard-state-pct curator-mono"
+      });
+      leftCard.createDiv({
+        text: `${count} 部`,
+        cls: "bangumi-dashboard-state-value curator-mono"
+      });
+
+      // 右侧联动双指标展板
+      const teleGrid = board.createDiv("curator-watchstate-telemetry-grid is-linked-detail");
+      let metrics = [];
+
+      if (stKey === "已看") {
+        const wEp = stateWatchedEp["已看"] || 0;
+        const wHours = ((wEp * 24) / 60).toFixed(1);
+        const avgEp = getAvgEpForState("已看");
+        metrics = [
+          {
+            label: "已看累计总话数",
+            val: `${wEp} 话 · 约 ${wHours} 小时`
+          },
+          {
+            label: "已看作品单部均长",
+            val: `${avgEp} 话/部`
+          }
+        ];
+      } else if (stKey === "在看") {
+        const wEp = stateWatchedEp["在看"] || 0;
+        const tEp = statePlannedEp["在看"] || 0;
+        const pPct = tEp > 0 ? Math.min(100, Math.round((wEp / tEp) * 100)) : 0;
+        const remEp = Math.max(0, tEp - wEp);
+        const remHours = ((remEp * 24) / 60).toFixed(1);
+        metrics = [
+          {
+            label: "在看剧集推进度",
+            val: `${pPct}% · ${wEp}/${tEp} 话`
+          },
+          {
+            label: "待追完剩余话数",
+            val: `${remEp} 话 · 约 ${remHours} 小时`
+          }
+        ];
+      } else if (stKey === "想看") {
+        const pEp = statePlannedEp["想看"] || 0;
+        const pHours = ((pEp * 24) / 60).toFixed(1);
+        const avgEp = getAvgEpForState("想看");
+        metrics = [
+          {
+            label: "想看储备池预估",
+            val: `${count} 部 · 约 ${pHours} 小时`
+          },
+          {
+            label: "想看作品单部均长",
+            val: `${avgEp} 话/部`
+          }
+        ];
+      } else {
+        const wEp = stateWatchedEp[stKey] || 0;
+        const wHours = ((wEp * 24) / 60).toFixed(1);
+        metrics = [
+          {
+            label: `${stKey}已记录观看总话数`,
+            val: `${wEp} 话 · 约 ${wHours} 小时`
+          },
+          {
+            label: "占所有收藏比例",
+            val: `${pct}%（${count} / ${items.length} 部）`
+          }
+        ];
+      }
+
+      metrics.forEach((m) => {
+        const cell = teleGrid.createDiv("curator-watchstate-telemetry-cell");
+        cell.createDiv({ cls: "curator-watchstate-tele-label", text: m.label });
+        cell.createDiv({ cls: "curator-watchstate-tele-val curator-mono", text: m.val });
+      });
+
+      if (animate && prevRect && prevRect.height > 0) {
+        const nextRect = linkedStage.getBoundingClientRect();
+        const dy = prevRect.top - nextRect.top;
+        if (Math.abs(dy) > 1 && typeof board.animate === "function") {
+          board.animate(
+            [
+              { transform: `translateY(${dy}px) scale(0.985)`, opacity: 0.35 },
+              { transform: "translateY(0) scale(1)", opacity: 1 }
+            ],
+            { duration: 280, easing: "cubic-bezier(0.22, 1, 0.36, 1)" }
+          );
+        }
+      }
+    };
+
+    const selectWatchState = (stKey, animate = true) => {
+      this._selectedWatchState = stKey;
+      segmentEls.forEach((el, k) => {
+        el.toggleClass("is-selected", k === stKey);
+      });
+      legendEls.forEach((el, k) => {
+        el.toggleClass("is-selected", k === stKey);
+      });
+      renderLinkedDetail(stKey, animate);
+    };
+
     statesConfig.forEach((cfg) => {
       const count = stateCounts[cfg.key] || 0;
+      const pct = ((count / items.length) * 100).toFixed(1);
+
       if (count > 0) {
-        const pct = ((count / items.length) * 100).toFixed(1);
-        const seg = stackedBar.createDiv("bangumi-stacked-segment");
+        const seg = stackedBar.createDiv("bangumi-stacked-segment is-interactive");
+        seg.dataset.stateKey = cfg.key;
         seg.style.width = `${pct}%`;
         seg.style.backgroundColor = cfg.color;
-        seg.title = `${cfg.label}: ${count} 部 (${pct}%)`;
+        seg.title = `点击查看「${cfg.label}」状态详情：${count} 部 (${pct}%)`;
+        seg.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          selectWatchState(cfg.key, true);
+        };
+        segmentEls.set(cfg.key, seg);
+      }
 
-        const itemEl = legendWrap.createDiv("bangumi-stacked-legend-item");
+      // 4个核心状态常驻图例，未设置仅在有数据时显示
+      if (count > 0 || cfg.key !== "未设置") {
+        const itemEl = legendWrap.createDiv("bangumi-stacked-legend-item is-interactive");
+        itemEl.dataset.stateKey = cfg.key;
         const dot = itemEl.createSpan("bangumi-legend-dot");
         dot.style.backgroundColor = cfg.color;
         itemEl.createSpan({ text: `${cfg.label} ${count} 部 (${pct}%)` });
+        itemEl.title = `点击查看「${cfg.label}」联动详情`;
+        itemEl.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          selectWatchState(cfg.key, true);
+        };
+        legendEls.set(cfg.key, itemEl);
       }
     });
+
+    selectWatchState(this._selectedWatchState, false);
   }
 
   renderYearStats(container, items) {
-    if (!items || items.length === 0) {
-      container.createDiv({
-        cls: "bangumi-dashboard-empty",
-        text: "暂无动画记录。"
-      });
-      return;
-    }
-
-    const yearCounts = {};
-    const seasonCounts = {
-      "冬季番 (1月)": 0,
-      "春季番 (4月)": 0,
-      "夏季番 (7月)": 0,
-      "秋季番 (10月)": 0,
-      "其他/未知": 0
-    };
-
-    for (const item of items) {
-      const yearStr = String(item.year || "");
-      const match = yearStr.match(/\b(19\d\d|20\d\d)\b/);
-      if (match) {
-        const y = match[1];
-        yearCounts[y] = (yearCounts[y] || 0) + 1;
-      }
-
-      const seasonStr = String(item.season || "");
-      if (/1月|冬季|冬/i.test(seasonStr)) {
-        seasonCounts["冬季番 (1月)"]++;
-      } else if (/4月|春季|春/i.test(seasonStr)) {
-        seasonCounts["春季番 (4月)"]++;
-      } else if (/7月|夏季|夏/i.test(seasonStr)) {
-        seasonCounts["夏季番 (7月)"]++;
-      } else if (/10月|秋季|秋/i.test(seasonStr)) {
-        seasonCounts["秋季番 (10月)"]++;
-      } else {
-        seasonCounts["其他/未知"]++;
-      }
-    }
-
-    const sortedYears = Object.keys(yearCounts).sort((a, b) => Number(a) - Number(b));
-
-    // 1. 年代分布直方柱状图
-    const chartWrap = container.createDiv("bangumi-year-chart-wrap");
-    chartWrap.createDiv({ cls: "bangumi-year-chart-title", text: "开播年份收录分布" });
-
-    if (sortedYears.length > 0) {
-      let maxCount = 1;
-      for (const y of sortedYears) {
-        if (yearCounts[y] > maxCount) maxCount = yearCounts[y];
-      }
-
-      const chart = chartWrap.createDiv("bangumi-year-chart");
-      const displayYears = sortedYears.length > 14 ? sortedYears.slice(-14) : sortedYears;
-
-      displayYears.forEach((year) => {
-        const count = yearCounts[year];
-        const heightPct = Math.max(12, Math.round((count / maxCount) * 85));
-
-        const col = chart.createDiv("bangumi-year-col");
-        col.title = `${year}年：收录 ${count} 部`;
-
-        col.createDiv({
-          cls: "bangumi-year-count",
-          text: String(count)
-        });
-
-        const barTrack = col.createDiv("bangumi-year-bar-track");
-        const bar = barTrack.createDiv("bangumi-year-bar");
-        bar.style.height = `${heightPct}%`;
-
-        col.createDiv({
-          cls: "bangumi-year-label",
-          text: year.length === 4 ? `'${year.slice(2)}` : year
-        });
-      });
-    } else {
-      chartWrap.createDiv({
-        cls: "bangumi-dashboard-empty",
-        text: "暂无年份信息（笔记中未填写“开播年份”）。"
-      });
-    }
-
-    // 2. 四季番分布卡片
-    const seasonWrap = container.createDiv("bangumi-season-wrap");
-    seasonWrap.createDiv({ cls: "bangumi-season-title", text: "番季分布" });
-
-    const seasonGrid = seasonWrap.createDiv("bangumi-season-grid");
-    const seasonIcons = {
-      "冬季番 (1月)": "❄️",
-      "春季番 (4月)": "🌸",
-      "夏季番 (7月)": "☀️",
-      "秋季番 (10月)": "🍁"
-    };
-
-    ["冬季番 (1月)", "春季番 (4月)", "夏季番 (7月)", "秋季番 (10月)"].forEach((seasonName) => {
-      const c = seasonCounts[seasonName] || 0;
-      const card = seasonGrid.createDiv("bangumi-season-card");
-      card.createDiv({
-        cls: "bangumi-season-label",
-        text: `${seasonIcons[seasonName]} ${seasonName}`
-      });
-      card.createDiv({
-        cls: "bangumi-season-value",
-        text: `${c} 部`
-      });
-    });
+    return seasonalRadarService.renderYearSeasonAlmanacModule(this, container, items);
   }
 
   renderScoreDelta(container, items) {
@@ -2597,9 +2858,9 @@ if (this.settings.seasonViewMode === "current") {
     const compared = [];
     for (const item of items) {
       if (item.personalScore !== null) {
-        const bgm = item.bangumiScore !== null
-          ? item.bangumiScore
-          : (item.preciseScore !== null ? item.preciseScore : null);
+        const bgm = item.preciseScore !== null
+          ? item.preciseScore
+          : (item.publicScore !== null && item.publicScore !== undefined ? item.publicScore : item.bangumiScore);
         if (bgm !== null) {
           const delta = Number((item.personalScore - bgm).toFixed(2));
           compared.push({
@@ -2615,7 +2876,7 @@ if (this.settings.seasonViewMode === "current") {
     if (compared.length === 0) {
       container.createDiv({
         cls: "bangumi-dashboard-empty",
-        text: "暂无可对比的动画记录（需同时填写“我的评分”并同步“BGM评分”）。"
+        text: "暂无可对比的动画记录（需同时填写“我的评分”并同步“BGM 评分”）。"
       });
       return;
     }
@@ -2658,7 +2919,7 @@ if (this.settings.seasonViewMode === "current") {
     statBox2.createDiv({ cls: "bangumi-delta-stat-val", text: avgPersonal.toFixed(1) });
 
     const statBox3 = summaryTop.createDiv("bangumi-delta-stat-box");
-    statBox3.createDiv({ cls: "bangumi-delta-stat-label", text: "BGM对比均分" });
+    statBox3.createDiv({ cls: "bangumi-delta-stat-label", text: "BGM 对比均分" });
     statBox3.createDiv({ cls: "bangumi-delta-stat-val", text: avgBgm.toFixed(1) });
 
     const statBox4 = summaryTop.createDiv("bangumi-delta-stat-box");
@@ -2748,6 +3009,7 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   renderStudioStats(container, items) {
+    container.empty();
     if (!items || items.length === 0) {
       container.createDiv({
         cls: "bangumi-dashboard-empty",
@@ -2756,13 +3018,21 @@ if (this.settings.seasonViewMode === "current") {
       return;
     }
 
+    if (!this.__studioTypeExpandState) {
+      this.__studioTypeExpandState = {
+        expandedStudios: new Set(),
+        expandedTypes: new Set()
+      };
+    }
+    const expandState = this.__studioTypeExpandState;
+
     const studioMap = new Map();
-    const typeCounts = {
-      "原创": 0,
-      "漫画改": 0,
-      "轻小说改": 0,
-      "游戏改": 0,
-      "其他": 0
+    const typeItemsMap = {
+      "原创": [],
+      "漫画改": [],
+      "轻小说改": [],
+      "游戏改": [],
+      "其他": []
     };
 
     for (const item of items) {
@@ -2775,10 +3045,11 @@ if (this.settings.seasonViewMode === "current") {
 
         for (const st of rawStudios) {
           if (!studioMap.has(st)) {
-            studioMap.set(st, { count: 0, personalScores: [], bgmScores: [] });
+            studioMap.set(st, { count: 0, personalScores: [], bgmScores: [], items: [] });
           }
           const data = studioMap.get(st);
           data.count++;
+          data.items.push(item);
           if (item.personalScore !== null) {
             data.personalScores.push(item.personalScore);
           }
@@ -2793,17 +3064,92 @@ if (this.settings.seasonViewMode === "current") {
       // 改编类型
       const t = String(item.animeType || "").trim();
       if (/原创/i.test(t)) {
-        typeCounts["原创"]++;
+        typeItemsMap["原创"].push(item);
       } else if (/漫/i.test(t)) {
-        typeCounts["漫画改"]++;
+        typeItemsMap["漫画改"].push(item);
       } else if (/小|轻/i.test(t)) {
-        typeCounts["轻小说改"]++;
+        typeItemsMap["轻小说改"].push(item);
       } else if (/游/i.test(t)) {
-        typeCounts["游戏改"]++;
+        typeItemsMap["游戏改"].push(item);
       } else if (t) {
-        typeCounts["其他"]++;
+        typeItemsMap["其他"].push(item);
       }
     }
+
+    // 渲染按年份从早到晚（较前年份 -> 较后年份）排列的作品时间树抽屉
+    const renderChronologyTreeDrawer = (hostEl, labelTitle, groupItems) => {
+      const drawer = hostEl.createDiv("curator-chronology-tree-drawer");
+      const yearBuckets = new Map();
+
+      groupItems.forEach((it) => {
+        const ym = String(it.year || "").match(/\b(19\d\d|20\d\d)\b/);
+        const yKey = ym ? ym[1] : "未知年份";
+        if (!yearBuckets.has(yKey)) {
+          yearBuckets.set(yKey, []);
+        }
+        yearBuckets.get(yKey).push(it);
+      });
+
+      const sortedYearKeys = Array.from(yearBuckets.keys()).sort((a, b) => {
+        const na = /^\d{4}$/.test(a) ? Number(a) : 9999;
+        const nb = /^\d{4}$/.test(b) ? Number(b) : 9999;
+        return na - nb; // 较前年份 -> 较后年份
+      });
+
+      const head = drawer.createDiv("curator-chrono-header");
+      head.createSpan({
+        text: `🌿 「${labelTitle}」收录作品时间树（共 ${groupItems.length} 部 · 按较前年份 → 较后年份排列）`
+      });
+      head.createSpan({
+        cls: "curator-mono",
+        text: "点击作品直达笔记"
+      });
+
+      const timeline = drawer.createDiv("curator-chrono-timeline");
+      sortedYearKeys.forEach((yKey) => {
+        const works = yearBuckets.get(yKey) || [];
+        works.sort((a, b) => {
+          const sa = String(a.season || "");
+          const sb = String(b.season || "");
+          if (sa !== sb) return sa.localeCompare(sb, "zh-CN");
+          return String(a.name || "").localeCompare(String(b.name || ""), "zh-CN");
+        });
+
+        const yRow = timeline.createDiv("curator-chrono-year-group");
+        yRow.createDiv({
+          cls: "curator-chrono-year-node curator-mono",
+          text: /^\d{4}$/.test(yKey) ? `${yKey}年` : yKey
+        });
+
+        const worksWrap = yRow.createDiv("curator-chrono-works-list");
+        works.forEach((w) => {
+          const chip = worksWrap.createEl("a", {
+            cls: "curator-chrono-work-chip",
+            href: "#"
+          });
+          chip.createSpan({
+            cls: "curator-chrono-work-title",
+            text: `《${w.name || "未命名"}》`
+          });
+          const sc = w.personalScore ?? w.preciseScore ?? w.publicScore ?? w.bangumiScore;
+          if (sc !== null && sc !== undefined && Number.isFinite(Number(sc))) {
+            chip.createSpan({
+              cls: "curator-chrono-work-score curator-mono",
+              text: w.personalScore !== null ? `★${Number(w.personalScore).toFixed(1)}` : `BGM ${Number(sc).toFixed(1)}`
+            });
+          }
+          chip.title = `${w.name}\n年份季度：${w.year || "未知"} ${w.season || ""}\n状态：${w.state || "未设置"}\n点击打开本地动画笔记`;
+          chip.onclick = async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (w.file) {
+              const leaf = this.app.workspace.getLeaf(true);
+              await leaf.openFile(w.file);
+            }
+          };
+        });
+      });
+    };
 
     const wrap = container.createDiv("bangumi-studio-type-wrap");
 
@@ -2811,7 +3157,7 @@ if (this.settings.seasonViewMode === "current") {
     const studioSection = wrap.createDiv("bangumi-studio-section");
     studioSection.createDiv({
       cls: "bangumi-analytics-sub-title",
-      text: "动画制作公司收录排行 (TOP 8)"
+      text: "动画制作公司收录排行 (TOP 8 · 点击部数展开时间树)"
     });
 
     const sortedStudios = Array.from(studioMap.entries())
@@ -2821,7 +3167,9 @@ if (this.settings.seasonViewMode === "current") {
     if (sortedStudios.length > 0) {
       const studioList = studioSection.createDiv("bangumi-studio-list");
       sortedStudios.forEach(([studioName, data], idx) => {
-        const row = studioList.createDiv("bangumi-studio-row");
+        const isExpanded = expandState.expandedStudios.has(studioName);
+        const itemWrap = studioList.createDiv("curator-studio-item-wrap");
+        const row = itemWrap.createDiv("bangumi-studio-row");
 
         row.createDiv({
           cls: "bangumi-studio-rank",
@@ -2834,10 +3182,21 @@ if (this.settings.seasonViewMode === "current") {
         });
         nameSpan.title = studioName;
 
-        row.createDiv({
-          cls: "bangumi-studio-count-badge",
-          text: `${data.count} 部`
+        const countBtn = row.createEl("button", {
+          cls: `curator-studio-count-btn curator-mono ${isExpanded ? "is-expanded" : ""}`,
+          text: `${data.count} 部 ${isExpanded ? "▴" : "▾"}`
         });
+        countBtn.title = `点击${isExpanded ? "收起" : "展开"}「${studioName}」收录的 ${data.count} 部作品年份时间树`;
+        countBtn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (expandState.expandedStudios.has(studioName)) {
+            expandState.expandedStudios.delete(studioName);
+          } else {
+            expandState.expandedStudios.add(studioName);
+          }
+          this.renderStudioStats(container, items);
+        };
 
         if (data.personalScores.length > 0) {
           const avg = (data.personalScores.reduce((a, b) => a + b, 0) / data.personalScores.length).toFixed(1);
@@ -2845,6 +3204,10 @@ if (this.settings.seasonViewMode === "current") {
             cls: "bangumi-studio-score-badge",
             text: `均分 ${avg}`
           });
+        }
+
+        if (isExpanded && data.items.length > 0) {
+          renderChronologyTreeDrawer(itemWrap, studioName, data.items);
         }
       });
     } else {
@@ -2858,20 +3221,23 @@ if (this.settings.seasonViewMode === "current") {
     const typeSection = wrap.createDiv("bangumi-type-section");
     typeSection.createDiv({
       cls: "bangumi-analytics-sub-title",
-      text: "原作改编类型分布"
+      text: "原作改编类型分布 (点击部数展开时间树)"
     });
 
-    const totalTyped = Object.values(typeCounts).reduce((a, b) => a + b, 0);
+    const totalTyped = Object.values(typeItemsMap).reduce((acc, arr) => acc + arr.length, 0);
 
     if (totalTyped > 0) {
       const typeList = typeSection.createDiv("bangumi-type-list");
       const typeKeys = ["原创", "漫画改", "轻小说改", "游戏改", "其他"];
 
       typeKeys.forEach((key) => {
-        const count = typeCounts[key] || 0;
+        const groupItems = typeItemsMap[key] || [];
+        const count = groupItems.length;
         const pct = Math.round((count / totalTyped) * 100);
+        const isExpanded = expandState.expandedTypes.has(key);
 
-        const row = typeList.createDiv("bangumi-type-row");
+        const itemWrap = typeList.createDiv("curator-type-item-wrap");
+        const row = itemWrap.createDiv("bangumi-type-row");
         row.createDiv({
           cls: "bangumi-type-label",
           text: key
@@ -2881,10 +3247,28 @@ if (this.settings.seasonViewMode === "current") {
         const bar = track.createDiv("bangumi-type-bar");
         bar.style.width = `${pct}%`;
 
-        row.createDiv({
-          cls: "bangumi-type-count",
-          text: `${count} 部 (${pct}%)`
+        const countBtn = row.createEl("button", {
+          cls: `curator-studio-count-btn curator-mono ${isExpanded ? "is-expanded" : ""}`,
+          text: `${count} 部 (${pct}%) ${count > 0 ? (isExpanded ? "▴" : "▾") : ""}`
         });
+        countBtn.disabled = count === 0;
+        if (count > 0) {
+          countBtn.title = `点击${isExpanded ? "收起" : "展开"}「${key}」收录的 ${count} 部作品年份时间树`;
+          countBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (expandState.expandedTypes.has(key)) {
+              expandState.expandedTypes.delete(key);
+            } else {
+              expandState.expandedTypes.add(key);
+            }
+            this.renderStudioStats(container, items);
+          };
+        }
+
+        if (isExpanded && count > 0) {
+          renderChronologyTreeDrawer(itemWrap, key, groupItems);
+        }
       });
     } else {
       typeSection.createDiv({
@@ -2976,9 +3360,9 @@ if (this.settings.seasonViewMode === "current") {
       }
 
       if (minBgmScore > 0) {
-        const score = item.bangumiScore !== null
-          ? item.bangumiScore
-          : (item.preciseScore !== null ? item.preciseScore : null);
+        const score = item.preciseScore !== null
+          ? item.preciseScore
+          : (item.publicScore !== null && item.publicScore !== undefined ? item.publicScore : item.bangumiScore);
         if (score === null || score < minBgmScore) {
           return false;
         }
@@ -3006,8 +3390,8 @@ if (this.settings.seasonViewMode === "current") {
     switch (sortBy) {
       case "bgmScore_desc":
         list.sort((a, b) => {
-          const scoreA = a.bangumiScore !== null ? a.bangumiScore : (a.preciseScore !== null ? a.preciseScore : -1);
-          const scoreB = b.bangumiScore !== null ? b.bangumiScore : (b.preciseScore !== null ? b.preciseScore : -1);
+          const scoreA = a.preciseScore !== null ? a.preciseScore : (a.bangumiScore !== null ? a.bangumiScore : -1);
+          const scoreB = b.preciseScore !== null ? b.preciseScore : (b.bangumiScore !== null ? b.bangumiScore : -1);
           if (scoreB !== scoreA) {
             return scoreB - scoreA;
           }
@@ -3448,9 +3832,9 @@ if (this.settings.seasonViewMode === "current") {
 
       const metaParts = [];
       if (secondaryScore !== null) {
-        metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + secondaryScore.toFixed(1));
+        metaParts.push((isBgmSort ? "我的评分：" : "BGM 评分：") + secondaryScore.toFixed(1));
       } else {
-        metaParts.push((isBgmSort ? "我的评分：" : "BGM评分：") + "未评分");
+        metaParts.push((isBgmSort ? "我的评分：" : "BGM 评分：") + "未评分");
       }
       if (item.year || item.season) {
         metaParts.push([item.year, item.season].filter(Boolean).join(" "));
@@ -4452,8 +4836,10 @@ if (this.settings.seasonViewMode === "current") {
     sectionEl.setAttribute("draggable", "true");
 
     sectionEl.ondragstart = (e) => {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", def.id);
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", def.id);
+      }
       sectionEl.addClass("is-dragging");
     };
 
@@ -4466,7 +4852,9 @@ if (this.settings.seasonViewMode === "current") {
 
     sectionEl.ondragover = (e) => {
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "move";
+      }
       sectionEl.addClass("drag-over-indicator");
     };
 
@@ -4477,8 +4865,8 @@ if (this.settings.seasonViewMode === "current") {
     sectionEl.ondrop = async (e) => {
       e.preventDefault();
       sectionEl.removeClass("drag-over-indicator");
-      const sourceId = e.dataTransfer.getData("text/plain");
-      if (sourceId && sourceId !== def.id) {
+      const sourceId = e.dataTransfer ? e.dataTransfer.getData("text/plain") : "";
+      if (sourceId && sourceId !== def.id && typeof onReorder === "function") {
         await onReorder(sourceId, def.id);
       }
     };
@@ -4490,7 +4878,102 @@ if (this.settings.seasonViewMode === "current") {
       cls: "bangumi-dashboard-drag-handle",
       text: "⋮⋮"
     });
-    dragHandle.title = "拖拽调整分区顺序";
+    dragHandle.title = "按住拖拽可与其他模块交换/调整位置";
+
+    let suppressHeaderClick = false;
+    headerEl.addEventListener("pointerdown", (e) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      if (e.target.closest("button") || e.target.closest(".bangumi-dashboard-collapse-btn")) {
+        return;
+      }
+      // 在拖拽手柄或标题栏按下均可发起平滑指针拖拽重排
+      if (e.target === dragHandle || e.target.closest(".bangumi-dashboard-drag-handle")) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+
+      let isDragging = false;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let currentTargetEl = null;
+
+      const clearIndicators = () => {
+        parentContainer.querySelectorAll(".bangumi-dashboard-section").forEach((el) => {
+          el.classList.remove("drag-over-indicator");
+        });
+      };
+
+      const onPointerMove = (moveEvt) => {
+        const dx = moveEvt.clientX - startX;
+        const dy = moveEvt.clientY - startY;
+        if (!isDragging && Math.hypot(dx, dy) > 5) {
+          isDragging = true;
+          suppressHeaderClick = true;
+          sectionEl.classList.add("is-dragging");
+        }
+        if (!isDragging) return;
+
+        clearIndicators();
+        let cand = null;
+        const hitEl = document.elementFromPoint(moveEvt.clientX, moveEvt.clientY);
+        if (hitEl) {
+          const closestSec = hitEl.closest(".bangumi-dashboard-section");
+          if (
+            closestSec &&
+            closestSec !== sectionEl &&
+            closestSec.parentElement === parentContainer &&
+            closestSec.dataset.sectionId
+          ) {
+            cand = closestSec;
+          }
+        }
+        if (!cand) {
+          const siblings = parentContainer.querySelectorAll(".bangumi-dashboard-section[data-section-id]");
+          for (const sib of siblings) {
+            if (sib === sectionEl || sib.parentElement !== parentContainer) continue;
+            const r = sib.getBoundingClientRect();
+            if (
+              moveEvt.clientX >= r.left &&
+              moveEvt.clientX <= r.right &&
+              moveEvt.clientY >= r.top &&
+              moveEvt.clientY <= r.bottom
+            ) {
+              cand = sib;
+              break;
+            }
+          }
+        }
+        if (cand) {
+          currentTargetEl = cand;
+          cand.classList.add("drag-over-indicator");
+        } else {
+          currentTargetEl = null;
+        }
+      };
+
+      const onPointerUp = async () => {
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+        sectionEl.classList.remove("is-dragging");
+        clearIndicators();
+
+        if (
+          isDragging &&
+          currentTargetEl &&
+          currentTargetEl.dataset.sectionId &&
+          currentTargetEl.dataset.sectionId !== def.id
+        ) {
+          if (typeof onReorder === "function") {
+            await onReorder(def.id, currentTargetEl.dataset.sectionId);
+          }
+        }
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerUp);
+    });
 
     if (hasData) {
       const collapseBtn = leftEl.createSpan({
@@ -4597,6 +5080,10 @@ if (this.settings.seasonViewMode === "current") {
     };
 
     headerEl.onclick = (e) => {
+      if (suppressHeaderClick) {
+        suppressHeaderClick = false;
+        return;
+      }
       if (e.target.closest("button") || e.target === dragHandle) {
         return;
       }
@@ -4609,6 +5096,8 @@ if (this.settings.seasonViewMode === "current") {
       const bodyEl = sectionEl.createDiv("bangumi-dashboard-section-body");
       def.renderBody(bodyEl);
     }
+
+    return sectionEl;
   }
 
   async resetScoreDashboardLayout(container, options = {}) {

@@ -1,6 +1,7 @@
 const THREE = require("three");
 const netabaTrendService = require("./netaba-trend-service.js");
-const { inspectLocalFolder, openLocalPathSafely, parseFrontmatter } = require("./note-utils.js");
+const { inspectLocalFolder, openLocalPathSafely, parseFrontmatter, parseNoteReviewsSection } = require("./note-utils.js");
+const reviewStudioService = require("./review-studio-service.js");
 const {
   cloneDefaultLaneConfigs,
   normalizeLaneConfigs,
@@ -1874,12 +1875,18 @@ class Dashboard3DSpace {
       }
     }
 
-    // 提取 # 个人总结 或非模板正文段落
-    const summaryIdx = body.search(/^#\s*个人总结/m);
+    // 提取 # 观片手记与评价 或 # 个人总结 段落，以及结构化观片手札列表
+    const summaryIdx = body.search(/^#\s*(?:观片手记与评价|个人总结)/m);
     let userNotesRaw = "";
     if (summaryIdx >= 0) {
-      userNotesRaw = body.slice(summaryIdx).replace(/^#\s*个人总结\s*/m, "");
+      userNotesRaw = body.slice(summaryIdx).replace(/^#\s*(?:观片手记与评价|个人总结)\s*/m, "");
     }
+
+    const structuredReviews = rawMarkdown
+      ? parseNoteReviewsSection(rawMarkdown)
+      : Array.isArray(item?.reviews)
+      ? item.reviews
+      : [];
 
     const cleanedParagraphs = userNotesRaw
       .replace(/<!--[\s\S]*?-->/g, "")
@@ -1892,7 +1899,8 @@ class Dashboard3DSpace {
     return {
       fields: parsedFm?.fields || {},
       tablePairs,
-      userParagraphs: cleanedParagraphs
+      userParagraphs: cleanedParagraphs,
+      reviews: structuredReviews
     };
   }
 
@@ -1917,6 +1925,19 @@ class Dashboard3DSpace {
     this.el(headerLeft, "div", "atelier-meta", item.japaneseName || `${item.year || ""} ${item.season || ""}`);
 
     const headerRight = this.el(header, "div", "atelier-row");
+    this.action(
+      headerRight,
+      "open-review-studio-sheet",
+      "💬 观片手札工作台",
+      () => {
+        reviewStudioService.openAnimeReviewStudioModal(this.plugin, item, {
+          onUpdated: () => {
+            this.renderNoteSheet(item);
+          }
+        });
+      },
+      "atelier-text-action"
+    );
     this.action(
       headerRight,
       "open-obsidian-note",
@@ -1948,14 +1969,17 @@ class Dashboard3DSpace {
       this.el(sec1, "h3", "", "01 · 档案编目与观看记录 / CATALOGUE RECORD");
       const kvGrid = this.el(sec1, "div", "atelier-note-kv-grid");
 
-      const rawBgm = Number(item.bangumiScore ?? item.preciseScore);
+      const rawBgm = Number(item.preciseScore ?? item.publicScore ?? item.bangumiScore);
       const bgmStr = Number.isFinite(rawBgm) && rawBgm > 0 ? rawBgm.toFixed(1) : "未记录";
+      const rawUserBgm = Number(item.bangumiScore);
+      const userBgmStr = Number.isFinite(rawUserBgm) && rawUserBgm > 0 ? rawUserBgm.toFixed(1) : "未评分";
       const personalStr = item.personalScore == null ? "未评分" : Number(item.personalScore).toFixed(1);
 
       const basePairs = [
         ["观看状态", item.state || "未设置"],
         ["观看进度", `${Number(item.watchedEpisodes) || 0} / ${item.totalEpisodes || "?"} 话`],
         ["个人评分", personalStr],
+        ["你在 BGM 上的评分", userBgmStr],
         ["BGM 评分", bgmStr],
         ["改编类型", item.animeType || parsed.fields["改编类型"] || "未记载"],
         ["开播档期", `${item.year || parsed.fields["开播年份"] || "未知"} ${item.season || parsed.fields["开播季度"] || ""}`.trim()],
@@ -1971,10 +1995,56 @@ class Dashboard3DSpace {
         this.el(row, "span", "", v);
       });
 
-      // 02 个人总结与随附札记
+      // 02 观片手记与评价（支持结构化手札气泡、时间戳播放器空降与一键复制）
       const sec2 = this.el(body, "section", "atelier-note-section");
-      this.el(sec2, "h3", "", "02 · 个人总结与观片手记 / PERSONAL MANUSCRIPT");
-      if (parsed.userParagraphs.length > 0) {
+      this.el(sec2, "h3", "", "02 · 观片手记与评价 / PERSONAL MANUSCRIPT");
+      if (Array.isArray(parsed.reviews) && parsed.reviews.length > 0) {
+        parsed.reviews.forEach((rv) => {
+          const bubble = this.el(sec2, "div", "atelier-note-paragraph");
+          bubble.style.padding = "8px 10px";
+          bubble.style.marginBottom = "8px";
+          bubble.style.borderRadius = "7px";
+          bubble.style.borderLeft = rv.isPlaceholder ? "3px solid #c67420" : "3px solid #8f683d";
+          bubble.style.background = "rgba(143, 104, 61, 0.08)";
+
+          const metaRow = this.el(bubble, "div", "atelier-row");
+          metaRow.style.justifyContent = "space-between";
+          metaRow.style.marginBottom = "4px";
+          const headText = `【${rv.scope || "全剧"}${rv.timestamp ? " · " + rv.timestamp : ""} · ${
+            rv.isPlaceholder ? "待补完锚点" : rv.typeLabel || rv.type || "吐槽"
+          }】`;
+          const badgeBtn = this.el(metaRow, "button", "atelier-text-action", rv.timestamp || rv.episode ? `▶ ${headText}` : headText);
+          badgeBtn.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (rv.timestamp || rv.episode) {
+              await reviewStudioService.launchVideoAtEpisodeAndTimestamp(this.plugin, item, {
+                episode: rv.episode || Number(item.watchedEpisodes) || 1,
+                timestamp: rv.timestamp || ""
+              });
+            }
+          };
+
+          const copyBtn = this.el(metaRow, "button", "atelier-text-action", "📋 复制");
+          copyBtn.onclick = async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const txt = reviewStudioService.formatSingleReviewCopyText(rv, false);
+            if (txt && navigator?.clipboard?.writeText) {
+              await navigator.clipboard.writeText(txt);
+            }
+          };
+
+          this.el(
+            bubble,
+            "div",
+            "",
+            rv.isPlaceholder
+              ? "⏱️ 已打下看番时间点占位锚点，点击上方「💬 观片手札工作台」可补齐正文感想。"
+              : rv.text || (rv.images?.length ? `🖼️ [附 ${rv.images.length} 张截图]` : "")
+          );
+        });
+      } else if (parsed.userParagraphs.length > 0) {
         parsed.userParagraphs.forEach((para) => {
           this.el(sec2, "p", "atelier-note-paragraph", para);
         });
@@ -1983,7 +2053,7 @@ class Dashboard3DSpace {
           sec2,
           "p",
           "atelier-note-paragraph",
-          `当前笔记《${item.name}》尚未填写长篇个人总结段落。您可点击右上角「打开完整笔记 ↗」在 Obsidian 编辑器中随时撰写观后感与分集短评。`
+          `当前笔记《${item.name}》尚未填写观片手札或长评。您可点击右上角「💬 观片手札工作台」随时记录单集吐槽、打下时间点占位或粘贴截图。`
         );
       }
 
@@ -2068,9 +2138,11 @@ class Dashboard3DSpace {
 
     const scoreCell = this.detailCell(grid, "评分对照 / RATING");
     const personal = item.personalScore == null ? "未评分" : Number(item.personalScore).toFixed(1);
-    const rawBgm = Number(item.bangumiScore ?? item.preciseScore);
+    const rawBgm = Number(item.preciseScore ?? item.publicScore ?? item.bangumiScore);
     const bgm = Number.isFinite(rawBgm) && rawBgm > 0 ? rawBgm.toFixed(1) : "未记录";
-    this.el(scoreCell, "div", "atelier-data-value", `个人 ${personal} ／ BGM ${bgm}`);
+    const rawUserBgm = Number(item.bangumiScore);
+    const userBgmPart = Number.isFinite(rawUserBgm) && rawUserBgm > 0 ? ` ／ 你在 BGM 的评分 ${rawUserBgm.toFixed(1)}` : "";
+    this.el(scoreCell, "div", "atelier-data-value", `个人 ${personal}${userBgmPart} ／ BGM 评分 ${bgm}`);
 
     const ruler = this.el(scoreCell, "div", "atelier-score-ruler");
     for (let score = 1; score <= 10; score += 1) {
@@ -2240,12 +2312,35 @@ class Dashboard3DSpace {
         : "打开动画笔记 ↗"
     );
 
-    primary.onclick = () => {
+    primary.onclick = async () => {
       if (localInfo?.nextEpisodeFile) {
-        openLocalPathSafely(localInfo.nextEpisodeFile);
+        const nextEp = localInfo.nextEpisodeNumber || Number(item.watchedEpisodes || 0) + 1;
+        await reviewStudioService.launchVideoAtEpisodeAndTimestamp(this.plugin, item, {
+          episode: nextEp,
+          timestamp: ""
+        });
       } else if (item.file?.path) {
         this.app?.workspace?.openLinkText(item.file.path, "", false);
       }
+    };
+
+    const reviewCount = Array.isArray(item.reviews) ? item.reviews.length : 0;
+    const reviewBtn = this.el(
+      actions,
+      "button",
+      "atelier-text-action",
+      reviewCount > 0 ? `💬 观片手札 (${reviewCount})` : "💬 观片手札"
+    );
+    reviewBtn.dataset.ui = "open-reviews-studio";
+    reviewBtn.onclick = () => {
+      reviewStudioService.openAnimeReviewStudioModal(this.plugin, item, {
+        onUpdated: () => {
+          this.renderDetail(item);
+          if (this.noteSheetState === "open" || this.noteSheetState === "extracting") {
+            this.renderNoteSheet(item);
+          }
+        }
+      });
     };
 
     const viewer = this.el(actions, "button", "atelier-text-action", "360° 装帧检视 ↗");
@@ -2502,7 +2597,7 @@ class Dashboard3DSpace {
         sortSelect.dataset.laneField = "sortBy";
         [
           ["scoreDesc", "综合评分 ↓"],
-          ["bgmDesc", "BGM评分 ↓"],
+          ["bgmDesc", "BGM 评分 ↓"],
           ["yearDesc", "开播年份 ↓"],
           ["progressDesc", "观看进度 ↓"],
           ["nameAsc", "标题排序 ↑"]

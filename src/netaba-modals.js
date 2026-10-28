@@ -525,7 +525,7 @@ module.exports = function createNetabaModals({
             text:
               "日文名：" + (info.JP || "未知") +
               "\n开播日期：" + (info.date || "未知") +
-              "\nBGM评分：" + (info.rating || "未知")
+              "\nBGM 评分：" + (info.rating || "未知")
           }
         );
   

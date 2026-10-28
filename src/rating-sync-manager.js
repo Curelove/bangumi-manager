@@ -5,7 +5,7 @@ const noteUtils = require("./note-utils.js");
 
 const PHASES = {
   SCAN: "正在扫描动画笔记",
-  USER: "正在读取 Bangumi 用户评分",
+  USER: "正在读取你在 BGM 上的评分",
   DETAIL: "正在读取普通评分和精确评分",
   READY: "评分数据已读取，正在准备写入",
   WRITE: "正在写入动画笔记",
@@ -374,7 +374,7 @@ class RatingSyncManager {
     if (!/^\d+$/.test(userId)) {
       task.userRatingsSkipped = true;
       task.userRatingsSkipReason =
-        "未填写 Bangumi 用户 ID，已跳过用户评分同步";
+        "未填写 Bangumi 用户 ID，已跳过你在 BGM 上的评分同步";
       this.emit();
       return;
     }
@@ -408,7 +408,7 @@ class RatingSyncManager {
     } catch (error) {
       task.userRatingsSkipped = true;
       task.userRatingsSkipReason =
-        "读取用户评分失败：" +
+        "读取你在 BGM 上的评分失败：" +
         (error && error.message
           ? error.message
           : String(error));
@@ -838,7 +838,7 @@ class RatingSyncManager {
       "扫描 " + task.scanned + " 篇",
       "详情请求 " + task.requested + " 部",
       "缓存跳过 " + task.skipped + " 部",
-      "用户评分更新 " + task.userRatingsUpdated + " 部",
+      "你在 BGM 上的评分更新 " + task.userRatingsUpdated + " 部",
       "普通评分更新 " + task.publicRatingsUpdated + " 部",
       "精确评分更新 " + task.preciseRatingsUpdated + " 部",
       "写入笔记 " + task.notesUpdated + " 篇",

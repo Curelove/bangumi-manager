@@ -278,7 +278,10 @@ function updateScoreFields(
   }
 
   const scoreFieldNames = [
+    "你在 BGM 上的评分",
+    "你在BGM上的评分",
     "BGM\u7528\u6237\u8BC4\u5206",
+    "BGM \u7528\u6237\u8BC4\u5206",
     "Bangumi\u7528\u6237\u8BC4\u5206",
     "\u6211\u7684\u8BC4\u5206"
   ];
@@ -308,7 +311,7 @@ function updateScoreFields(
     bangumiScore !== undefined
   ) {
     scoreFieldLines.push(
-      "BGM\u7528\u6237\u8BC4\u5206: \"" +
+      "你在 BGM 上的评分: \"" +
       String(bangumiScore)
         .replace(/\\/g, "\\\\")
         .replace(/"/g, '\\"') +
@@ -339,7 +342,7 @@ function updateScoreFields(
 
     if (
       !insertedFrontmatterScores &&
-      /^\s*BGM\u8BC4\u5206\s*:/.test(line)
+      /^\s*BGM\s*\u8BC4\u5206\s*:/.test(line)
     ) {
       rebuiltFrontmatterLines.push(
         ...scoreFieldLines
@@ -368,7 +371,10 @@ function updateScoreFields(
   );
 
   const tableFieldNames = [
+    "你在 BGM 上的评分",
+    "你在BGM上的评分",
     "BGM\u7528\u6237\u8BC4\u5206",
+    "BGM \u7528\u6237\u8BC4\u5206",
     "Bangumi\u7528\u6237\u8BC4\u5206",
     "\u6211\u7684\u8BC4\u5206"
   ];
@@ -398,7 +404,7 @@ function updateScoreFields(
     bangumiScore !== undefined
   ) {
     tableLines.push(
-      "| BGM\u7528\u6237\u8BC4\u5206 | " +
+      "| 你在 BGM 上的评分 | " +
       String(bangumiScore) +
       " |"
     );
@@ -582,7 +588,7 @@ function updateNetabaSection(content, action) {
     ].join("\n");
 
     const summaryIndex = source.search(
-      /^# \u4E2A\u4EBA\u603B\u7ED3\s*$/m
+      /^#+\s*(?:观片手记与评价|\u4E2A\u4EBA\u603B\u7ED3)\s*$/m
     );
 
     if (summaryIndex >= 0) {
@@ -856,7 +862,7 @@ function rebuildScoreFrontmatter(
   const currentBangumiScore = cleanValue(
     overrides.bangumiScore !== undefined
       ? overrides.bangumiScore
-      : oldFields.BGM评分
+      : (oldFields.BGM评分 || oldFields["BGM 评分"])
   );
 
   const legacyPreciseScore = cleanValue(
@@ -884,16 +890,23 @@ function rebuildScoreFrontmatter(
 
   const scoreValues = {
     BGM评分: bangumiScoreForDisplay,
-    BGM用户评分: cleanValue(
+    "你在 BGM 上的评分": cleanValue(
+      oldFields["你在 BGM 上的评分"] ||
+      oldFields["你在BGM上的评分"] ||
       oldFields.BGM用户评分 ||
+      oldFields["BGM 用户评分"] ||
       oldFields.Bangumi用户评分
     )
   };
 
   const managedFields = new Set([
     "BGM评分",
+    "BGM 评分",
     "BGM精确评分",
+    "你在 BGM 上的评分",
+    "你在BGM上的评分",
     "BGM用户评分",
+    "BGM 用户评分",
     "Bangumi用户评分"
   ]);
 
@@ -910,7 +923,7 @@ function rebuildScoreFrontmatter(
 
   const scoreLines = [
     "BGM评分",
-    "BGM用户评分"
+    "你在 BGM 上的评分"
   ].filter((name) => {
     return Boolean(scoreValues[name]);
   }).map((name) => {
@@ -1077,10 +1090,23 @@ function syncNoteCalloutFromFrontmatter(content) {
     updated = updateCalloutTableRow(updated, "我的评分", sc || "未评分");
   }
 
-  if (parsed.fields["BGM用户评分"] !== undefined || parsed.fields["Bangumi用户评分"] !== undefined) {
-    const sc = cleanValue(parsed.fields["BGM用户评分"] || parsed.fields["Bangumi用户评分"]);
-    updated = updateCalloutTableRow(updated, "BGM用户评分", sc || "未评分");
-    updated = updateCalloutTableRow(updated, "BGM 用户评分", sc || "未评分");
+  const userBgmFieldVal =
+    parsed.fields["你在 BGM 上的评分"] ??
+    parsed.fields["你在BGM上的评分"] ??
+    parsed.fields["BGM用户评分"] ??
+    parsed.fields["BGM 用户评分"] ??
+    parsed.fields["Bangumi用户评分"];
+  if (userBgmFieldVal !== undefined) {
+    const sc = cleanValue(userBgmFieldVal) || "未评分";
+    updated = updateCalloutTableRow(updated, "你在 BGM 上的评分", sc);
+    updated = updateCalloutTableRow(updated, "你在BGM上的评分", sc);
+    updated = updateCalloutTableRow(updated, "BGM用户评分", sc);
+    updated = updateCalloutTableRow(updated, "BGM 用户评分", sc);
+    updated = updateCalloutTableRow(updated, "Bangumi用户评分", sc);
+    updated = updated.replace(
+      /^((?:>\s*)?\|\s*(?:\*\*)?)(?:BGM\s*用户评分|Bangumi\s*用户评分)((?:\*\*)?\s*\|)/gm,
+      "$1你在 BGM 上的评分$2"
+    );
   }
 
   if (parsed.fields["BGM评分"] !== undefined || parsed.fields["BGM 评分"] !== undefined) {
@@ -1140,6 +1166,657 @@ function removeNoteTag(content, tag) {
   return updateFrontmatterField(content, "tags", newTags);
 }
 
+/**
+ * ==================== 观片手札（吐槽 / 短评 / 长评）与智能时间戳双向解析引擎 ====================
+ */
+function normalizeTimestampInput(raw) {
+  const s = String(raw || "")
+    .trim()
+    .replace(/^\[|\]$/g, "")
+    .replace(/[：．.]/g, ":")
+    .trim();
+  if (!s) return "";
+
+  // 标准 HH:MM:SS 或 MM:SS
+  const colonMatch = s.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+  if (colonMatch) {
+    if (colonMatch[3] !== undefined) {
+      const hh = parseInt(colonMatch[1], 10);
+      const mm = parseInt(colonMatch[2], 10);
+      const ss = parseInt(colonMatch[3], 10);
+      if (mm >= 60 || ss >= 60) return "";
+      if (hh > 0) {
+        return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      }
+      return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    } else {
+      const mm = parseInt(colonMatch[1], 10);
+      const ss = parseInt(colonMatch[2], 10);
+      if (ss >= 60) return "";
+      if (mm >= 60) {
+        const hh = Math.floor(mm / 60);
+        const remM = mm % 60;
+        return `${String(hh).padStart(2, "0")}:${String(remM).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      }
+      return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    }
+  }
+
+  // 纯数字简写（如 1234 -> 12:34, 520 -> 05:20, 10520 -> 01:05:20, 45 -> 00:45）
+  if (/^\d{1,6}$/.test(s)) {
+    if (s.length <= 2) {
+      const sec = parseInt(s, 10);
+      if (sec < 60) {
+        return `00:${String(sec).padStart(2, "0")}`;
+      }
+      const mm = Math.floor(sec / 60);
+      const ss = sec % 60;
+      return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    }
+    if (s.length <= 4) {
+      const padded = s.padStart(4, "0");
+      const mm = parseInt(padded.slice(0, 2), 10);
+      const ss = parseInt(padded.slice(2, 4), 10);
+      if (ss < 60) {
+        return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      }
+    }
+    if (s.length <= 6) {
+      const padded = s.padStart(6, "0");
+      const hh = parseInt(padded.slice(0, 2), 10);
+      const mm = parseInt(padded.slice(2, 4), 10);
+      const ss = parseInt(padded.slice(4, 6), 10);
+      if (mm < 60 && ss < 60) {
+        return hh > 0
+          ? `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+          : `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      }
+    }
+  }
+
+  return "";
+}
+
+function parseTimestampToSeconds(ts) {
+  const norm = normalizeTimestampInput(ts);
+  if (!norm) return null;
+  const parts = norm.split(":").map((n) => parseInt(n, 10));
+  if (parts.some((n) => isNaN(n))) return null;
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  return null;
+}
+
+function formatSecondsToTimestamp(sec, forceHours = false) {
+  if (sec === null || sec === undefined || !Number.isFinite(Number(sec)) || Number(sec) < 0) {
+    return "";
+  }
+  const total = Math.floor(Number(sec));
+  const hh = Math.floor(total / 3600);
+  const mm = Math.floor((total % 3600) / 60);
+  const ss = total % 60;
+  if (forceHours || hh > 0) {
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  }
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+/**
+ * 从输入文本开头智能识别时间码：
+ * 1. 若整段文本仅输入了一个时间码（如 "14:22" 或 "1422"），返回 { timestamp: "14:22", cleanText: "" }（触发时间点占位书签！）
+ * 2. 若文本开头为时间码加空格（如 "12:34 这段作画绝了" 或 "1234 这段作画绝了"），提取时间码并剥离前缀
+ */
+function extractLeadingTimestampFromText(rawText) {
+  const text = String(rawText || "");
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { timestamp: "", cleanText: "" };
+  }
+
+  // 情况 1：整段输入仅有一个时间码（如 "12:34"、"[12:34]"、"1234"、"01:05:20"）
+  if (/^\[?\d{1,2}[:：.]\d{2}(?:[:：.]\d{2})?\]?$/.test(trimmed) || /^\d{3,6}$/.test(trimmed)) {
+    const onlyTs = normalizeTimestampInput(trimmed);
+    if (onlyTs) {
+      return { timestamp: onlyTs, cleanText: "" };
+    }
+  }
+
+  // 情况 2：开头带标准时间码 "[12:34] 正文" 或 "12:34 正文" 或 "12：34 正文"
+  const prefixColon = trimmed.match(/^\[?(\d{1,2}[:：.]\d{2}(?:[:：.]\d{2})?)\]?(?:\s+|[,，。、\-—|]+)(.*)$/s);
+  if (prefixColon) {
+    const ts = normalizeTimestampInput(prefixColon[1]);
+    if (ts) {
+      return { timestamp: ts, cleanText: prefixColon[2].trim() };
+    }
+  }
+
+  // 情况 3：开头带 3~4 位纯数字时间码 + 空格 + 正文（如 "451 这段作画绝了" -> 04:51、"1234 这段作画绝了" -> 12:34，排除年份或量词如 "2025 年"、"100 个"）
+  const prefixDigits = trimmed.match(/^(\d{3,4})\s+([^\s].*)$/s);
+  if (prefixDigits) {
+    const rawDigits = prefixDigits[1];
+    const padded = rawDigits.padStart(4, "0");
+    const mm = parseInt(padded.slice(0, 2), 10);
+    const ss = parseInt(padded.slice(2, 4), 10);
+    // 动漫单集通常在 00:00 ~ 59:59 之间，且紧跟的不是“年/月/日/话/集/部/个/条/次/人/分/秒/倍/帧”等量词
+    if (mm < 60 && ss < 60 && !/^[年月日话集話部个条次人分秒天周季期倍帧%]/.test(prefixDigits[2])) {
+      const ts = `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+      return { timestamp: ts, cleanText: prefixDigits[2].trim() };
+    }
+  }
+
+  return { timestamp: "", cleanText: text };
+}
+
+function parseScopeToken(rawToken) {
+  const tok = String(rawToken || "")
+    .trim()
+    .replace(/^\[|\]$/g, "")
+    .trim();
+  if (!tok) return null;
+
+  if (/^(?:全剧|全集|总评|全剧总评|整部|ALL)$/i.test(tok)) {
+    return {
+      scopeType: "all",
+      epStart: null,
+      epEnd: null,
+      scopeCode: "全剧",
+      scopeDisplay: "全剧总评"
+    };
+  }
+
+  const rangeMatch = tok.match(/^(?:EP|E|第)?\s*(\d{1,4})\s*[-~～至到]\s*(?:EP|E|第)?\s*(\d{1,4})\s*(?:话|集|話)?$/i);
+  if (rangeMatch) {
+    let a = parseInt(rangeMatch[1], 10);
+    let b = parseInt(rangeMatch[2], 10);
+    if (a > b) [a, b] = [b, a];
+    if (a === b) {
+      const p = String(a).padStart(2, "0");
+      return {
+        scopeType: "single",
+        epStart: a,
+        epEnd: a,
+        scopeCode: `EP${p}`,
+        scopeDisplay: `EP${p}`
+      };
+    }
+    const pa = String(a).padStart(2, "0");
+    const pb = String(b).padStart(2, "0");
+    return {
+      scopeType: "range",
+      epStart: a,
+      epEnd: b,
+      scopeCode: `EP${pa}-${pb}`,
+      scopeDisplay: `EP${pa}–${pb}`
+    };
+  }
+
+  const singleMatch = tok.match(/^(?:EP|E|第)\s*(\d{1,4})\s*(?:话|集|話)?$/i) || tok.match(/^(\d{1,4})\s*(?:话|集|話)$/i);
+  if (singleMatch) {
+    const ep = parseInt(singleMatch[1], 10);
+    const p = String(ep).padStart(2, "0");
+    return {
+      scopeType: "single",
+      epStart: ep,
+      epEnd: ep,
+      scopeCode: `EP${p}`,
+      scopeDisplay: `EP${p}`
+    };
+  }
+
+  return null;
+}
+
+function parseReviewTypeToken(rawToken, calloutKind = "") {
+  const tok = String(rawToken || "")
+    .trim()
+    .replace(/^\[|\]$/g, "")
+    .trim();
+  if (/^(?:吐槽|随记|弹幕|quip)$/i.test(tok)) {
+    return { type: "quip", typeLabel: "吐槽" };
+  }
+  if (/^(?:短评|简评|short)$/i.test(tok)) {
+    return { type: "short", typeLabel: "短评" };
+  }
+  if (/^(?:长评|剧评|深评|文章|long)$/i.test(tok)) {
+    return { type: "long", typeLabel: "长评" };
+  }
+  const ck = String(calloutKind || "").toLowerCase();
+  if (ck.includes("quote") || ck.includes("quip")) {
+    return { type: "quip", typeLabel: "吐槽" };
+  }
+  if (ck.includes("abstract") || ck.includes("long") || ck.includes("summary")) {
+    return { type: "long", typeLabel: "长评" };
+  }
+  if (ck.includes("note") || ck.includes("short")) {
+    return { type: "short", typeLabel: "短评" };
+  }
+  return null;
+}
+
+function normalizeReviewEntry(raw, idx = 0) {
+  const typeObj = parseReviewTypeToken(raw?.type || raw?.typeLabel, raw?.calloutKind) || {
+    type: "quip",
+    typeLabel: "吐槽"
+  };
+
+  let scopeObj = null;
+  if (raw?.scopeCode || raw?.scope) {
+    scopeObj = parseScopeToken(raw.scopeCode || raw.scope);
+  }
+  if (!scopeObj) {
+    if (raw?.scopeType === "range" && raw.epStart != null && raw.epEnd != null) {
+      scopeObj = parseScopeToken(`EP${raw.epStart}-${raw.epEnd}`);
+    } else if (raw?.scopeType === "single" && (raw.epStart != null || raw.episode != null)) {
+      scopeObj = parseScopeToken(`EP${raw.epStart ?? raw.episode}`);
+    } else if (raw?.epStart != null || raw?.episode != null) {
+      scopeObj = parseScopeToken(`EP${raw.epStart ?? raw.episode}`);
+    } else {
+      scopeObj = {
+        scopeType: "all",
+        epStart: null,
+        epEnd: null,
+        scopeCode: "全剧",
+        scopeDisplay: "全剧总评"
+      };
+    }
+  }
+
+  const timestamp = normalizeTimestampInput(raw?.timestamp || "");
+  const timestampSeconds = timestamp ? parseTimestampToSeconds(timestamp) : null;
+
+  const rawImages = Array.isArray(raw?.images) ? raw.images : [];
+  const images = rawImages
+    .map((im) => {
+      if (typeof im === "string") {
+        return { path: im.trim(), isCover: false };
+      }
+      return {
+        path: String(im?.path || "").trim(),
+        isCover: Boolean(im?.isCover),
+        noCover: Boolean(im?.noCover)
+      };
+    })
+    .filter((im) => im.path);
+
+  let coverImage = String(raw?.coverImage || "").trim();
+  const explicitCover = images.find((im) => im.isCover);
+  if (explicitCover) {
+    coverImage = explicitCover.path;
+  } else if (coverImage && images.some((im) => im.path === coverImage)) {
+    images.forEach((im) => {
+      im.isCover = im.path === coverImage;
+    });
+  } else if (images.length > 0 && !images.every((im) => im.noCover)) {
+    coverImage = images[0].path;
+    images[0].isCover = true;
+  } else {
+    coverImage = "";
+  }
+
+  const cleanText = String(raw?.text ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  const isPlaceholder = Boolean(!cleanText);
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const date = String(raw?.date ?? todayStr).trim();
+  const title = String(raw?.title || "").trim();
+
+  return {
+    id: raw?.id || `rev_${idx + 1}_${Date.now().toString(36)}`,
+    type: typeObj.type,
+    typeLabel: typeObj.typeLabel,
+    scopeType: scopeObj.scopeType,
+    epStart: scopeObj.epStart,
+    epEnd: scopeObj.epEnd,
+    episode: scopeObj.epStart,
+    scopeCode: scopeObj.scopeCode,
+    scope: scopeObj.scopeCode,
+    scopeDisplay: scopeObj.scopeDisplay,
+    timestamp,
+    timestampSeconds,
+    title,
+    date,
+    text: cleanText,
+    images,
+    coverImage,
+    isPlaceholder
+  };
+}
+
+function parseSingleReviewHeaderAndBody(headerLine, bodyLines, calloutKind, idx) {
+  let remHeader = String(headerLine || "").trim();
+  const bracketMatches = [...remHeader.matchAll(/\[([^\]]+)\]/g)];
+
+  let parsedType = null;
+  let parsedScope = null;
+  let parsedTs = "";
+  let explicitPlaceholder = false;
+
+  for (const m of bracketMatches) {
+    const inner = m[1].trim();
+    if (!parsedType) {
+      const t = parseReviewTypeToken(inner, "");
+      if (t) {
+        parsedType = t;
+        remHeader = remHeader.replace(m[0], " ");
+        continue;
+      }
+    }
+    if (!parsedScope) {
+      const sc = parseScopeToken(inner);
+      if (sc) {
+        parsedScope = sc;
+        remHeader = remHeader.replace(m[0], " ");
+        continue;
+      }
+    }
+    if (!parsedTs && /^\d{1,2}[:：.]\d{2}(?:[:：.]\d{2})?$/.test(inner)) {
+      const ts = normalizeTimestampInput(inner);
+      if (ts) {
+        parsedTs = ts;
+        remHeader = remHeader.replace(m[0], " ");
+        continue;
+      }
+    }
+    if (/^(?:待补完|待记|占位|书签|bookmark|placeholder)$/i.test(inner)) {
+      explicitPlaceholder = true;
+      remHeader = remHeader.replace(m[0], " ");
+      continue;
+    }
+  }
+
+  if (!parsedType) {
+    parsedType = parseReviewTypeToken("", calloutKind) || { type: "short", typeLabel: "短评" };
+  }
+
+  // 若用户没加方括号，尝试在剩余标题里宽松识别 EP03 / 12:34 / 日期 / 标题
+  remHeader = remHeader.replace(/\s+/g, " ").trim();
+  if (!parsedScope) {
+    const looseScope = remHeader.match(/\b(EP\d{1,4}(?:-\d{1,4})?|第\d{1,4}(?:-\d{1,4})?[话集話]|全剧(?:总评)?)\b/i);
+    if (looseScope) {
+      parsedScope = parseScopeToken(looseScope[1]);
+      remHeader = remHeader.replace(looseScope[0], " ").trim();
+    }
+  }
+  if (!parsedTs) {
+    const looseTs = remHeader.match(/\b(\d{1,2}:\d{2}(?::\d{2})?)\b/);
+    if (looseTs) {
+      parsedTs = normalizeTimestampInput(looseTs[1]);
+      remHeader = remHeader.replace(looseTs[0], " ").trim();
+    }
+  }
+
+  let date = "";
+  const dateMatch = remHeader.match(/\b(20\d{2}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)\b/);
+  if (dateMatch) {
+    date = dateMatch[1];
+    remHeader = remHeader.replace(dateMatch[0], " ").trim();
+  }
+
+  const title = remHeader.replace(/^[|·\-—\s]+|[|·\-—\s]+$/g, "").trim();
+
+  // 解析正文与内嵌图片
+  const images = [];
+  const textLines = [];
+
+  for (const rawLine of bodyLines) {
+    const cleanedComment = String(rawLine || "").replace(/<!--[\s\S]*?-->/g, "");
+    let lineRem = cleanedComment;
+
+    // 匹配 Obsidian WikiLink 图片 ![[path|alt]]
+    const wikiMatches = [...lineRem.matchAll(/!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]/g)];
+    for (const wm of wikiMatches) {
+      const imgPath = wm[1].trim();
+      const modifier = String(wm[2] || "").trim().toLowerCase();
+      if (imgPath) {
+        images.push({
+          path: imgPath,
+          isCover: modifier.includes("cover") || modifier.includes("封面"),
+          noCover: modifier.includes("nocover")
+        });
+      }
+      lineRem = lineRem.replace(wm[0], "");
+    }
+
+    // 匹配标准 Markdown 图片 ![alt](path)
+    const mdMatches = [...lineRem.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)];
+    for (const mm of mdMatches) {
+      const alt = String(mm[1] || "").trim().toLowerCase();
+      const imgPath = mm[2].trim();
+      if (imgPath) {
+        images.push({
+          path: imgPath,
+          isCover: alt.includes("cover") || alt.includes("封面"),
+          noCover: alt.includes("nocover")
+        });
+      }
+      lineRem = lineRem.replace(mm[0], "");
+    }
+
+    // 若整行只有注释或只有图片，不额外塞入空行
+    const hadImageOrComment =
+      wikiMatches.length > 0 || mdMatches.length > 0 || /<!--[\s\S]*?-->/.test(rawLine);
+    if (hadImageOrComment && !lineRem.trim()) {
+      continue;
+    }
+    textLines.push(lineRem);
+  }
+
+  const cleanBodyText = textLines.join("\n").replace(/<!--[\s\S]*?-->/g, "").trim();
+
+  return normalizeReviewEntry(
+    {
+      id: `rev_${idx + 1}`,
+      type: parsedType.type,
+      typeLabel: parsedType.typeLabel,
+      scopeType: parsedScope?.scopeType || "all",
+      epStart: parsedScope?.epStart ?? null,
+      epEnd: parsedScope?.epEnd ?? null,
+      scopeCode: parsedScope?.scopeCode || "全剧",
+      timestamp: parsedTs,
+      title,
+      date,
+      text: cleanBodyText,
+      images,
+      isPlaceholder: explicitPlaceholder && !cleanBodyText
+    },
+    idx
+  );
+}
+
+/**
+ * 从动画 Markdown 笔记内容中解析「# 观片手记与评价」或「# 个人总结」下的所有手札卡片
+ */
+function parseNoteReviewsSection(content) {
+  const source = String(content || "");
+  const headingMatch = source.match(/^#+\s*(?:观片手记与评价|个人总结)\s*$/m);
+  if (!headingMatch || headingMatch.index === undefined) {
+    return [];
+  }
+
+  const sectionStart = headingMatch.index + headingMatch[0].length;
+  const afterHeading = source.slice(sectionStart);
+  const nextH1Match = afterHeading.match(/^#\s+[^\r\n]+/m);
+  const rawSection =
+    nextH1Match && nextH1Match.index !== undefined
+      ? afterHeading.slice(0, nextH1Match.index)
+      : afterHeading;
+
+  const lines = rawSection.split(/\r?\n/);
+  const reviews = [];
+  let i = 0;
+  let legacyLines = [];
+
+  const flushLegacy = () => {
+    if (!legacyLines.length) return;
+    const joined = legacyLines
+      .join("\n")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .trim();
+    legacyLines = [];
+    if (!joined) return;
+    reviews.push(
+      normalizeReviewEntry(
+        {
+          id: `rev_${reviews.length + 1}`,
+          type: joined.length > 140 ? "long" : "short",
+          scopeCode: "全剧",
+          date: "",
+          text: joined
+        },
+        reviews.length
+      )
+    );
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 1. 识别 Obsidian Callout 语法块: > [!quote] [吐槽] [EP03] [14:22] ...
+    const calloutStart = line.match(/^\s*>\s*\[!([a-zA-Z0-9_-]+)\][+-]?\s*(.*)$/);
+    if (calloutStart) {
+      flushLegacy();
+      const calloutKind = calloutStart[1];
+      const headerRest = calloutStart[2] || "";
+      const bodyLines = [];
+      i += 1;
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        // 如果连续两个 Callout 没有空行隔开，遇到下一个 > [!xxx] 立即结束当前块
+        if (/^\s*>\s*\[!([a-zA-Z0-9_-]+)\]/.test(lines[i])) {
+          break;
+        }
+        bodyLines.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      reviews.push(
+        parseSingleReviewHeaderAndBody(headerRest, bodyLines, calloutKind, reviews.length)
+      );
+      continue;
+    }
+
+    // 2. 兼容手写三级标题语法: ### [吐槽] [EP03] 14:22
+    const headingBlockStart = line.match(/^\s*#{2,4}\s*(?:\[|💬|✒️|📜|⏱️)(.*)$/);
+    if (headingBlockStart) {
+      flushLegacy();
+      const headerRest = line.replace(/^\s*#{2,4}\s*/, "");
+      const bodyLines = [];
+      i += 1;
+      while (
+        i < lines.length &&
+        !/^\s*>\s*\[!/.test(lines[i]) &&
+        !/^\s*#{1,4}\s+/.test(lines[i])
+      ) {
+        bodyLines.push(lines[i]);
+        i += 1;
+      }
+      reviews.push(
+        parseSingleReviewHeaderAndBody(headerRest, bodyLines, "", reviews.length)
+      );
+      continue;
+    }
+
+    legacyLines.push(line);
+    i += 1;
+  }
+
+  flushLegacy();
+  return reviews;
+}
+
+/**
+ * 将单条观片手札序列化为干净优雅、人机共读的 Obsidian 原生 Callout Markdown
+ */
+function formatReviewToMarkdownBlock(rawReview, idx = 0) {
+  const rev = normalizeReviewEntry(rawReview, idx);
+  const calloutMap = {
+    quip: "quote",
+    short: "note",
+    long: "abstract"
+  };
+  const calloutType = calloutMap[rev.type] || "quote";
+
+  const headerTokens = [`[!${calloutType}]`, `[${rev.typeLabel}]`, `[${rev.scopeCode}]`];
+  if (rev.timestamp) {
+    headerTokens.push(`[${rev.timestamp}]`);
+  }
+  if (rev.isPlaceholder) {
+    headerTokens.push(`[待补完]`);
+  }
+
+  const metaTailParts = [];
+  if (rev.title) metaTailParts.push(rev.title);
+  if (rev.date) metaTailParts.push(rev.date);
+  if (metaTailParts.length > 0) {
+    headerTokens.push(metaTailParts.join(" | "));
+  }
+
+  const outLines = [`> ${headerTokens.join(" ")}`];
+
+  if (rev.text) {
+    const textLines = rev.text.split(/\r?\n/);
+    for (const tl of textLines) {
+      outLines.push(tl ? `> ${tl}` : `>`);
+    }
+  } else {
+    outLines.push(`> <!-- ⏱️ 时间点书签占位：点击档案馆手札卡片或在此直接输入文字即可补完 -->`);
+  }
+
+  if (Array.isArray(rev.images) && rev.images.length > 0) {
+    for (const im of rev.images) {
+      const cleanPath = String(im.path || "").trim();
+      if (!cleanPath) continue;
+      const isCover = rev.coverImage && cleanPath === rev.coverImage;
+      if (isCover) {
+        outLines.push(`> ![[${cleanPath}|cover]]`);
+      } else if (im.noCover) {
+        outLines.push(`> ![[${cleanPath}|nocover]]`);
+      } else {
+        outLines.push(`> ![[${cleanPath}]]`);
+      }
+    }
+  }
+
+  return outLines.join("\n");
+}
+
+/**
+ * 将结构化手札数组写回动画 Markdown 笔记的「# 观片手记与评价」（双向兼容「# 个人总结」）
+ */
+function updateNoteReviewsSection(content, reviews) {
+  const source = String(content || "");
+  const list = Array.isArray(reviews) ? reviews : [];
+  const defaultComment =
+    '<!-- 观片手札：支持在番剧档案馆「观片手札」面板可视化管理，或直接按 "> [!quote] [吐槽|短评|长评] [全剧|EP01|EP01-03] [12:34]" 格式手写编辑 -->';
+
+  const blocks = list.map((r, idx) => formatReviewToMarkdownBlock(r, idx));
+  const sectionBody =
+    blocks.length > 0 ? `${defaultComment}\n\n${blocks.join("\n\n")}` : defaultComment;
+
+  const headingMatch = source.match(/^(#+\s*(?:观片手记与评价|个人总结))\s*$/m);
+  if (headingMatch && headingMatch.index !== undefined) {
+    const headingStart = headingMatch.index;
+    const headingLine = headingMatch[1];
+    const afterHeadingStart = headingStart + headingMatch[0].length;
+    const afterHeading = source.slice(afterHeadingStart);
+    const nextH1Match = afterHeading.match(/^#\s+[^\r\n]+/m);
+
+    const beforePart = source.slice(0, headingStart).trimEnd();
+    const tailPart =
+      nextH1Match && nextH1Match.index !== undefined
+        ? "\n\n" + afterHeading.slice(nextH1Match.index).trimStart()
+        : "";
+
+    return `${beforePart}\n\n${headingLine}\n\n${sectionBody}\n${tailPart}`;
+  }
+
+  return `${source.trimEnd()}\n\n# 观片手记与评价\n\n${sectionBody}\n`;
+}
+
 module.exports = {
   cleanValue,
   parseFrontmatter,
@@ -1165,5 +1842,14 @@ module.exports = {
   addNoteTag,
   removeNoteTag,
   extractEpisodeNumberFromFileName,
-  openLocalPathSafely
+  openLocalPathSafely,
+  normalizeTimestampInput,
+  parseTimestampToSeconds,
+  formatSecondsToTimestamp,
+  extractLeadingTimestampFromText,
+  parseScopeToken,
+  normalizeReviewEntry,
+  parseNoteReviewsSection,
+  formatReviewToMarkdownBlock,
+  updateNoteReviewsSection
 };

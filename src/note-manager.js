@@ -325,7 +325,7 @@ function buildNoteContent(info, options) {
   if (showBangumiUserScore) {
     addYamlField(
       yaml,
-      "BGM\u7528\u6237\u8BC4\u5206",
+      "你在 BGM 上的评分",
       info.userRating === null ||
         info.userRating === undefined
         ? "\u672A\u8BC4\u5206"
@@ -495,7 +495,7 @@ function buildNoteContent(info, options) {
 
   if (showBangumiUserScore) {
     yaml.push(
-      "| BGM\u7528\u6237\u8BC4\u5206 | " +
+      "| 你在 BGM 上的评分 | " +
       (
         info.userRating === null ||
         info.userRating === undefined
@@ -553,10 +553,11 @@ function buildNoteContent(info, options) {
     yaml.push("</div>");
     yaml.push("");
   }
-  yaml.push("# \u4E2A\u4EBA\u603B\u7ED3");
+  yaml.push("# 观片手记与评价");
   yaml.push("");
   yaml.push(
-    personalSummary || "<!-- \u5728\u8FD9\u91CC\u5199\u4E0B\u60A8\u5BF9\u8FD9\u90E8\u52A8\u753B\u7684\u611F\u60F3\u548C\u8BC4\u4EF7 -->"
+    personalSummary ||
+      "<!-- 观片手札：支持在番剧档案馆「观片手札」面板可视化管理，或直接按 \"> [!quote] [吐槽|短评|长评] [全剧|EP01|EP01-03] [12:34]\" 格式手写编辑 -->"
   );
   yaml.push("");
   return yaml.join("\n");
