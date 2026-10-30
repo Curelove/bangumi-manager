@@ -1,3 +1,4 @@
+<img width="2408" height="1196" alt="PixPin_2026-10-30_22-41-55" src="https://github.com/user-attachments/assets/bd9b6a8f-c114-454d-be76-296561a4f771" />
 # Bangumi 追番管理器 (Bangumi Manager)
 
 > **把你的 Obsidian 变成私人动画档案馆。**  
@@ -16,8 +17,7 @@
 - **三轨评分与 Netaba 历史趋势**：同时维护 `BGM公共/精确评分（支持1/2/4位小数）`、`BGM用户评分` 与 `我的本地评分`（本地评分绝不被网络覆盖），原生渲染 Netaba 评分走势与全馆数据年鉴。
 - **洛琪希馆藏记录员（内置像素与高清立绘双形态）**：依据精确开播日期播报新番倒计时、本地待看与补完提醒；支持连戳 ×100 触发全屏物理回弹飞出彩蛋。
 
-<!-- 可选：在此处拖拽上传一张洛琪希交互或 3D 原画档案室的高清截图 -->
-![三维原画档案室与洛琪希记录员](请在此处拖拽上传三维原画档案室或洛琪希彩蛋截图.png)
+<img width="2408" height="1196" alt="3D原画档案室" src="https://github.com/user-attachments/assets/91fc80ec-b623-49ab-8b9e-7ddcd440d7e0" />
 
 ---
 
