@@ -4,7 +4,7 @@
 > 集 **Bangumi 动画笔记自动编目**、**双空间视图（2D 案头编目台 & 3D 原画档案室）**、**漫猫单集唯一 RSS 与 qBittorrent 追番下载助手**、**本地视频集数自动检测** 与 **洛琪希馆藏记录员** 于一体的 Obsidian 桌面版追番管理插件。
 
 <!-- 请在 GitHub 网页端编辑此文件，将录制好的 8 秒主演示 GIF 或 MP4 直接拖拽到下方替换下一行 -->
-
+<img width="2558" height="1389" alt="二维档案馆下载 gif" src="https://github.com/user-attachments/assets/2ff82fdf-5e7f-44b1-a326-868f3193dbee" />
 ---
 
 ## 核心功能亮点
