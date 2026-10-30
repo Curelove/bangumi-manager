@@ -1,11 +1,11 @@
-<img width="2408" height="1196" alt="PixPin_2026-10-30_22-41-55" src="https://github.com/user-attachments/assets/bd9b6a8f-c114-454d-be76-296561a4f771" />
 # Bangumi 追番管理器 (Bangumi Manager)
 
 > **把你的 Obsidian 变成私人动画档案馆。**  
 > 集 **Bangumi 动画笔记自动编目**、**双空间视图（2D 案头编目台 & 3D 原画档案室）**、**漫猫单集唯一 RSS 与 qBittorrent 追番下载助手**、**本地视频集数自动检测** 与 **洛琪希馆藏记录员** 于一体的 Obsidian 桌面版追番管理插件。
 
 <!-- 请在 GitHub 网页端编辑此文件，将录制好的 8 秒主演示 GIF 或 MP4 直接拖拽到下方替换下一行 -->
-![Bangumi Manager 核心演示](请在此处拖拽上传2D案头编目台切换至3D原画档案室与RSS下载演示.gif)
+![Uploading 二维档案馆 gif.gif…]()
+
 
 ---
 
