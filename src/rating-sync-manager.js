@@ -601,7 +601,14 @@ class RatingSyncManager {
         break;
       }
 
-      let content = item.content;
+      let latestContent = item.content;
+      try {
+        latestContent = await this.plugin.app.vault.read(item.file);
+      } catch (readErr) {
+        latestContent = item.content;
+      }
+      const latestParsed = noteUtils.parseFrontmatter(latestContent) || item.parsed;
+      let content = latestContent;
       let changed = false;
       const userRating = task.userRatings.get(item.subjectId);
       const detail = task.details.get(item.subjectId);
@@ -633,7 +640,7 @@ class RatingSyncManager {
           settings.showPersonalScore !== false
             ? (
                 noteUtils.cleanValue(
-                  item.parsed.fields.我的评分
+                  latestParsed?.fields?.我的评分
                 ) || "未评分"
               )
             : null
@@ -724,7 +731,7 @@ class RatingSyncManager {
         }
       }
 
-      if (changed && content !== item.content) {
+      if (changed && content !== latestContent) {
         try {
           this.markSelfWrite(item.file.path);
 

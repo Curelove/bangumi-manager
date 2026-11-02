@@ -1076,6 +1076,20 @@ function updateCalloutTableRow(content, fieldName, newValue) {
 function syncNoteCalloutFromFrontmatter(content) {
   const parsed = parseFrontmatter(content);
   if (!parsed || !parsed.fields) return content;
+  // 排除角色典藏笔记与非动画笔记，防止向角色笔记误注入“已观看集数”等字段
+  if (
+    parsed.fields["角色中文名"] !== undefined ||
+    parsed.fields["个人喜爱度评分"] !== undefined ||
+    parsed.fields["Bangumi角色页"] !== undefined
+  ) {
+    return content;
+  }
+  const hasBangumiTag = String(parsed.fields.tags || "").toLowerCase().includes("bangumi");
+  const hasBgmSubjectLink = Boolean(parsed.fields["BGM链接"]);
+  if (!hasBangumiTag && !hasBgmSubjectLink) {
+    return content;
+  }
+
   let updated = content;
 
   if (parsed.fields["观看状态"]) {
@@ -1117,17 +1131,19 @@ function syncNoteCalloutFromFrontmatter(content) {
     }
   }
 
-  const watchedInBody = extractWatchedEpisodes(content);
+  const hasWatchedLineInBody = /\*\*已观看集数\s*[：:]?\s*\*\*/.test(content);
   let ep = null;
   if (parsed.fields["已观看集数"] !== undefined) {
     const parsedEp = parseInt(parsed.fields["已观看集数"], 10);
     if (!isNaN(parsedEp)) ep = parsedEp;
-  } else if (watchedInBody !== null) {
-    ep = watchedInBody;
+  } else if (hasWatchedLineInBody) {
+    ep = extractWatchedEpisodes(content);
   }
 
   if (ep !== null && !isNaN(ep) && ep >= 0) {
-    updated = updateWatchedEpisodes(updated, ep);
+    if (hasWatchedLineInBody || parsed.fields["已观看集数"] !== undefined) {
+      updated = updateWatchedEpisodes(updated, ep);
+    }
     updated = updateCalloutTableRow(updated, "已观看集数", String(ep));
   }
 

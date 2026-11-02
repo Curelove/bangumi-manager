@@ -16,6 +16,7 @@ const {
   ScrubTitle,
   buildCelFolio,
   updateCelFolio,
+  drawTierPlaqueTexture,
   clamp,
   smooth,
   disposeTexture
@@ -28,8 +29,12 @@ const ROW_SPACING = 0.92;
 const INSPECTION_LIFT = 4.05;
 const ARRAY_CAMERA = new THREE.Vector3(59.7, 37.1, 63.9);
 const ARRAY_AIM = new THREE.Vector3(-0.35, 1.15, -0.45);
+const HIGHSCORE_CAMERA = new THREE.Vector3(34.0, 16.2, 54.0);
+const HIGHSCORE_AIM = new THREE.Vector3(0, 1.18, 0);
+const HIGHSCORE_LANE_TERRACES = [0, 0, 0, 0];
 const DETAIL_DISTANCE = 68;
 const BASE_VALLEY = new THREE.Color("#ddd4ca");
+const CURATED_PEAK_VALLEY = new THREE.Color("#e8dec8");
 
 function spring(value = 0) {
   return { value, velocity: 0 };
@@ -56,10 +61,18 @@ function itemId(item) {
 }
 
 function effectiveScore(item) {
-  const p = Number(item?.personalScore);
-  if (Number.isFinite(p) && p > 0) return p;
-  const b = Number(item?.bangumiScore ?? item?.preciseScore);
-  return Number.isFinite(b) && b > 0 ? b : 0;
+  const personal = Number(item?.personalScore);
+  if (Number.isFinite(personal) && personal > 0) return personal;
+
+  const publicScores = [
+    item?.preciseScore,
+    item?.publicScore,
+    item?.bangumiScore
+  ]
+    .map(Number)
+    .filter((score) => Number.isFinite(score) && score > 0);
+
+  return publicScores.length ? Math.max(...publicScores) : 0;
 }
 
 function decorateDom(element) {
@@ -167,6 +180,8 @@ class Dashboard3DSpace {
     this.audio = new AtelierAudioEngine();
 
     this.lensMode = "status";
+    this.lensFade = spring(1);
+    this.lensTransition = null;
     this.activeLaneConfigs = [];
     this.laneNames = [];
     this.lanes = [];
@@ -195,15 +210,27 @@ class Dashboard3DSpace {
     this.targetPalette = new THREE.Color("#d9c6b4");
     this.currentPaletteHex = "#d9c6b4";
 
+    this.hydrationQueue = [];
+    this.hydrationTotal = 0;
+    this.hydrationDone = 0;
+    this.hydrationComplete = false;
+    this.hydrationRafId = null;
+    this.shadersCompiled = false;
+
+    // 第一阶段（Frame 0）：零阻塞即时挂载 DOM 外壳与合成器光学序幕，随后启动分帧流式建档
     inject3DScopedStyles();
     this.makeLanes();
     this.initDom();
+    this.playBoot(false);
     this.initThree();
-    this.buildPool();
     this.bindEvents();
     this.applyQuality();
+    const shouldAsyncHydrate =
+      this.bootMode !== "none" &&
+      !this.settings.reducedMotion &&
+      typeof requestAnimationFrame === "function";
+    this.buildPool({ asyncHydrate: shouldAsyncHydrate });
     this.selectCurrent(false);
-    this.playBoot(false);
     this.wake();
   }
 
@@ -315,8 +342,16 @@ class Dashboard3DSpace {
         ).map((item) => {
           usedIds.add(itemId(item));
           const s = effectiveScore(item);
+          const tierBadge =
+            s >= 9.0
+              ? "冠冕阶"
+              : s >= 8.5
+                ? "典藏阶"
+                : s >= 8.0
+                  ? "佳作阶"
+                  : "甄选阶";
           return Object.assign({}, item, {
-            curatedBadge: badge.split("·")[0].trim(),
+            curatedBadge: tierBadge,
             curatedScoreText: s > 0 ? s.toFixed(1) : "精选",
             laneAccent: accent,
             laneBadge: badge
@@ -340,10 +375,10 @@ class Dashboard3DSpace {
         `综合评分 ≥ ${tier1Threshold.toFixed(1)} 的镇馆神作`
       );
 
-      // 维度 2：口碑佳作（评分 >= 7.8 的高口碑代表作）
+      // 维度 2：口碑佳作（评分 >= 7.8 的高口碑代表作，按综合评分降序以保证四级展阶严格单调递降）
       const lane2 = claim(
         (item) => effectiveScore(item) >= 7.8,
-        "bgmDesc",
+        "scoreDesc",
         "口碑 · ACCLAIMED",
         "#8c583a",
         "口碑高分 · 公认佳作",
@@ -362,10 +397,10 @@ class Dashboard3DSpace {
         "已看完结与个人偏爱的高评价馆藏"
       );
 
-      // 维度 4：新近高誉（2020 年以来开播的近作佳片 >= 7.4）
+      // 维度 4：新近高誉（2020 年以来开播的近作佳片 >= 7.4，按评分阶梯降序陈列）
       const lane4 = claim(
         (item) => (Number(item.year) || 0) >= 2020 && effectiveScore(item) >= 7.4,
-        "yearDesc",
+        "scoreDesc",
         "新锐 · MODERN HIGH",
         "#4b607f",
         "新近高誉 · 近作甄选",
@@ -528,9 +563,24 @@ class Dashboard3DSpace {
       pill.dataset.laneIndex = String(idx);
       if (idx === this.focusLane) pill.classList.add("is-active");
       pill.onclick = () => {
-        const delta = idx - this.focusLane;
-        if (delta !== 0) this.move(delta, 0);
-        this.renderCurationBanner();
+        if (idx === this.focusLane) return;
+
+        if (this.spaceState === "detail" || this.spaceState === "entering-detail") {
+          this.closeNoteSheet(true);
+          this.queueDetailOutgoing();
+          this.spaceState = "array";
+          this.root.dataset.spaceState = "array";
+          this.detailElement.classList.remove("is-visible");
+        }
+
+        this.focusLane = idx;
+        this.focusRow = this.laneSelections[idx] || 0;
+
+        this.ensureFocusRowInPoolWindow();
+        this.selectCurrent(true);
+
+        this.audio.cue("tick");
+        this.wake();
       };
     });
   }
@@ -591,6 +641,137 @@ class Dashboard3DSpace {
     return (lane - centerOffset) * COLUMN_SPACING;
   }
 
+  getHighscoreTerraceY() {
+    return 0;
+  }
+
+  getScoreNormalized(item) {
+    if (!item || item.slotType !== "anime") return 0;
+
+    const score = effectiveScore(item);
+    if (!score) return 0;
+
+    return clamp((score - 7.0) / 2.2, 0, 1);
+  }
+
+  getScoreTier(item) {
+    if (!item || item.slotType !== "anime") return 0;
+
+    const score = effectiveScore(item);
+
+    if (score >= 9.0) return 3;
+    if (score >= 8.5) return 2;
+    if (score >= 8.0) return 1;
+    return 0;
+  }
+
+  getScoreTierElevation(item) {
+    const tier = this.getScoreTier(item);
+
+    // 四级策展展阶（同一等级高度严格对齐，级差 0.58，既直观拉开等级秩序，又防止顶部卡片碰撞顶栏横幅）：
+    // 7.0-7.9 甄选阶 (-0.12)
+    // 8.0-8.4 佳作阶 ( 0.46)
+    // 8.5-8.9 典藏阶 ( 1.04)
+    // 9.0+    冠冕阶 ( 1.62)
+    return [-0.12, 0.46, 1.04, 1.62][tier] ?? -0.12;
+  }
+
+  getScoreRidgeElevation(item) {
+    if (this.lensMode !== "highscore" || !item) return 0;
+    if (item.slotType === "blank") return -0.18;
+    if (item.slotType === "divider") return -0.12;
+
+    return this.getScoreTierElevation(item);
+  }
+
+  getScoreTiltOffset(item) {
+    if (this.lensMode !== "highscore" || item?.slotType !== "anime") return 0;
+
+    const tier = this.getScoreTier(item);
+    return [0.0, 0.025, 0.05, 0.075][tier] ?? 0;
+  }
+
+  getHighscoreVisualRowSpacing() {
+    // 逻辑 ROW_SPACING (0.92) 继续用于对象池，高分视觉行距放大到 1.68 让同屏只聚焦 3~5 张核心原画
+    return 1.68;
+  }
+
+  getHighscoreLaneFocusWeight(lane) {
+    if (this.lensMode !== "highscore") return 1;
+
+    const distance = Math.abs(lane - this.ridgeLane.value);
+
+    // 当前选中柱完整显现 (1.0)，其余三柱平滑退入纸雾 (0.14)
+    return 0.14 + 0.86 * (
+      1 - smooth(clamp((distance - 0.04) / 0.86, 0, 1))
+    );
+  }
+
+  getHighscoreLaneX(lane) {
+    if (this.lensMode !== "highscore") {
+      return this.laneX(lane);
+    }
+
+    const distance = lane - this.ridgeLane.value;
+    const absDist = Math.abs(distance);
+    if (absDist < 0.0001) return 0;
+
+    const direction = Math.sign(distance);
+    // C1 连续平滑插值：当前柱平滑归于中央主轴 (0)，非当前柱平滑退向两翼可视边缘 (±4.35, ±5.85, ±7.35)
+    const magnitude = absDist <= 1
+      ? smooth(absDist) * 4.35
+      : 4.35 + (absDist - 1) * 1.5;
+
+    return direction * magnitude;
+  }
+
+  getHighscoreCardZ(logicalRow) {
+    const visualRow = this.rail.value / ROW_SPACING;
+
+    if (this.lensMode !== "highscore") {
+      return -(logicalRow * ROW_SPACING) + this.rail.value;
+    }
+
+    return -(logicalRow - visualRow) * this.getHighscoreVisualRowSpacing();
+  }
+
+  getHighscoreCameraShot() {
+    // 四柱专属运镜机位：在保持足够斜向展开角（避免正前方 0° 视线导致前后排卡片完全重叠遮挡）的前提下，
+    // 为四柱赋予明显不同的观察方位角（左前大斜角、左前中斜角、右前中斜角、右前大斜角）与俯仰高度变化
+    const laneAzimuths = [-34, -22, 24, 36];
+    const laneElevations = [14.8, 16.4, 16.0, 17.8];
+    const laneRadii = [66.5, 64.5, 64.5, 67.0];
+
+    const laneValue = clamp(this.ridgeLane.value, 0, laneAzimuths.length - 1);
+    const lower = Math.floor(laneValue);
+    const upper = Math.min(laneAzimuths.length - 1, lower + 1);
+    const mix = smooth(laneValue - lower);
+
+    const azimuth = THREE.MathUtils.lerp(laneAzimuths[lower], laneAzimuths[upper], mix);
+    const baseCamY = THREE.MathUtils.lerp(laneElevations[lower], laneElevations[upper], mix);
+    const baseRadius = THREE.MathUtils.lerp(laneRadii[lower], laneRadii[upper], mix);
+
+    const angle = THREE.MathUtils.degToRad(azimuth);
+    const rowVelocity = clamp(
+      Math.abs(this.rail.velocity) / ROW_SPACING,
+      0,
+      1.4
+    );
+
+    const radius = baseRadius + rowVelocity * 1.45;
+    const aimY = 1.12;
+    const cameraY = baseCamY + rowVelocity * 0.25;
+
+    return {
+      position: new THREE.Vector3(
+        Math.sin(angle) * radius,
+        cameraY,
+        Math.cos(angle) * radius
+      ),
+      aim: new THREE.Vector3(0, aimY, 0)
+    };
+  }
+
   addRegistrationLines() {
     if (this.registrationLines) {
       this.archiveGroup.remove(this.registrationLines);
@@ -599,30 +780,163 @@ class Dashboard3DSpace {
     }
 
     const points = [];
-    const halfWidth = Math.max(8, (this.laneCount * COLUMN_SPACING) / 2 + 2.4);
+    const tierHeights = [-0.12, 0.46, 1.04, 1.62];
 
-    for (let lane = 0; lane < this.laneCount; lane += 1) {
-      const x = this.laneX(lane);
-      points.push(x, -0.15, -21, x, -0.15, 21);
-    }
+    if (this.lensMode === "highscore") {
+      const halfZ = 7.2;
+      const halfX = 1.54;
+      const rulerX = -1.96;
+      const stepZ = this.getHighscoreVisualRowSpacing();
 
-    for (let row = -24; row <= 24; row += 1) {
-      const z = row * ROW_SPACING;
-      points.push(-halfWidth, -0.15, z, halfWidth, -0.15, z);
+      // 中央主展廊的底部纵向导轨
+      points.push(-halfX, -0.22, -halfZ, -halfX, -0.22, halfZ);
+      points.push(halfX, -0.22, -halfZ, halfX, -0.22, halfZ);
+      points.push(0, -0.23, -halfZ, 0, -0.23, halfZ);
+
+      // 四级评分展阶线：在 Z = 0（屏幕中央焦点平面）及前后相邻行绘制展阶台面框线与两侧标尺刻度
+      tierHeights.forEach((y) => {
+        points.push(-halfX, y, -halfZ, -halfX, y, halfZ);
+        points.push(halfX, y, -halfZ, halfX, y, halfZ);
+
+        // Z = 0 焦点平面的横向展阶基准线与左右对称评级尺刻度（确保无论左斜视还是右斜视均在焦点卡旁清晰可见）
+        points.push(-halfX, y, 0, halfX, y, 0);
+        points.push(rulerX - 0.32, y, 0, -halfX, y, 0);
+        points.push(halfX, y, 0, -rulerX + 0.32, y, 0);
+
+        // 前后相邻行 (Z = ±stepZ) 的辅助标尺刻度
+        points.push(rulerX - 0.18, y, -stepZ, rulerX + 0.12, y, -stepZ);
+        points.push(rulerX - 0.18, y, stepZ, rulerX + 0.12, y, stepZ);
+      });
+
+      // 位于 Z = 0 的左右双侧垂直评分标尺立柱及底座横梁
+      points.push(rulerX, -0.22, 0, rulerX, 1.86, 0);
+      points.push(-rulerX, -0.22, 0, -rulerX, 1.86, 0);
+      points.push(rulerX, -0.22, -stepZ, rulerX, 1.76, -stepZ);
+      points.push(rulerX, -0.22, stepZ, rulerX, 1.76, stepZ);
+      points.push(rulerX - 0.36, -0.22, 0, -rulerX + 0.36, -0.22, 0);
+
+      // 远近行定位刻度
+      for (let row = -4; row <= 4; row += 1) {
+        const z = row * stepZ;
+        points.push(-halfX - 0.14, -0.22, z, -halfX + 0.14, -0.22, z);
+        points.push(halfX - 0.14, -0.22, z, halfX + 0.14, -0.22, z);
+      }
+    } else {
+      const halfWidth = Math.max(
+        8,
+        (this.laneCount * COLUMN_SPACING) / 2 + 2.4
+      );
+
+      for (let lane = 0; lane < this.laneCount; lane += 1) {
+        const x = this.laneX(lane);
+        points.push(x, -0.15, -21, x, -0.15, 21);
+      }
+
+      for (let row = -24; row <= 24; row += 1) {
+        const z = row * ROW_SPACING;
+        points.push(-halfWidth, -0.15, z, halfWidth, -0.15, z);
+      }
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
-
-    this.registrationLines = new THREE.LineSegments(
-      geometry,
-      new THREE.LineBasicMaterial({
-        color: 0xc6beb2,
-        transparent: true,
-        opacity: 0.22
-      })
+    geometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(points, 3)
     );
+
+    const dashUniforms = {
+      uDashOffset: { value: 0 }
+    };
+
+    const lineMaterial = new THREE.LineDashedMaterial({
+      color: this.lensMode === "highscore" ? 0xb59663 : 0xc6beb2,
+      transparent: true,
+      opacity: this.lensMode === "highscore" ? 0.36 : 0.22,
+      dashSize: this.lensMode === "highscore" ? 0.24 : 0.22,
+      gapSize: this.lensMode === "highscore" ? 0.88 : 0.82,
+      scale: 1
+    });
+
+    lineMaterial.onBeforeCompile = (shader) => {
+      shader.uniforms.uDashOffset = dashUniforms.uDashOffset;
+      shader.fragmentShader = `uniform float uDashOffset;\n${shader.fragmentShader}`.replace(
+        "mod( vLineDistance, totalSize )",
+        "mod( vLineDistance + uDashOffset, totalSize )"
+      );
+    };
+
+    this.registrationLines = new THREE.LineSegments(geometry, lineMaterial);
+    this.registrationLines.computeLineDistances();
+    this.registrationLines.userData.baseOpacity = lineMaterial.opacity;
+    this.registrationLines.userData.phase = this.lensMode === "highscore" ? 0.42 : 0;
+    this.registrationLines.userData.dashUniforms = dashUniforms;
+
+    // 高分精选态：在中央焦点平面 (Z = 0) 左侧标尺立柱旁挂载四级实体评级铭牌，让“高度代表分数”一目了然
+    if (this.lensMode === "highscore") {
+      const tierPlaques = [];
+      const plaqueGeo = new THREE.PlaneGeometry(1.12, 0.298);
+      tierHeights.forEach((y, tierIdx) => {
+        const tex = drawTierPlaqueTexture(tierIdx);
+        const mat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          opacity: 0.82,
+          depthWrite: false
+        });
+        const mesh = new THREE.Mesh(plaqueGeo, mat);
+        mesh.position.set(-2.62, y + 0.04, 0);
+        mesh.rotation.x = -0.14;
+        this.registrationLines.add(mesh);
+        tierPlaques.push({ mesh, mat, tierIdx, baseY: y + 0.04 });
+      });
+      this.registrationLines.userData.tierPlaques = tierPlaques;
+    }
+
     this.archiveGroup.add(this.registrationLines);
+  }
+
+  updateRegistrationLines() {
+    const lines = this.registrationLines;
+    const material = lines?.material;
+    if (!lines || !material) return;
+
+    const reduced = this.settings.reducedMotion;
+    const scrollEnergy = clamp(
+      Math.abs(this.rail.velocity) / ROW_SPACING,
+      0,
+      2
+    );
+
+    const timeFlow = reduced ? 0 : this.clock * 0.38;
+    const scrollFlow = this.rail.value * 0.26;
+    const offsetValue = -timeFlow - scrollFlow - (lines.userData.phase ?? 0);
+
+    if (lines.userData.dashUniforms?.uDashOffset) {
+      lines.userData.dashUniforms.uDashOffset.value = offsetValue;
+    }
+    material.dashOffset = offsetValue;
+
+    const fade = this.lensFade?.value ?? 1;
+    const baseOpacity = lines.userData.baseOpacity ?? (this.lensMode === "highscore" ? 0.36 : 0.22);
+    material.opacity = (baseOpacity + scrollEnergy * 0.06) * fade;
+
+    // 高分模式下同步高亮当前选中作品对应的评分展阶标尺铭牌
+    const tierPlaques = lines.userData.tierPlaques;
+    if (Array.isArray(tierPlaques)) {
+      const activeTier =
+        this.selectedCard?.item?.slotType === "anime"
+          ? this.getScoreTier(this.selectedCard.item)
+          : -1;
+      tierPlaques.forEach((entry) => {
+        const isCurrentTier = entry.tierIdx === activeTier;
+        entry.mat.opacity = (isCurrentTier ? 0.98 : 0.62) * fade;
+        const s = isCurrentTier ? 1.08 : 0.96;
+        entry.mesh.scale.setScalar(s);
+      });
+    }
+
+    // 让基准尺随档案阵列产生轻微的纸面视差
+    lines.position.z = Math.sin(this.rail.value * 0.16) * 0.065;
   }
 
   applyQuality() {
@@ -713,47 +1027,303 @@ class Dashboard3DSpace {
     return `${lane}:anime:${itemId(item)}:${item.laneBadge || ""}:${item.curatedBadge || ""}:${item.personalScore ?? ""}:${item.watchedEpisodes ?? ""}:${item.state || ""}:${this.multiLaneItemIds.has(itemId(item)) ? 1 : 0}`;
   }
 
-  buildPool() {
+  installFolioOptics(group) {
+    const data = group?.userData;
+    if (!data) return;
+
+    const material = data.posterMaterial;
+    if (material && !data.opticalUniforms) {
+      const uniforms = {
+        uOpticalBlur: { value: 0 },
+        uOpticalAlpha: { value: 1 }
+      };
+
+      material.transparent = true;
+
+      material.onBeforeCompile = (shader) => {
+        shader.uniforms.uOpticalBlur = uniforms.uOpticalBlur;
+        shader.uniforms.uOpticalAlpha = uniforms.uOpticalAlpha;
+
+        shader.fragmentShader = `
+          uniform float uOpticalBlur;
+          uniform float uOpticalAlpha;
+        ${shader.fragmentShader}`;
+
+        const decodeTexel = shader.fragmentShader.includes("mapTexelToLinear")
+          ? "sampledDiffuseColor = mapTexelToLinear(sampledDiffuseColor);"
+          : "";
+
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <map_fragment>",
+          `
+          #ifdef USE_MAP
+            vec2 stepA = vec2(0.86, 0.50) * uOpticalBlur;
+            vec2 stepB = vec2(-0.50, 0.86) * uOpticalBlur;
+
+            vec4 sampledDiffuseColor =
+              texture2D(map, vMapUv) * 0.24 +
+              texture2D(map, vMapUv + stepA) * 0.12 +
+              texture2D(map, vMapUv - stepA) * 0.12 +
+              texture2D(map, vMapUv + stepB) * 0.12 +
+              texture2D(map, vMapUv - stepB) * 0.12 +
+              texture2D(map, vMapUv + stepA * 1.95) * 0.07 +
+              texture2D(map, vMapUv - stepA * 1.95) * 0.07 +
+              texture2D(map, vMapUv + stepB * 1.95) * 0.07 +
+              texture2D(map, vMapUv - stepB * 1.95) * 0.07;
+
+            ${decodeTexel}
+            diffuseColor *= sampledDiffuseColor;
+          #endif
+          diffuseColor.a *= uOpticalAlpha;
+          `
+        );
+      };
+
+      material.needsUpdate = true;
+      data.opticalUniforms = uniforms;
+    }
+
+    const fadeMaterials = new Set();
+    group.traverse((node) => {
+      const list = Array.isArray(node.material) ? node.material : [node.material];
+      list.filter(Boolean).forEach((entry) => {
+        entry.transparent = true;
+        fadeMaterials.add(entry);
+      });
+    });
+
+    data.opticalFadeMaterials = Array.from(fadeMaterials);
+  }
+
+  updateFolioOptics(card, reveal, motionBlur, presence = 1, explicitFarBlur = null) {
+    const data = card?.group?.userData;
+    if (!data) return;
+
+    const transitionAlpha = this.lensFade?.value ?? 1;
+    const normalizedPresence = clamp(presence, 0, 1);
+    const alpha = clamp(
+      reveal * normalizedPresence * transitionAlpha,
+      0,
+      1
+    );
+
+    const shouldWriteDepth = alpha > 0.78;
+
+    if (data.opticalUniforms) {
+      const farBlur = explicitFarBlur !== null
+        ? clamp(explicitFarBlur, 0, 1)
+        : 1 - reveal;
+      const recessBlur = 1 - normalizedPresence;
+
+      const textureBlur = this.settings.highQuality
+        ? clamp(
+          farBlur * 0.0085 + recessBlur * 0.0082 + motionBlur * 0.0056,
+          0,
+          0.018
+        )
+        : 0;
+
+      data.opticalUniforms.uOpticalBlur.value = textureBlur;
+      data.opticalUniforms.uOpticalAlpha.value = alpha;
+    }
+
+    if (data.posterMaterial) {
+      const qualityBoost = clamp(0.94 + (card.quality?.value || 0) * 0.08, 0.94, 1.0);
+      const brightness = qualityBoost * (0.74 + normalizedPresence * 0.26);
+      data.posterMaterial.color.setScalar(brightness);
+      data.posterMaterial.depthWrite = shouldWriteDepth;
+    }
+
+    data.opticalFadeMaterials?.forEach((material) => {
+      if (material === data.posterMaterial) {
+        material.depthWrite = shouldWriteDepth;
+        return;
+      }
+
+      if (material === data.coverMaterial) {
+        material.depthWrite = false;
+        material.opacity = (data.coverBaseOpacity ?? 0.05) * alpha;
+        return;
+      }
+
+      material.depthWrite = shouldWriteDepth;
+      material.opacity = alpha;
+    });
+
+    card.group.visible = alpha > 0.012;
+  }
+
+  createSinglePoolCard(lane, slotRow) {
+    const item = this.laneItem(lane, slotRow);
+    const card = {
+      lane,
+      slotRow,
+      logicalRow: slotRow,
+      item,
+      itemId: itemId(item),
+      renderKey: this.cardRenderKey(lane, slotRow, item),
+      group: buildCelFolio(item, { slotType: item.slotType }),
+      lift: spring(0),
+      angle: spring(0),
+      quality: spring(0),
+      hover: spring(0),
+      valley: BASE_VALLEY.clone(),
+      targetValley: BASE_VALLEY.clone()
+    };
+
+    this.installFolioOptics(card.group);
+    this.cards.push(card);
+    this.archiveGroup.add(card.group);
+    this.loadCover(card);
+    return card;
+  }
+
+  compileSceneShaders() {
+    if (this.shadersCompiled || !this.renderer || !this.scene || !this.camera) return;
+    try {
+      if (typeof this.renderer.compile === "function") {
+        this.renderer.compile(this.scene, this.camera);
+      }
+      this.shadersCompiled = true;
+    } catch (_) {
+      this.shadersCompiled = true;
+    }
+  }
+
+  updateBootTelemetryUI(progressOverride = null) {
+    const total = this.hydrationTotal || POOL_ROWS * this.laneCount || 68;
+    const done = Math.min(total, this.hydrationDone || this.cards.length || 0);
+    const ratio =
+      progressOverride !== null
+        ? clamp(progressOverride, 0.03, 1)
+        : total > 0
+        ? clamp(done / total, 0.03, 1)
+        : 1;
+
+    if (this.bootRuleElement) {
+      this.bootRuleElement.style.transform = `scaleX(${ratio.toFixed(4)})`;
+    }
+    if (this.bootTelemetryElement) {
+      const doneStr = String(done).padStart(2, "0");
+      const totalStr = String(total).padStart(2, "0");
+      this.bootTelemetryElement.textContent =
+        done >= total && this.shadersCompiled
+          ? `OPTICAL STAGE READY · ${totalStr} / ${totalStr} CEL FOLIOS`
+          : `HYDRATING CEL FOLIOS · ${doneStr} / ${totalStr}`;
+    }
+  }
+
+  stepHydration = () => {
+    this.hydrationRafId = null;
+    if (this.isDestroyed) return;
+
+    const sliceStart = performance.now();
+    const budgetMs = 6.5;
+    let processedInSlice = 0;
+
+    while (this.hydrationQueue.length > 0) {
+      const slot = this.hydrationQueue.shift();
+      this.createSinglePoolCard(slot.lane, slot.slotRow);
+      this.hydrationDone += 1;
+      processedInSlice += 1;
+
+      if (
+        processedInSlice >= 3 &&
+        (processedInSlice >= 8 || performance.now() - sliceStart >= budgetMs)
+      ) {
+        break;
+      }
+    }
+
+    this.updateBootTelemetryUI();
+    this.wake();
+
+    if (this.hydrationQueue.length > 0) {
+      this.hydrationRafId = requestAnimationFrame(this.stepHydration);
+    } else {
+      this.hydrationComplete = true;
+      this.remapPool(true, false);
+      this.compileSceneShaders();
+      this.selectCurrent(false);
+      this.updateBootTelemetryUI(1);
+      this.wake();
+    }
+  };
+
+  flushHydrationNow() {
+    if (this.hydrationRafId) {
+      cancelAnimationFrame(this.hydrationRafId);
+      this.hydrationRafId = null;
+    }
+    while (this.hydrationQueue && this.hydrationQueue.length > 0) {
+      const slot = this.hydrationQueue.shift();
+      this.createSinglePoolCard(slot.lane, slot.slotRow);
+      this.hydrationDone += 1;
+    }
+    if (!this.hydrationComplete) {
+      this.hydrationComplete = true;
+      this.remapPool(true, false);
+      this.compileSceneShaders();
+      this.updateBootTelemetryUI(1);
+    }
+  }
+
+  buildPool(options = {}) {
+    const asyncHydrate = Boolean(options && options.asyncHydrate);
+    if (this.hydrationRafId) {
+      cancelAnimationFrame(this.hydrationRafId);
+      this.hydrationRafId = null;
+    }
+
     this.cards.forEach((card) => {
       card.group?.parent?.remove(card.group);
       this.disposeObject(card.group);
     });
     this.cards = [];
+    this.shadersCompiled = false;
 
+    const slots = [];
     for (let slotRow = -HALF_ROWS; slotRow <= HALF_ROWS; slotRow += 1) {
       for (let lane = 0; lane < this.laneCount; lane += 1) {
-        const item = this.laneItem(lane, slotRow);
-        const card = {
-          lane,
-          slotRow,
-          logicalRow: slotRow,
-          item,
-          itemId: itemId(item),
-          renderKey: this.cardRenderKey(lane, slotRow, item),
-          group: buildCelFolio(item, { slotType: item.slotType }),
-          lift: spring(0),
-          angle: spring(0),
-          quality: spring(0),
-          hover: spring(0),
-          valley: BASE_VALLEY.clone(),
-          targetValley: BASE_VALLEY.clone()
-        };
-
-        this.cards.push(card);
-        this.archiveGroup.add(card.group);
-        this.loadCover(card);
+        slots.push({ lane, slotRow });
       }
     }
+    // 按离中心焦点的距离由近及远排序，确保第 0 帧优先建档中心焦点槽位
+    slots.sort((a, b) => Math.abs(a.slotRow) - Math.abs(b.slotRow) || a.lane - b.lane);
 
-    this.remapPool(true, false);
+    this.hydrationQueue = slots;
+    this.hydrationTotal = slots.length;
+    this.hydrationDone = 0;
+    this.hydrationComplete = false;
+
+    if (!asyncHydrate) {
+      this.flushHydrationNow();
+      return;
+    }
+
+    // 第 0 帧仅同步构建中心焦点的前 4 个槽位（耗时 < 2ms），其余 64 个封套交由 rAF 分帧流式建档
+    const initialSyncCount = Math.min(this.laneCount, this.hydrationQueue.length);
+    for (let i = 0; i < initialSyncCount; i += 1) {
+      const slot = this.hydrationQueue.shift();
+      this.createSinglePoolCard(slot.lane, slot.slotRow);
+      this.hydrationDone += 1;
+    }
+
+    this.updateBootTelemetryUI();
+    if (this.hydrationQueue.length > 0) {
+      this.hydrationRafId = requestAnimationFrame(this.stepHydration);
+    } else {
+      this.flushHydrationNow();
+    }
   }
 
   rebuildPoolAndLines() {
+    this.flushHydrationNow();
     const prevCount = this.cards.length ? Math.round(this.cards.length / POOL_ROWS) : 0;
     this.makeLanes();
     this.addRegistrationLines();
     if (prevCount !== this.laneCount) {
-      this.buildPool();
+      this.buildPool({ asyncHydrate: false });
     } else {
       this.remapPool(true, true);
     }
@@ -778,6 +1348,7 @@ class Dashboard3DSpace {
     } else {
       updateCelFolio(card.group, item, { slotType: item.slotType });
     }
+    this.installFolioOptics(card.group);
     this.loadCover(card);
   }
 
@@ -1133,7 +1704,12 @@ class Dashboard3DSpace {
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
     const visibleAnimeGroups = this.cards
-      .filter((c) => c.group.visible && c.item.slotType === "anime")
+      .filter(
+        (c) =>
+          c.group.visible &&
+          c.item.slotType === "anime" &&
+          (this.lensMode !== "highscore" || c.lane === this.focusLane)
+      )
       .map((c) => c.group);
 
     const hit = this.raycaster.intersectObjects(
@@ -1260,7 +1836,12 @@ class Dashboard3DSpace {
 
       // 3. 检测是否点击了背景中另一张真实动画档案（slotType === "anime"）
       const visibleCardGroups = this.cards
-        .filter((card) => card.group.visible && card.item.slotType === "anime")
+        .filter(
+          (card) =>
+            card.group.visible &&
+            card.item.slotType === "anime" &&
+            (this.lensMode !== "highscore" || card.lane === this.focusLane)
+        )
         .map((card) => card.group);
 
       const hitCard = this.raycaster.intersectObjects(visibleCardGroups, true)[0];
@@ -1376,6 +1957,20 @@ class Dashboard3DSpace {
         diag.hitType = "array-blank";
         diag.actionTaken = "noop";
       }
+      return;
+    }
+
+    if (this.lensMode === "highscore" && card.lane !== this.focusLane) {
+      if (diag) {
+        diag.hitType = "recessed-lane-card";
+        diag.actionTaken = `switch-curation-lane:${card.lane}`;
+      }
+      this.focusLane = card.lane;
+      this.focusRow = this.laneSelections[card.lane] || 0;
+      this.ensureFocusRowInPoolWindow();
+      this.selectCurrent(true);
+      this.audio.cue("tick");
+      this.wake();
       return;
     }
 
@@ -1587,6 +2182,7 @@ class Dashboard3DSpace {
     group.userData.folioTiltGroup.rotation.x =
       sourceCard?.group?.userData?.folioTiltGroup?.rotation?.x ?? -0.2;
     this.archiveGroup.add(group);
+    this.installFolioOptics(group);
 
     // 明确区分：slotPos 为源池卡实时阵列槽位位置，lift 仅代表相对槽位的额外升起量（从 0 起步，归位至 0 交接）
     const detail = {
@@ -1692,6 +2288,7 @@ class Dashboard3DSpace {
   }
 
   move(laneDelta, rowDelta) {
+    if (!this.hydrationComplete) this.flushHydrationNow();
     if (this.spaceState === "detail" || this.spaceState === "entering-detail") {
       this.closeNoteSheet(true);
       this.queueDetailOutgoing();
@@ -1754,6 +2351,7 @@ class Dashboard3DSpace {
   }
 
   enterDetail() {
+    if (!this.hydrationComplete) this.flushHydrationNow();
     if (!this.detailFolio) {
       if (!this.selectedCard || this.selectedCard.item.slotType !== "anime") return;
       this.createDetailFolio(this.selectedCard.item, this.selectedCard);
@@ -2383,6 +2981,8 @@ class Dashboard3DSpace {
   }
 
   toggleLensMode() {
+    if (this.lensTransition) return;
+
     if (this.spaceState === "detail" || this.spaceState === "entering-detail") {
       this.closeNoteSheet(true);
       this.queueDetailOutgoing();
@@ -2391,16 +2991,54 @@ class Dashboard3DSpace {
       this.detailElement.classList.remove("is-visible");
     }
 
-    this.lensMode = this.lensMode === "highscore" ? "status" : "highscore";
-    this.root.dataset.lensMode = this.lensMode;
-    this.focusLane = 0;
-    this.focusRow = 0;
-    this.rail.value = 0;
-    this.rail.velocity = 0;
-    this.rebuildPoolAndLines();
-    this.updateToolbar();
+    this.lensTransition = {
+      phase: "conceal",
+      targetMode: this.lensMode === "highscore" ? "status" : "highscore"
+    };
+
     this.audio.cue("tick");
     this.wake();
+  }
+
+  updateLensTransition(dt) {
+    const transition = this.lensTransition;
+    if (!transition) return;
+
+    const reduced = this.settings.reducedMotion;
+    const rate = reduced ? 35 : 6.8;
+
+    if (transition.phase === "conceal") {
+      damp(this.lensFade, 0, rate, dt);
+
+      if (this.lensFade.value < 0.025) {
+        this.lensMode = transition.targetMode;
+        this.root.dataset.lensMode = this.lensMode;
+
+        this.focusLane = 0;
+        this.focusRow = 0;
+        this.rail.value = 0;
+        this.rail.velocity = 0;
+        this.ridgeRow.value = 0;
+        this.ridgeRow.velocity = 0;
+        this.ridgeLane.value = 0;
+        this.ridgeLane.velocity = 0;
+
+        this.rebuildPoolAndLines();
+        this.updateToolbar();
+
+        transition.phase = "reveal";
+      }
+
+      return;
+    }
+
+    damp(this.lensFade, 1, rate, dt);
+
+    if (this.lensFade.value > 0.995) {
+      this.lensFade.value = 1;
+      this.lensFade.velocity = 0;
+      this.lensTransition = null;
+    }
   }
 
   async toggleAudio() {
@@ -2501,6 +3139,8 @@ class Dashboard3DSpace {
       await this.saveSettings();
       if (this.lensMode !== "status") {
         this.lensMode = "status";
+        this.lensFade = spring(1);
+        this.lensTransition = null;
         this.root.dataset.lensMode = "status";
       }
       this.rebuildPoolAndLines();
@@ -2754,6 +3394,8 @@ class Dashboard3DSpace {
     this.clearTimers(this.bootTimers);
     this.bootElement?.remove();
     this.bootElement = null;
+    this.bootRuleElement = null;
+    this.bootTelemetryElement = null;
     this.bootMode = this.settings.bootMode;
     this.bootStartedAt = performance.now();
     this.bootDone = false;
@@ -2777,11 +3419,21 @@ class Dashboard3DSpace {
     this.spaceState = "boot";
     this.root.dataset.spaceState = "boot";
     this.ui.style.opacity = "0";
+    if (this.archiveGroup && !this.settings.reducedMotion) {
+      this.archiveGroup.position.z = this.bootMode === "full" ? -14 : -11.5;
+    }
 
     this.bootElement = this.el(this.root, "section", "atelier-boot");
 
     const center = this.el(this.bootElement, "div", "boot-center");
-    this.el(center, "div", "boot-rule");
+    const pegBar = this.el(center, "div", "boot-pegbar");
+    this.el(pegBar, "span", "boot-peg-hole");
+    this.el(pegBar, "span", "boot-peg-slot");
+    this.el(pegBar, "span", "boot-peg-hole");
+
+    const ruleTrack = this.el(center, "div", "boot-rule-track");
+    this.bootRuleElement = this.el(ruleTrack, "div", "boot-rule");
+
     this.el(
       center,
       "div",
@@ -2789,6 +3441,15 @@ class Dashboard3DSpace {
       this.bootMode === "full"
         ? `白昼原画室 · 已收录动画档案 ${this.items.length} 部`
         : "ATELIER CEL / 原画分镜台就位"
+    );
+
+    const totalSlots = this.hydrationTotal || POOL_ROWS * this.laneCount || 68;
+    const initDone = this.hydrationComplete ? totalSlots : this.hydrationDone || 0;
+    this.bootTelemetryElement = this.el(
+      center,
+      "div",
+      "boot-telemetry",
+      `HYDRATING CEL FOLIOS · ${String(initDone).padStart(2, "0")} / ${String(totalSlots).padStart(2, "0")}`
     );
 
     const skip = this.action(
@@ -2799,33 +3460,43 @@ class Dashboard3DSpace {
     );
 
     skip.className = "atelier-btn boot-skip";
+    this.wake();
   }
 
   finishBoot() {
     if (this.bootDone) return;
 
+    this.flushHydrationNow();
     this.bootDone = true;
     this.spaceState = "array";
     this.root.dataset.spaceState = "array";
+    if (this.bootRuleElement) {
+      this.bootRuleElement.style.transform = "scaleX(1)";
+    }
     this.bootElement?.classList.add("is-hidden");
 
-    this.ui.style.transition = "opacity .45s ease";
+    this.ui.style.transition = "opacity .48s cubic-bezier(.22,1,.36,1)";
     this.ui.style.opacity = "1";
     this.ui.style.pointerEvents = "none";
 
     if (this.settings.reducedMotion) {
       this.archiveGroup.position.z = 0;
+    } else if (Math.abs(this.archiveGroup.position.z) < 1.2) {
+      // 确保揭幕瞬间三维封套阵列始终带有优雅的景深推进阻尼收束感
+      this.archiveGroup.position.z = -4.8;
     }
 
     this.schedule(() => {
       this.bootElement?.remove();
       this.bootElement = null;
+      this.bootRuleElement = null;
+      this.bootTelemetryElement = null;
       this.ui.style.transition = "opacity .45s ease";
       this.ui.style.opacity = "1";
       this.ui.style.pointerEvents = "none";
       this.selectCurrent(true);
       this.wake();
-    }, 520, this.bootTimers);
+    }, 560, this.bootTimers);
 
     this.wake();
   }
@@ -2835,29 +3506,55 @@ class Dashboard3DSpace {
 
     const elapsed = (now - this.bootStartedAt) / 1000;
     const full = this.bootMode === "full";
-    const duration = full ? 6.8 : 3.2;
+    const duration = full ? 3.2 : 1.35;
+
+    const total = this.hydrationTotal || POOL_ROWS * this.laneCount || 68;
+    const done = this.hydrationComplete ? total : this.hydrationDone || this.cards.length || 0;
+    const hydrationProgress = total > 0 ? clamp(done / total, 0.04, 1) : 1;
+    const timeProgress = clamp(elapsed / Math.max(0.45, duration * 0.82), 0.04, 1);
+    const combinedProgress = this.hydrationComplete
+      ? Math.max(hydrationProgress * 0.65, timeProgress)
+      : Math.min(0.94, hydrationProgress * 0.85 + timeProgress * 0.15);
+
+    if (this.bootRuleElement) {
+      this.bootRuleElement.style.transform = `scaleX(${combinedProgress.toFixed(4)})`;
+    }
+    if (this.bootTelemetryElement) {
+      const displayCount = this.hydrationComplete
+        ? Math.min(total, Math.max(done, Math.round(combinedProgress * total)))
+        : done;
+      const doneStr = String(displayCount).padStart(2, "0");
+      const totalStr = String(total).padStart(2, "0");
+      this.bootTelemetryElement.textContent =
+        combinedProgress >= 0.99 && this.hydrationComplete
+          ? `OPTICAL STAGE READY · ${totalStr} / ${totalStr} CEL FOLIOS`
+          : `HYDRATING CEL FOLIOS · ${doneStr} / ${totalStr}`;
+    }
 
     if (full) {
-      if (elapsed < 1.6) {
+      if (elapsed < 0.7) {
         this.archiveGroup.position.z = -14;
-      } else if (elapsed < 3.2) {
-        this.archiveGroup.position.z = -14 * (1 - smooth((elapsed - 1.6) / 1.6));
+      } else if (elapsed < 2.6) {
+        this.archiveGroup.position.z = -14 * (1 - smooth((elapsed - 0.7) / 1.9));
       } else {
         this.archiveGroup.position.z = 0;
       }
-    } else if (elapsed < 0.6) {
-      this.archiveGroup.position.z = -12;
-    } else if (elapsed < 2.2) {
-      this.archiveGroup.position.z = -12 * (1 - smooth((elapsed - 0.6) / 1.6));
+    } else if (elapsed < 0.25) {
+      this.archiveGroup.position.z = -11.5;
+    } else if (elapsed < 1.25) {
+      this.archiveGroup.position.z = -11.5 * (1 - smooth((elapsed - 0.25) / 1.0));
     } else {
       this.archiveGroup.position.z = 0;
     }
 
-    if (elapsed >= duration) this.finishBoot();
+    if (this.hydrationComplete && elapsed >= duration) {
+      this.finishBoot();
+    }
   }
 
   getSlotTargetPose(entry) {
     const card = entry?.sourceCard;
+
     if (card && card.group) {
       return {
         position: card.group.position,
@@ -2870,26 +3567,55 @@ class Dashboard3DSpace {
 
     const lane = entry?.lane ?? 0;
     const logicalRow = entry?.logicalRow ?? 0;
-    const curatedBoost = this.lensMode === "highscore" ? 0.16 : 0;
+    const item = entry?.item || this.laneItem(lane, logicalRow);
     const isFocused = lane === this.focusLane && logicalRow === this.focusRow;
+
+    if (this.lensMode === "highscore") {
+      const laneWeight = this.getHighscoreLaneFocusWeight(lane);
+      const x = this.getHighscoreLaneX(lane);
+      const y =
+        this.getScoreRidgeElevation(item) +
+        (1 - laneWeight) * -1.05 +
+        (isFocused ? 0.24 : 0);
+
+      const z = this.getHighscoreCardZ(logicalRow);
+
+      return {
+        position: new THREE.Vector3(x, y, z),
+        rotationY: 0,
+        tiltX: -0.2 + this.getScoreTiltOffset(item),
+        quality: isFocused ? 0.46 : this.getScoreNormalized(item) * 0.12,
+        valley: BASE_VALLEY
+      };
+    }
+
     const dRow = logicalRow - this.ridgeRow.value;
     const dLane = lane - this.ridgeLane.value;
-    const ridge = (0.72 + curatedBoost) * bell(dRow, 2.8) * (0.3 + 0.7 * bell(dLane, 1.15));
+
+    const ridge =
+      0.72 * bell(dRow, 2.8) * (0.3 + 0.7 * bell(dLane, 1.15));
+
     let apertureY = 0;
     let apertureZ = 0;
 
-    if (Math.abs(dLane) < 0.8 && dRow < -0.1 && dRow > -2.3) {
+    if (
+      Math.abs(dLane) < 0.8 &&
+      dRow < -0.1 &&
+      dRow > -2.3
+    ) {
       apertureY = -0.28 * bell(dRow + 1.3, 0.8);
       apertureZ = -0.32 * ROW_SPACING * bell(dRow + 1.3, 0.8);
     }
 
-    const stagger = (lane % 2) * 0.28;
-    const x = this.laneX(lane);
-    const y = (isFocused ? 0.62 + curatedBoost : 0) + ridge + apertureY;
-    const z = -(logicalRow * ROW_SPACING) + this.rail.value + stagger + apertureZ;
-
     return {
-      position: new THREE.Vector3(x, y, z),
+      position: new THREE.Vector3(
+        this.laneX(lane),
+        (isFocused ? 0.62 : 0) + ridge + apertureY,
+        -(logicalRow * ROW_SPACING) +
+          this.rail.value +
+          (lane % 2) * 0.28 +
+          apertureZ
+      ),
       rotationY: 0,
       tiltX: -0.2,
       quality: isFocused ? 0.35 : 0,
@@ -2912,6 +3638,7 @@ class Dashboard3DSpace {
         reduced ? 35 : 7.5,
         dt
       );
+
       if (Math.abs(this.archiveGroup.position.z) < 0.001) {
         this.archiveGroup.position.z = 0;
       }
@@ -2919,82 +3646,231 @@ class Dashboard3DSpace {
 
     const center = Math.round(this.rail.value / ROW_SPACING);
 
-    if (this.lastPoolCenter === undefined || center !== this.lastPoolCenter) {
+    if (
+      this.hydrationComplete &&
+      (this.lastPoolCenter === undefined || center !== this.lastPoolCenter)
+    ) {
       this.lastPoolCenter = center;
       this.remapPool(false, false);
     }
 
     this.paletteColor.lerp(this.targetPalette, clamp(dt * 3.5, 0, 1));
-    const curatedBoost = this.lensMode === "highscore" ? 0.16 : 0;
+
+    const isHighscore = this.lensMode === "highscore";
+    const visibleRow = this.rail.value / ROW_SPACING;
+    const railSpeed = clamp(
+      Math.abs(this.rail.velocity) / ROW_SPACING,
+      0,
+      1.6
+    );
 
     this.cards.forEach((card) => {
       const blank = card.item.slotType === "blank";
       const divider = card.item.slotType === "divider";
       const active = card === this.selectedCard;
-      const dRow = card.logicalRow - this.ridgeRow.value;
-      const dLane = card.lane - this.ridgeLane.value;
 
-      const ridge = blank
-        ? 0
-        : (divider ? 0.25 : 0.72 + curatedBoost) * bell(dRow, 2.8) * (0.3 + 0.7 * bell(dLane, 1.15));
+      const laneWeight = isHighscore
+        ? this.getHighscoreLaneFocusWeight(card.lane)
+        : 1;
 
-      let apertureY = 0;
-      let apertureZ = 0;
+      const scoreNorm = isHighscore
+        ? this.getScoreNormalized(card.item)
+        : 0;
 
-      if (!blank && Math.abs(dLane) < 0.8 && dRow < -0.1 && dRow > -2.3) {
-        apertureY = -0.28 * bell(dRow + 1.3, 0.8);
-        apertureZ = -0.32 * ROW_SPACING * bell(dRow + 1.3, 0.8);
-      }
+      const scoreElevation = isHighscore
+        ? this.getScoreRidgeElevation(card.item)
+        : 0;
+
+      const scoreTiltX = isHighscore
+        ? this.getScoreTiltOffset(card.item)
+        : 0;
 
       let ripple = 0;
       let colorWeight = active ? 0.55 : 0.1;
 
-      this.pulses.forEach((pulse) => {
-        const age = this.clock - pulse.time;
-        if (age < 0 || age > 2.6) return;
+      if (!isHighscore) {
+        this.pulses.forEach((pulse) => {
+          const age = this.clock - pulse.time;
+          if (age < 0 || age > 2.6) return;
 
-        const distance = Math.hypot(
-          card.logicalRow - pulse.row,
-          (card.lane - pulse.lane) * 1.8
-        );
+          const distance = Math.hypot(
+            card.logicalRow - pulse.row,
+            (card.lane - pulse.lane) * 1.8
+          );
 
-        const ring = distance - age * 6.5;
-        const packet =
-          0.46 *
-          smooth(age / 0.16) *
-          Math.exp(-age * 1.15) *
-          Math.cos(ring * 0.65) *
-          bell(ring, 3) *
-          pulse.strength;
+          const ring = distance - age * 6.5;
+          const packet =
+            0.46 *
+            smooth(age / 0.16) *
+            Math.exp(-age * 1.15) *
+            Math.cos(ring * 0.65) *
+            bell(ring, 3) *
+            pulse.strength;
 
-        ripple += packet;
-        colorWeight = Math.max(colorWeight, clamp(Math.abs(packet) * 1.4, 0, 0.65));
-      });
+          ripple += packet;
+          colorWeight = Math.max(
+            colorWeight,
+            clamp(Math.abs(packet) * 1.4, 0, 0.65)
+          );
+        });
+      } else {
+        colorWeight = active ? 0.56 : 0.1 + scoreNorm * 0.16;
+      }
 
-      const targetHover = this.spaceState === "array" && card === this.hoveredCard ? 0.24 : 0;
+      const targetHover =
+        this.spaceState === "array" && card === this.hoveredCard
+          ? (isHighscore ? 0.14 : 0.24)
+          : 0;
+
       damp(card.hover, targetHover, reduced ? 35 : 9, dt);
 
-      // 无论当前处于 array 还是 detail/leaving-detail，始终同步更新选中槽位在阵列中的基准高度与品质，
-      // 确保隐藏的 sourceCard 实时持有归位交接所需的准确目标姿态
-      if (!active) {
+      if (isHighscore) {
+        damp(card.lift, active ? 0.24 : 0, rate, dt);
+        damp(
+          card.quality,
+          active ? 0.46 : scoreNorm * 0.12,
+          rate,
+          dt
+        );
+        damp(card.angle, 0, rate, dt);
+      } else if (!active) {
         damp(card.lift, 0, rate, dt);
         damp(card.quality, 0, rate, dt);
         damp(card.angle, 0, rate, dt);
       } else {
-        damp(card.lift, 0.62 + curatedBoost, rate, dt);
+        damp(card.lift, 0.62, rate, dt);
         damp(card.quality, 0.35, rate, dt);
         damp(card.angle, 0, rate, dt);
       }
 
-      card.targetValley.copy(BASE_VALLEY).lerp(
+      const baseValleyColor =
+        isHighscore && scoreNorm > 0.45
+          ? CURATED_PEAK_VALLEY
+          : BASE_VALLEY;
+
+      card.targetValley.copy(baseValleyColor).lerp(
         this.paletteColor,
         clamp(colorWeight, 0, 0.8)
       );
 
-      card.valley.lerp(card.targetValley, clamp(dt * 4.5, 0, 1));
+      card.valley.lerp(
+        card.targetValley,
+        clamp(dt * 4.5, 0, 1)
+      );
 
-      const stagger = (card.lane % 2) * 0.28;
-      const z = -(card.logicalRow * ROW_SPACING) + this.rail.value + stagger + apertureZ;
+      let x;
+      let y;
+      let z;
+      let targetScale;
+
+      if (isHighscore) {
+        const rowDistance = Math.abs(card.logicalRow - visibleRow);
+        const isCurrentLane = laneWeight > 0.86;
+
+        x = this.getHighscoreLaneX(card.lane);
+
+        const recessY = (1 - laneWeight) * -1.05;
+
+        y = scoreElevation + recessY + card.lift.value + card.hover.value;
+
+        z = this.getHighscoreCardZ(card.logicalRow);
+
+        targetScale = 0.82 + laneWeight * 0.18;
+
+        // 高分模式在屏幕可视边缘（第 1.4 行至第 3.65 行）呈现平滑渐隐，且从第 0.35 行起即开始产生可见景深柔焦
+        const visibleReveal = smooth(
+          clamp((3.65 - rowDistance) / 2.25, 0, 1)
+        );
+        const farBlur = smooth(
+          clamp((rowDistance - 0.35) / 2.35, 0, 1)
+        );
+
+        const motionBlur = reduced
+          ? 0
+          : clamp(railSpeed * 0.58, 0, 1);
+
+        const presence = isCurrentLane ? 1 : laneWeight;
+
+        card.group.position.set(x, y, z);
+        card.group.scale.setScalar(targetScale);
+        card.group.userData.folioTiltGroup.rotation.x = -0.2 + scoreTiltX;
+        card.group.rotation.y = 0;
+
+        this.applyAppearance(
+          card.group,
+          card.quality.value,
+          card.valley,
+          card
+        );
+
+        this.updateFolioOptics(
+          card,
+          visibleReveal,
+          motionBlur,
+          presence,
+          farBlur
+        );
+      } else {
+        const dRow = card.logicalRow - this.ridgeRow.value;
+        const dLane = card.lane - this.ridgeLane.value;
+
+        const ridge = blank
+          ? 0
+          : (divider ? 0.25 : 0.72) *
+            bell(dRow, 2.8) *
+            (0.3 + 0.7 * bell(dLane, 1.15));
+
+        let apertureY = 0;
+        let apertureZ = 0;
+
+        if (
+          !blank &&
+          Math.abs(dLane) < 0.8 &&
+          dRow < -0.1 &&
+          dRow > -2.3
+        ) {
+          apertureY = -0.28 * bell(dRow + 1.3, 0.8);
+          apertureZ = -0.32 * ROW_SPACING * bell(dRow + 1.3, 0.8);
+        }
+
+        x = this.laneX(card.lane);
+        y = card.lift.value + card.hover.value + ridge + apertureY + ripple;
+
+        z =
+          -(card.logicalRow * ROW_SPACING) +
+          this.rail.value +
+          (card.lane % 2) * 0.28 +
+          apertureZ;
+
+        card.group.position.set(x, y, z);
+        card.group.scale.setScalar(1);
+        card.group.userData.folioTiltGroup.rotation.x = -0.2;
+        card.group.rotation.y = card.angle.value;
+
+        this.applyAppearance(
+          card.group,
+          card.quality.value,
+          card.valley,
+          card
+        );
+
+        const poolDistance = Math.abs(
+          card.logicalRow - visibleRow
+        );
+
+        const reveal = smooth(
+          clamp((6.6 - poolDistance) / 3.2, 0, 1)
+        );
+        const farBlur = smooth(
+          clamp((poolDistance - 1.35) / 3.8, 0, 1)
+        );
+
+        const motionBlur = reduced
+          ? 0
+          : clamp(railSpeed * 0.54, 0, 1);
+
+        this.updateFolioOptics(card, reveal, motionBlur, 1, farBlur);
+      }
 
       const hiddenByActiveDetail =
         this.detailFolio?.sourceCard === card ||
@@ -3009,28 +3885,32 @@ class Dashboard3DSpace {
       const hiddenByOutgoing = this.outgoingCards.some(
         (entry) =>
           entry.sourceCard === card ||
-          (card.item.slotType === "anime" &&
+          (
+            card.item.slotType === "anime" &&
             card.itemId === entry.itemId &&
             card.lane === entry.lane &&
-            card.logicalRow === entry.logicalRow)
+            card.logicalRow === entry.logicalRow
+          )
       );
 
-      card.group.visible = !(hiddenByActiveDetail || hiddenByOutgoing);
-
-      card.group.position.set(
-        this.laneX(card.lane),
-        card.lift.value + card.hover.value + ridge + apertureY + ripple,
-        z
-      );
-
-      card.group.userData.folioTiltGroup.rotation.x = -0.2;
-      card.group.rotation.y = card.angle.value;
-      this.applyAppearance(card.group, card.quality.value, card.valley);
+      if (hiddenByActiveDetail || hiddenByOutgoing) {
+        card.group.visible = false;
+      }
     });
 
+    this.pulses = this.pulses.filter(
+      (pulse) => this.clock - pulse.time < 2.6
+    );
+  }
+
+  updateDetailAndOutgoing(dt) {
+    const reduced = this.settings.reducedMotion || this.motion.transition === false;
     this.updateDetailFolio(dt, reduced);
     this.updateOutgoing(dt, reduced);
-    this.pulses = this.pulses.filter((pulse) => this.clock - pulse.time < 2.6);
+  }
+
+  updateRecorder(dt) {
+    // 预留记录员帧同步钩子
   }
 
   completeDetailReturn(detail, slotPose) {
@@ -3046,7 +3926,8 @@ class Dashboard3DSpace {
       if (sourceCard.group.userData?.folioTiltGroup) {
         sourceCard.group.userData.folioTiltGroup.rotation.x = slotPose.tiltX;
       }
-      this.applyAppearance(sourceCard.group, sourceCard.quality.value, sourceCard.valley);
+      this.applyAppearance(sourceCard.group, sourceCard.quality.value, sourceCard.valley, sourceCard);
+      this.updateFolioOptics(sourceCard, 1, 0);
       sourceCard.group.visible = true;
     }
 
@@ -3233,7 +4114,8 @@ class Dashboard3DSpace {
             if (sourceCard.group.userData?.folioTiltGroup) {
               sourceCard.group.userData.folioTiltGroup.rotation.x = slotPose.tiltX;
             }
-            this.applyAppearance(sourceCard.group, sourceCard.quality.value, sourceCard.valley);
+            this.applyAppearance(sourceCard.group, sourceCard.quality.value, sourceCard.valley, sourceCard);
+            this.updateFolioOptics(sourceCard, 1, 0);
             sourceCard.group.visible = true;
             releasedCards.push(sourceCard);
           }
@@ -3264,28 +4146,37 @@ class Dashboard3DSpace {
     }
   }
 
-  applyAppearance(group, quality, valley) {
+  applyAppearance(group, quality, valley, card = null) {
     const data = group.userData;
     if (!data) return;
 
     // 赛璐珞清漆护膜保持极低透明度（0.05 -> 0），绝不遮挡海报或造成白雾发灰
     if (data.cover?.material) {
-      data.cover.material.opacity = 0.05 * (1 - quality);
+      const baseCoverOpacity = 0.05 * (1 - clamp(quality, 0, 1));
+      data.coverBaseOpacity = baseCoverOpacity;
+      data.cover.material.opacity = baseCoverOpacity;
     }
 
-    // 阵列态保持 0.94 的清晰显色，详情态提升至 1.0 完整明度
+    // 阵列态保持 0.94 的清晰显色，详情态与高分山峰态提升至 1.0 完整明度
     if (data.poster?.material) {
-      data.poster.material.color.setScalar(0.94 + quality * 0.06);
+      data.poster.material.color.setScalar(clamp(0.94 + quality * 0.08, 0.94, 1.0));
     }
 
     if (data.substrate?.material) {
       data.substrate.material.color.copy(valley);
     }
 
-    const frameTint = this.lensMode === "highscore" ? "#c9963b" : "#d5a85b";
+    const isHigh = this.lensMode === "highscore";
+    if (this.registrationLines?.material?.color) {
+      this.registrationLines.material.color.setHex(isHigh ? 0xb59663 : 0xc6beb2);
+      this.registrationLines.userData.baseOpacity = isHigh ? 0.32 : 0.22;
+    }
+    const scoreNorm = isHigh && card ? this.getScoreNormalized(card.item) : 0;
+    const frameTint = isHigh ? (scoreNorm >= 0.65 ? "#c88d28" : "#c9963b") : "#d5a85b";
+    const brassMix = isHigh ? clamp(0.5 + scoreNorm * 0.28, 0.48, 0.78) : 0.48;
     data.frame?.children?.forEach((part) => {
       if (part.material?.color) {
-        part.material.color.copy(valley).lerp(new THREE.Color(frameTint), 0.48);
+        part.material.color.copy(valley).lerp(new THREE.Color(frameTint), brassMix);
       }
     });
   }
@@ -3310,8 +4201,19 @@ class Dashboard3DSpace {
       dt
     );
 
-    const aim = ARRAY_AIM.clone();
-    const position = ARRAY_CAMERA.clone();
+    const isHighscore = this.lensMode === "highscore";
+
+    const highscoreShot = isHighscore
+      ? this.getHighscoreCameraShot()
+      : null;
+
+    const aim = highscoreShot
+      ? highscoreShot.aim
+      : ARRAY_AIM.clone();
+
+    const position = highscoreShot
+      ? highscoreShot.position
+      : ARRAY_CAMERA.clone();
 
     if (detail) {
       const slotPose = this.getSlotTargetPose(detail);
@@ -3370,15 +4272,43 @@ class Dashboard3DSpace {
 
     // 连续平滑插值雾效距离，彻底消除原本 detailProgress > 0.3 阶跃跳变造成的全屏白闪
     const p = clamp(this.detailProgress.value, 0, 1);
-    this.scene.fog.near = THREE.MathUtils.lerp(68, 58, p);
-    this.scene.fog.far = THREE.MathUtils.lerp(138, 132, p);
+
+    if (isHighscore) {
+      this.scene.fog.near = THREE.MathUtils.lerp(44, 56, p);
+      this.scene.fog.far = THREE.MathUtils.lerp(92, 128, p);
+    } else {
+      this.scene.fog.near = THREE.MathUtils.lerp(68, 58, p);
+      this.scene.fog.far = THREE.MathUtils.lerp(138, 132, p);
+    }
   }
 
   hasMotion() {
+    if (this.lensTransition) return true;
+    if (this.lensFade && Math.abs(this.lensFade.velocity) > 0.001) return true;
+    if (!this.settings.reducedMotion && this.registrationLines) return true;
+    if (!this.hydrationComplete) return true;
     if (this.spaceState === "boot" || this.spaceState === "entering-detail" || this.spaceState === "leaving-detail") return true;
     if (this.noteSheetState === "extracting" || this.noteSheetState === "retracting") return true;
     if (this.outgoingCards.length || this.pulses.length || this.pointerDown) return true;
     if (Math.abs(this.archiveGroup.position.z) > 0.001) return true;
+
+    const highscoreShot = this.lensMode === "highscore" ? this.getHighscoreCameraShot() : null;
+    const targetCam = highscoreShot ? highscoreShot.position : ARRAY_CAMERA;
+    const targetAim = highscoreShot ? highscoreShot.aim : ARRAY_AIM;
+
+    if (
+      this.spaceState === "array" &&
+      (
+        Math.abs(this.cameraPosition.x.value - targetCam.x) > 0.01 ||
+        Math.abs(this.cameraPosition.y.value - targetCam.y) > 0.01 ||
+        Math.abs(this.cameraPosition.z.value - targetCam.z) > 0.01 ||
+        Math.abs(this.cameraAim.x.value - targetAim.x) > 0.01 ||
+        Math.abs(this.cameraAim.y.value - targetAim.y) > 0.01 ||
+        Math.abs(this.cameraAim.z.value - targetAim.z) > 0.01
+      )
+    ) {
+      return true;
+    }
 
     if (this.detailFolio) {
       if (
@@ -3437,8 +4367,12 @@ class Dashboard3DSpace {
     this.clock += dt;
 
     this.updateBoot(now);
+    this.updateLensTransition(dt);
     this.updateCards(dt);
+    this.updateDetailAndOutgoing(dt);
+    this.updateRecorder(dt);
     this.updateCamera(dt);
+    this.updateRegistrationLines();
     this.renderer.render(this.scene, this.camera);
 
     if (!this.hasMotion()) {
@@ -3465,6 +4399,8 @@ class Dashboard3DSpace {
   stopLoop() {
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = null;
+    if (this.hydrationRafId) cancelAnimationFrame(this.hydrationRafId);
+    this.hydrationRafId = null;
   }
 
   resize() {

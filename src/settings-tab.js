@@ -477,26 +477,171 @@ module.exports = function createSettingsTabClass({
   openBatchAnimeImport,
   NetabaCompareSelectModal
 }) {
+  const SETTINGS_SEARCH_SYNONYM_GROUPS = [
+    ["player", "pot", "potplayer", "mpv", "vlc", "mpc", "dandan", "dandanplay", "弹弹", "播放", "播放器", "空降", "进度", "视频", "快捷方式", "lnk", "exe", "bfq", "spbf"],
+    ["review", "手札", "手记", "观片", "吐槽", "短评", "长评", "截图", "粘贴", "附图", "时间点", "时间码", "书签", "sz", "sj", "gpsz"],
+    ["character", "角色", "典藏", "萌点", "萌娘", "百科", "身高", "标尺", "等身", "立绘", "抠图", "背景", "照片墙", "画报", "声优", "cv", "发色", "瞳色", "js", "jsdc", "md"],
+    ["roxy", "洛琪希", "看板娘", "小人", "像素", "语音", "立绘包", "高清", "压印", "泥岩", "魔导", "气泡", "台词", "lqx", "kbn", "yy"],
+    ["download", "rss", "bt", "qb", "qbittorrent", "mikan", "蜜柑", "花园", "dmhy", "nyaa", "acgrip", "磁力", "magnet", "种子", "torrent", "下载", "追番下载", "字幕组", "xz", "zfxz"],
+    ["dashboard", "3d", "2d", "档案馆", "番剧档案馆", "仪表盘", "案头", "编目台", "画廊", "年鉴", "书脊", "陈列架", "统计", "洞察", "雷达", "番季", "dag", "ybp", "bmt"],
+    ["score", "rating", "评分", "排行", "同步", "监测", "bgm", "bangumi", "netaba", "趋势", "对比", "分布", "pf", "pftb", "ph"],
+    ["path", "folder", "dir", "目录", "路径", "文件夹", "封面", "本地", "根目录", "初始化", "base", "仓库", "ml", "lj", "wjj"],
+    ["season", "季度", "新番", "排期", "清理", "视图", "年代", "年份", "jd", "xf"]
+  ];
+
+  function isFuzzySubsequence(needle, haystack) {
+    if (!needle || !haystack) return { matched: false, gapScore: 0 };
+    if (needle.length > haystack.length) return { matched: false, gapScore: 0 };
+    let nIdx = 0;
+    let firstMatchIdx = -1;
+    let lastMatchIdx = -1;
+    for (let hIdx = 0; hIdx < haystack.length && nIdx < needle.length; hIdx++) {
+      if (haystack[hIdx] === needle[nIdx]) {
+        if (firstMatchIdx === -1) firstMatchIdx = hIdx;
+        lastMatchIdx = hIdx;
+        nIdx++;
+      }
+    }
+    if (nIdx < needle.length) return { matched: false, gapScore: 0 };
+    const span = Math.max(1, lastMatchIdx - firstMatchIdx + 1);
+    const compactness = needle.length / span; // 越紧凑得分越高 (0..1]
+    return { matched: true, gapScore: Math.round(compactness * 42) };
+  }
+
+  function scoreSettingFuzzyMatch(rawQuery, itemRecord) {
+    const cleanQ = String(rawQuery || "").trim().toLowerCase();
+    if (!cleanQ) return { matched: true, score: 100, matchedTokens: [] };
+
+    const tokens = cleanQ.split(/\s+/).filter(Boolean);
+    const nameLower = itemRecord.nameLower || "";
+    const descLower = itemRecord.descLower || "";
+    const secLower = itemRecord.sectionLower || "";
+    const ctrlLower = itemRecord.ctrlLower || "";
+    const fullHaystack = itemRecord.fullHaystack || "";
+
+    let totalScore = 0;
+    const matchedTokens = [];
+
+    for (const token of tokens) {
+      let tokenScore = 0;
+
+      // 1. 直接子串命中（标题权重最高，其次章节名、控件文案、描述说明）
+      if (nameLower.includes(token)) {
+        tokenScore = Math.max(tokenScore, 110 + (nameLower.startsWith(token) ? 20 : 0));
+        matchedTokens.push(token);
+      } else if (secLower.includes(token)) {
+        tokenScore = Math.max(tokenScore, 82);
+        matchedTokens.push(token);
+      } else if (ctrlLower.includes(token)) {
+        tokenScore = Math.max(tokenScore, 70);
+        matchedTokens.push(token);
+      } else if (descLower.includes(token)) {
+        tokenScore = Math.max(tokenScore, 62);
+        matchedTokens.push(token);
+      }
+
+      // 2. 同义词 / 概念别名 / 拼音首字母扩展匹配
+      if (tokenScore === 0) {
+        for (const group of SETTINGS_SEARCH_SYNONYM_GROUPS) {
+          const hitAlias = group.some((alias) => alias.includes(token) || token.includes(alias));
+          if (hitAlias) {
+            const targetHits = group.filter((kw) => kw.length >= 2 && fullHaystack.includes(kw));
+            if (targetHits.length > 0) {
+              tokenScore = Math.max(tokenScore, 68);
+              matchedTokens.push(targetHits[0]);
+              break;
+            }
+          }
+        }
+      }
+
+      // 3. 非连续字符模糊子序列匹配（例如输入 "番档" 命中 "番剧档案馆"，输入 "自播径" 命中 "自定义视频播放器路径"）
+      if (tokenScore === 0 && token.length >= 2) {
+        const subName = isFuzzySubsequence(token, nameLower);
+        if (subName.matched && subName.gapScore >= 14) {
+          tokenScore = Math.max(tokenScore, 38 + subName.gapScore);
+          matchedTokens.push(token);
+        } else {
+          const subFull = isFuzzySubsequence(token, `${secLower} ${nameLower} ${descLower}`);
+          if (subFull.matched && subFull.gapScore >= 18) {
+            tokenScore = Math.max(tokenScore, 28 + subFull.gapScore);
+            matchedTokens.push(token);
+          }
+        }
+      }
+
+      if (tokenScore <= 0) {
+        return { matched: false, score: 0, matchedTokens: [] };
+      }
+      totalScore += tokenScore;
+    }
+
+    return { matched: true, score: totalScore, matchedTokens: Array.from(new Set(matchedTokens)) };
+  }
+
+  function ensureSettingsSpotlightStyles() {
+    if (typeof document === "undefined") return;
+    if (document.getElementById("bangumi-settings-spotlight-styles")) return;
+    const styleEl = document.createElement("style");
+    styleEl.id = "bangumi-settings-spotlight-styles";
+    styleEl.textContent = [
+      ".bgm-settings-sticky-hud{position:sticky;top:-18px;z-index:35;margin:-8px -8px 16px -8px;padding:12px 14px 10px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 92%, #f6efe3 8%);backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(28,20,12,0.09);display:flex;flex-direction:column;gap:9px;}",
+      ".bgm-settings-hud-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}",
+      ".bgm-settings-hud-brand{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}",
+      ".bgm-settings-hud-title{margin:0 !important;font-size:1.22em !important;font-weight:800 !important;color:var(--text-normal);}",
+      ".bgm-settings-hud-mode-badge{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(143,104,61,0.14);color:#8f683d;border:1px solid rgba(143,104,61,0.34);letter-spacing:0.04em;}",
+      ".bgm-settings-spotlight-capsule{position:relative;display:flex;align-items:center;flex:1 1 290px;max-width:460px;min-width:220px;}",
+      ".bgm-settings-spotlight-icon{position:absolute;left:10px;font-size:13px;color:#8f683d;pointer-events:none;}",
+      ".bgm-settings-spotlight-input{width:100% !important;padding:6px 86px 6px 30px !important;font-size:12.5px !important;border-radius:999px !important;border:1px solid color-mix(in srgb, #8f683d 38%, var(--background-modifier-border)) !important;background:var(--background-secondary) !important;color:var(--text-normal) !important;transition:all .16s ease !important;}",
+      ".bgm-settings-spotlight-input:focus{border-color:#8f683d !important;background:var(--background-primary) !important;box-shadow:0 0 0 3px rgba(143,104,61,0.18) !important;}",
+      ".bgm-settings-spotlight-meta{position:absolute;right:8px;display:inline-flex;align-items:center;gap:4px;}",
+      ".bgm-settings-spotlight-count{font-size:10.5px;font-weight:700;padding:1.5px 7px;border-radius:999px;background:color-mix(in srgb, #8f683d 14%, var(--background-primary));color:#8f683d;pointer-events:none;font-variant-numeric:tabular-nums;}",
+      ".bgm-settings-spotlight-clear{cursor:pointer;width:19px;height:19px;padding:0;border:none;border-radius:50%;background:rgba(143,104,61,0.16);color:#8f683d;font-size:12px;font-weight:800;display:none;align-items:center;justify-content:center;line-height:1;}",
+      ".bgm-settings-spotlight-clear.is-visible{display:inline-flex;}",
+      ".bgm-settings-spotlight-clear:hover{background:#8f683d;color:#fffdf9;}",
+      ".bgm-settings-compass-rail{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding-top:6px;border-top:1px dashed color-mix(in srgb, #8f683d 24%, var(--background-modifier-border));}",
+      ".bgm-settings-compass-label{font-size:10.5px;font-weight:700;color:var(--text-muted);margin-right:2px;}",
+      ".bgm-settings-compass-chip{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:2.5px 9px;font-size:11px;font-weight:600;border-radius:999px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-muted);transition:all .14s ease;}",
+      ".bgm-settings-compass-chip:hover{border-color:#8f683d;color:var(--text-normal);transform:translateY(-1px);}",
+      ".bgm-settings-compass-chip.is-active{background:linear-gradient(135deg,#8f683d,#b08450);border-color:#8f683d;color:#fffdf9;font-weight:700;box-shadow:0 2px 6px rgba(143,104,61,0.25);}",
+      ".bgm-settings-compass-chip-cnt{font-size:9.5px;opacity:0.82;font-variant-numeric:tabular-nums;}",
+      ".bgm-settings-compass-mode-btn{cursor:pointer;margin-left:auto;padding:2px 8px;font-size:10.5px;font-weight:700;border-radius:6px;border:1px dashed rgba(143,104,61,0.48);background:transparent;color:#8f683d;transition:all .14s ease;}",
+      ".bgm-settings-compass-mode-btn.is-focus-only{border-style:solid;background:rgba(143,104,61,0.14);}",
+      ".bgm-settings-search-hidden{display:none !important;}",
+      ".setting-item.is-bgm-search-match{border-left:3px solid #8f683d !important;padding-left:10px !important;background:color-mix(in srgb, #8f683d 5%, transparent);border-radius:6px;}",
+      ".bgm-setting-section-crumb{display:inline-flex;align-items:center;margin-left:7px;padding:1px 6px;font-size:10px;font-weight:700;border-radius:4px;background:rgba(143,104,61,0.14);color:#8f683d;border:1px solid rgba(143,104,61,0.3);vertical-align:middle;}",
+      "mark.bgm-setting-hit-mark{background:rgba(217,167,74,0.32);color:inherit;padding:0 2px;border-radius:3px;font-weight:700;}",
+      "@keyframes bgmSectionSpotlightPulse{0%{background:rgba(217,167,74,0.28);}100%{background:transparent;}}",
+      ".bgm-section-pulse-highlight{animation:bgmSectionSpotlightPulse 1.2s ease-out;border-radius:6px;}",
+      ".bgm-settings-empty-search{padding:18px 16px;margin:12px 0;border-radius:10px;border:1px dashed color-mix(in srgb, #8f683d 42%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 72%, #f7efe2 28%);text-align:center;display:none;flex-direction:column;align-items:center;gap:8px;}",
+      ".bgm-settings-empty-search.is-visible{display:flex;}",
+      ".bgm-settings-empty-title{font-size:13px;font-weight:700;color:var(--text-normal);}",
+      ".bgm-settings-empty-sub{font-size:11.5px;color:var(--text-muted);}",
+      ".bgm-settings-empty-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:4px;}"
+    ].join("\n");
+    document.head.appendChild(styleEl);
+  }
+
   const BangumiManagerSettingTab = class extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this._savedSpotlightQuery = "";
+    this._savedFocusSectionKey = "all";
+    this._savedFocusOnlyMode = false;
   }
   display() {
+    ensureSettingsSpotlightStyles();
     const container = this.containerEl;
     container.empty();
-    container.createEl(
-      "h2",
-      {
-        text: "Bangumi \u8FFD\u756A\u7BA1\u7406\u5668"
-      }
-    );
+    const topHudMount = container.createDiv("bgm-settings-top-hud-mount");
     if (this.plugin.settings.mode === "lazy") {
+      topHudMount.createEl("h2", {
+        text: "Bangumi \u8FFD\u756A\u7BA1\u7406\u5668"
+      });
       this.displayLazyMode(container);
     } else {
-      this.displayProfessionalMode(
-        container
-      );
+      this.displayProfessionalMode(container, topHudMount);
     }
   }
   addIntroDescription(container, text) {
@@ -545,6 +690,31 @@ module.exports = function createSettingsTabClass({
       : "动画库.base";
   }
 
+  getAutomaticCharacterNoteFolder() {
+    if (typeof this.plugin.getDefaultCharacterNoteFolder === "function") {
+      return this.plugin.getDefaultCharacterNoteFolder();
+    }
+    const noteRootFolder = this.normalizeVaultFolderPath(
+      this.plugin.settings.noteRootFolder || "动画笔记"
+    );
+    const lastSlash = noteRootFolder.lastIndexOf("/");
+    const parentDir = lastSlash > 0 ? noteRootFolder.slice(0, lastSlash) : "";
+    return parentDir ? parentDir + "/角色典藏" : "角色典藏";
+  }
+
+  async updateCharacterNoteFolder(value) {
+    const folder = this.normalizeVaultFolderPath(value);
+    const autoDefault = this.getAutomaticCharacterNoteFolder();
+    if (folder && folder !== autoDefault) {
+      this.plugin.settings.characterNoteFolder = folder;
+      this.plugin.settings.characterNoteFolderManuallySet = true;
+    } else {
+      this.plugin.settings.characterNoteFolder = autoDefault;
+      this.plugin.settings.characterNoteFolderManuallySet = false;
+    }
+    await this.plugin.saveSettings();
+  }
+
   async updateNoteRootFolder(value) {
     const noteRootFolder =
       this.normalizeVaultFolderPath(value);
@@ -566,6 +736,14 @@ module.exports = function createSettingsTabClass({
     ) {
       this.plugin.settings.dashboardPath =
         this.plugin.getDefaultDashboardPath();
+    }
+
+    if (
+      this.plugin.settings.characterNoteFolderManuallySet !==
+      true
+    ) {
+      this.plugin.settings.characterNoteFolder =
+        this.getAutomaticCharacterNoteFolder();
     }
 
     this.plugin.settings.baseFilePath =
@@ -611,6 +789,27 @@ module.exports = function createSettingsTabClass({
         text.onChange(async (value) => {
           await this.updateNoteRootFolder(value);
         });
+      });
+  }
+
+  addCharacterNoteFolderSetting(container) {
+    new Setting(container)
+      .setName("角色典藏笔记目录")
+      .setDesc(
+        "生成角色典藏 Markdown 笔记的仓库保存位置。默认与「动画笔记目录」处于同一层级（并列文件夹，如：角色典藏），留空则自动恢复为与动画笔记目录同级的默认路径。"
+      )
+      .addText((text) => {
+        text
+          .setPlaceholder(this.getAutomaticCharacterNoteFolder())
+          .setValue(
+            String(
+              this.plugin.settings.characterNoteFolder ||
+              this.getAutomaticCharacterNoteFolder()
+            )
+          )
+          .onChange(async (value) => {
+            await this.updateCharacterNoteFolder(value);
+          });
       });
   }
 
@@ -714,6 +913,8 @@ module.exports = function createSettingsTabClass({
       "动画笔记保存位置。Markdown 番剧档案馆会自动放在该目录下的“追番广场”中。"
     );
 
+    this.addCharacterNoteFolderSetting(container);
+
     new Setting(container)
       .setName("初始化缺失文件")
       .setDesc(
@@ -759,7 +960,7 @@ module.exports = function createSettingsTabClass({
     this.addHelpAndCommunitySection(container);
   }
 
-  displayProfessionalMode(container) {
+  displayProfessionalMode(container, topHudMount) {
     this.addIntroDescription(
       container,
       "专业模式展示完整设置。路径、评分监测、番剧档案馆（二维案头编目台 / 三维原画档案室）、季度视图、笔记显示、Netaba 和全部管理操作均可在这里调整。切换模式只改变展示，不会修改已有配置。"
@@ -794,6 +995,8 @@ module.exports = function createSettingsTabClass({
       container,
       "扫描和管理 Bangumi 动画笔记的仓库目录。"
     );
+
+    this.addCharacterNoteFolderSetting(container);
 
     this.addBaseFolderSetting(container);
 
@@ -876,6 +1079,385 @@ module.exports = function createSettingsTabClass({
 
     this.addProfessionalActions(container);
     this.addHelpAndCommunitySection(container);
+
+    // 挂载非冗余顶栏聚光灯模糊搜索与章节磁吸罗盘 HUD（独立于 .setting-item 之外，绝不与普通设置项并列混排）
+    this.mountProfessionalSettingsSpotlightHud(container, topHudMount);
+  }
+
+  mountProfessionalSettingsSpotlightHud(container, topHudMount) {
+    if (!container) return;
+    const hostMount = topHudMount || container.createDiv("bgm-settings-top-hud-mount");
+    hostMount.empty();
+
+    const hud = hostMount.createDiv("bgm-settings-sticky-hud");
+    const topRow = hud.createDiv("bgm-settings-hud-top");
+
+    const brandWrap = topRow.createDiv("bgm-settings-hud-brand");
+    brandWrap.createEl("h2", {
+      cls: "bgm-settings-hud-title",
+      text: "Bangumi 追番管理器"
+    });
+    brandWrap.createSpan({
+      cls: "bgm-settings-hud-mode-badge",
+      text: "✦ 专业模式全景台"
+    });
+
+    // 右侧：Spotlight 模糊搜索胶囊框
+    const searchCapsule = topRow.createDiv("bgm-settings-spotlight-capsule");
+    searchCapsule.createSpan({
+      cls: "bgm-settings-spotlight-icon",
+      text: "🔍"
+    });
+    const searchInput = searchCapsule.createEl("input", {
+      type: "text",
+      cls: "bgm-settings-spotlight-input",
+      placeholder: "模糊搜索设置项 / 功能词 / 拼音缩写（如：播放器、蜜柑、身高、lqx）…"
+    });
+    searchInput.value = this._savedSpotlightQuery || "";
+
+    const metaRight = searchCapsule.createDiv("bgm-settings-spotlight-meta");
+    const countBadge = metaRight.createSpan({
+      cls: "bgm-settings-spotlight-count",
+      text: "全部设置"
+    });
+    const clearBtn = metaRight.createEl("button", {
+      cls: "bgm-settings-spotlight-clear",
+      text: "×"
+    });
+    clearBtn.title = "清空搜索与筛选 (Esc)";
+
+    // 第二行：章节磁吸快速定位与分类专注罗盘
+    const compassRail = hud.createDiv("bgm-settings-compass-rail");
+    compassRail.createSpan({
+      cls: "bgm-settings-compass-label",
+      text: "🧭 章节速达："
+    });
+
+    // 扫描 container 下所有章节标题 (h3) 与设置项 (.setting-item 及自定义面板)
+    const resolveSectionIcon = (title) => {
+      const t = String(title || "");
+      if (t.includes("路径") || t.includes("目录")) return "📂";
+      if (t.includes("Bangumi") || t.includes("评分")) return "⭐";
+      if (t.includes("检查") || t.includes("视图")) return "🔍";
+      if (t.includes("季度")) return "📅";
+      if (t.includes("笔记") || t.includes("显示")) return "📝";
+      if (t.includes("档案馆") || t.includes("仪表盘")) return "🏛️";
+      if (t.includes("播放器") || t.includes("手札")) return "🎬";
+      if (t.includes("下载") || t.includes("RSS") || t.includes("追番")) return "📥";
+      if (t.includes("洛琪希") || t.includes("看板娘")) return "🧙‍♀️";
+      if (t.includes("Netaba")) return "📈";
+      if (t.includes("管理入口")) return "🎛️";
+      if (t.includes("快速操作")) return "⚡";
+      if (t.includes("帮助") || t.includes("交流") || t.includes("社群")) return "💬";
+      return "📌";
+    };
+
+    const sections = [];
+    const indexedItems = [];
+    let currentSection = {
+      key: "sec-general",
+      title: "模式与概览",
+      icon: "⚙️",
+      headingEl: null,
+      extraEls: [],
+      items: []
+    };
+    sections.push(currentSection);
+
+    const children = Array.from(container.children).filter((el) => el !== hostMount);
+    children.forEach((el, idx) => {
+      const tag = (el.tagName || "").toUpperCase();
+      if (tag === "H3") {
+        const rawTitle = (el.textContent || "").trim() || `分组 ${sections.length}`;
+        currentSection = {
+          key: `sec-${idx}-${rawTitle}`,
+          title: rawTitle,
+          icon: resolveSectionIcon(rawTitle),
+          headingEl: el,
+          extraEls: [],
+          items: []
+        };
+        sections.push(currentSection);
+        return;
+      }
+
+      if (el.classList && el.classList.contains("setting-item")) {
+        const nameEl = el.querySelector(".setting-item-name");
+        const descEl = el.querySelector(".setting-item-description");
+        const ctrlEl = el.querySelector(".setting-item-control");
+        const origNameText = nameEl ? (nameEl.textContent || "").trim() : "";
+        const origDescText = descEl ? (descEl.textContent || "").trim() : "";
+        const ctrlText = ctrlEl ? (ctrlEl.textContent || "").trim() : "";
+        const rec = {
+          el,
+          nameEl,
+          descEl,
+          origNameText,
+          origDescText,
+          nameLower: origNameText.toLowerCase(),
+          descLower: origDescText.toLowerCase(),
+          ctrlLower: ctrlText.toLowerCase(),
+          sectionKey: currentSection.key,
+          sectionTitle: currentSection.title,
+          sectionIcon: currentSection.icon,
+          sectionLower: currentSection.title.toLowerCase(),
+          fullHaystack: `${currentSection.title} ${origNameText} ${origDescText} ${ctrlText}`.toLowerCase()
+        };
+        currentSection.items.push(rec);
+        indexedItems.push(rec);
+      } else {
+        // 诸如段落介绍、洛琪希立绘包状态面板、社群二维码卡片等附属块
+        const blockText = (el.textContent || "").trim();
+        if (blockText && currentSection.key !== "sec-general") {
+          const rec = {
+            el,
+            nameEl: null,
+            descEl: null,
+            origNameText: currentSection.title,
+            origDescText: blockText,
+            nameLower: currentSection.title.toLowerCase(),
+            descLower: blockText.toLowerCase(),
+            ctrlLower: "",
+            sectionKey: currentSection.key,
+            sectionTitle: currentSection.title,
+            sectionIcon: currentSection.icon,
+            sectionLower: currentSection.title.toLowerCase(),
+            fullHaystack: `${currentSection.title} ${blockText}`.toLowerCase()
+          };
+          currentSection.items.push(rec);
+          indexedItems.push(rec);
+        } else {
+          currentSection.extraEls.push(el);
+        }
+      }
+    });
+
+    // 空搜索结果提示面板
+    const emptyStateBox = container.createDiv("bgm-settings-empty-search");
+    emptyStateBox.createDiv({
+      cls: "bgm-settings-empty-title",
+      text: "🔍 未找到匹配的设置项"
+    });
+    emptyStateBox.createDiv({
+      cls: "bgm-settings-empty-sub",
+      text: "可尝试输入更短的关键词、功能俗称（如：播放器、蜜柑、抠图、身高、看板娘）或点击下方高频分类直接定位："
+    });
+    const emptySugRow = emptyStateBox.createDiv("bgm-settings-empty-suggestions");
+    [
+      { label: "🎬 本地播放器联动", q: "播放器" },
+      { label: "📥 蜜柑 RSS 与追番下载", q: "下载" },
+      { label: "👑 角色典藏目录", q: "角色" },
+      { label: "🧙‍♀️ 洛琪希看板娘", q: "洛琪希" },
+      { label: "🏛️ 番剧档案馆", q: "番剧档案馆" },
+      { label: "📂 路径与封面目录", q: "目录" }
+    ].forEach((sug) => {
+      const sb = emptySugRow.createEl("button", {
+        cls: "bgm-settings-compass-chip",
+        text: sug.label
+      });
+      sb.onclick = (e) => {
+        e.preventDefault();
+        searchInput.value = sug.q;
+        this._savedSpotlightQuery = sug.q;
+        this._savedFocusSectionKey = "all";
+        applyFilterAndHighlight();
+      };
+    });
+
+    // 构建章节磁吸罗盘胶囊按钮
+    const chipRefs = [];
+    const createCompassChip = (secKey, labelText, countNum, targetHeadingEl) => {
+      const chip = compassRail.createEl("button", {
+        cls: "bgm-settings-compass-chip"
+      });
+      chip.createSpan({ text: labelText });
+      if (typeof countNum === "number") {
+        chip.createSpan({
+          cls: "bgm-settings-compass-chip-cnt",
+          text: `${countNum}`
+        });
+      }
+      chip.onclick = (e) => {
+        e.preventDefault();
+        if (secKey === "all") {
+          this._savedFocusSectionKey = "all";
+          applyFilterAndHighlight();
+          container.scrollTo?.({ top: 0, behavior: "smooth" });
+          return;
+        }
+        if (this._savedFocusOnlyMode) {
+          this._savedFocusSectionKey =
+            this._savedFocusSectionKey === secKey ? "all" : secKey;
+          applyFilterAndHighlight();
+        } else {
+          // 既支持全览平滑滚动定位，若当前处于搜索过滤中也自动清空或切换到该章节
+          if (this._savedFocusSectionKey !== "all") {
+            this._savedFocusSectionKey = secKey;
+          }
+          if (searchInput.value.trim()) {
+            searchInput.value = "";
+            this._savedSpotlightQuery = "";
+          }
+          applyFilterAndHighlight();
+          if (targetHeadingEl && typeof targetHeadingEl.scrollIntoView === "function") {
+            targetHeadingEl.scrollIntoView({ behavior: "smooth", block: "start" });
+            targetHeadingEl.classList.remove("bgm-section-pulse-highlight");
+            void targetHeadingEl.offsetWidth;
+            targetHeadingEl.classList.add("bgm-section-pulse-highlight");
+          }
+        }
+      };
+      chipRefs.push({ key: secKey, chip });
+    };
+
+    createCompassChip("all", "✦ 全部", indexedItems.length, null);
+    sections.forEach((sec) => {
+      if (sec.key === "sec-general" || sec.items.length === 0) return;
+      createCompassChip(sec.key, `${sec.icon} ${sec.title}`, sec.items.length, sec.headingEl);
+    });
+
+    // 右侧切换「点击跳至章节 vs 仅展开选中章节（折叠其余章节防眼花）」
+    const focusModeBtn = compassRail.createEl("button", {
+      cls: `bgm-settings-compass-mode-btn ${this._savedFocusOnlyMode ? "is-focus-only" : ""}`,
+      text: this._savedFocusOnlyMode ? "📌 模式：仅看选中章" : "🧭 模式：点击跳至章"
+    });
+    focusModeBtn.title = "切换章节按钮行为：「点击滚动跳转到对应章节」或「仅显示选中的单个章节（隐藏其他章节，彻底告别设置项过多眼花）」";
+    focusModeBtn.onclick = (e) => {
+      e.preventDefault();
+      this._savedFocusOnlyMode = !this._savedFocusOnlyMode;
+      if (!this._savedFocusOnlyMode) {
+        this._savedFocusSectionKey = "all";
+      } else if (this._savedFocusSectionKey === "all" && sections.length > 1) {
+        this._savedFocusSectionKey = sections[1].key;
+      }
+      focusModeBtn.toggleClass("is-focus-only", this._savedFocusOnlyMode);
+      focusModeBtn.setText(
+        this._savedFocusOnlyMode ? "📌 模式：仅看选中章" : "🧭 模式：点击跳至章"
+      );
+      applyFilterAndHighlight();
+    };
+
+    // 渲染匹配高亮与章节面包屑标签
+    const updateItemNamePresentation = (rec, isSearchActive, matchedTokens) => {
+      if (!rec.nameEl) return;
+      rec.nameEl.empty();
+      const rawTitle = rec.origNameText;
+      if (!isSearchActive || !matchedTokens || matchedTokens.length === 0) {
+        rec.nameEl.setText(rawTitle);
+        return;
+      }
+      // 查找最长可直接高亮的子串
+      const lowerTitle = rawTitle.toLowerCase();
+      let hitToken = "";
+      for (const tk of matchedTokens) {
+        if (tk && lowerTitle.includes(tk) && tk.length > hitToken.length) {
+          hitToken = tk;
+        }
+      }
+      if (hitToken) {
+        const idx = lowerTitle.indexOf(hitToken);
+        const before = rawTitle.slice(0, idx);
+        const mid = rawTitle.slice(idx, idx + hitToken.length);
+        const after = rawTitle.slice(idx + hitToken.length);
+        if (before) rec.nameEl.appendText(before);
+        rec.nameEl.createEl("mark", { cls: "bgm-setting-hit-mark", text: mid });
+        if (after) rec.nameEl.appendText(after);
+      } else {
+        rec.nameEl.setText(rawTitle);
+      }
+      rec.nameEl.createSpan({
+        cls: "bgm-setting-section-crumb",
+        text: `${rec.sectionIcon} ${rec.sectionTitle}`
+      });
+    };
+
+    const applyFilterAndHighlight = () => {
+      const q = searchInput.value.trim();
+      this._savedSpotlightQuery = q;
+      const isSearchActive = q.length > 0;
+      const activeSecKey = this._savedFocusSectionKey || "all";
+
+      clearBtn.toggleClass("is-visible", isSearchActive || activeSecKey !== "all");
+      chipRefs.forEach((r) => {
+        r.chip.toggleClass("is-active", !isSearchActive && r.key === activeSecKey);
+      });
+
+      let visibleItemCount = 0;
+
+      sections.forEach((sec) => {
+        let secVisibleCount = 0;
+        const secAllowedByFocus =
+          isSearchActive || activeSecKey === "all" || sec.key === activeSecKey;
+
+        sec.items.forEach((rec) => {
+          if (!secAllowedByFocus) {
+            rec.el.classList.add("bgm-settings-search-hidden");
+            rec.el.classList.remove("is-bgm-search-match");
+            updateItemNamePresentation(rec, false, []);
+            return;
+          }
+          const res = scoreSettingFuzzyMatch(q, rec);
+          if (res.matched) {
+            rec.el.classList.remove("bgm-settings-search-hidden");
+            rec.el.classList.toggle("is-bgm-search-match", isSearchActive);
+            updateItemNamePresentation(rec, isSearchActive, res.matchedTokens);
+            secVisibleCount++;
+            visibleItemCount++;
+          } else {
+            rec.el.classList.add("bgm-settings-search-hidden");
+            rec.el.classList.remove("is-bgm-search-match");
+            updateItemNamePresentation(rec, false, []);
+          }
+        });
+
+        sec.extraEls.forEach((exEl) => {
+          exEl.classList.toggle(
+            "bgm-settings-search-hidden",
+            isSearchActive || (activeSecKey !== "all" && sec.key !== activeSecKey)
+          );
+        });
+
+        if (sec.headingEl) {
+          sec.headingEl.classList.toggle("bgm-settings-search-hidden", secVisibleCount === 0);
+        }
+      });
+
+      if (isSearchActive) {
+        countBadge.setText(`命中 ${visibleItemCount} / ${indexedItems.length} 项`);
+      } else if (activeSecKey !== "all") {
+        countBadge.setText(`当前章 ${visibleItemCount} 项`);
+      } else {
+        countBadge.setText(`共 ${indexedItems.length} 项设置`);
+      }
+
+      emptyStateBox.toggleClass("is-visible", visibleItemCount === 0);
+    };
+
+    searchInput.addEventListener("input", () => {
+      applyFilterAndHighlight();
+    });
+
+    searchInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        searchInput.value = "";
+        this._savedSpotlightQuery = "";
+        this._savedFocusSectionKey = "all";
+        applyFilterAndHighlight();
+      }
+    });
+
+    clearBtn.onclick = (e) => {
+      e.preventDefault();
+      searchInput.value = "";
+      this._savedSpotlightQuery = "";
+      this._savedFocusSectionKey = "all";
+      applyFilterAndHighlight();
+      searchInput.focus();
+    };
+
+    applyFilterAndHighlight();
   }
 
   addReviewAndPlayerSettings(container, compact) {
@@ -2568,7 +3150,7 @@ await this.saveAndSynchronizeNoteScores();
       text: "📋 复制排障环境信息"
     });
     copyDiagBtn.onclick = async () => {
-      const pluginVer = this.plugin?.manifest?.version || "0.3.2";
+      const pluginVer = this.plugin?.manifest?.version || "0.5.0";
       const diagText = [
         "### 运行环境诊断信息",
         `- **插件版本**: Bangumi Manager v${pluginVer}`,
@@ -2866,5 +3448,7 @@ await this.plugin.runTemporarySeasonMode(
   }
 };
 
+  BangumiManagerSettingTab.scoreSettingFuzzyMatch = scoreSettingFuzzyMatch;
+  BangumiManagerSettingTab.isFuzzySubsequence = isFuzzySubsequence;
   return BangumiManagerSettingTab;
 };

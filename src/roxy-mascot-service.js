@@ -2469,8 +2469,11 @@ function hook3DSpaceEvents(plugin, space) {
   const origToggleLens = space.toggleLensMode?.bind(space);
   if (origToggleLens) {
     space.toggleLensMode = function (...args) {
+      const wasTransitioning = Boolean(this.lensTransition);
       const res = origToggleLens(...args);
-      const isHigh = this.lensMode === "highscore";
+      if (wasTransitioning) return res;
+      const targetMode = this.lensTransition?.targetMode || this.lensMode;
+      const isHigh = targetMode === "highscore";
       emitRoxyEvent(plugin, {
         type: "3d:lens_switch",
         state: isHigh ? "success" : "explain",

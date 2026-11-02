@@ -82,6 +82,7 @@ const { Dashboard3DSpace } = require("./dashboard-3d-view.js");
 const curatorDesk = require("./dashboard-2d-desk.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
+const characterArchiveService = require("./character-archive-service.js");
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -196,7 +197,9 @@ var DEFAULT_SETTINGS = {
   seasonalTotalCountCache: {},
   seasonalRadarCache: {},
   characterCollection: [],
-  characterNoteFolder: "动画笔记/角色典藏",
+  characterNoteFolder: "角色典藏",
+  characterNoteFolderManuallySet: false,
+  characterLineupAutoRemoveBg: true,
   localVideoPlayerMode: "auto",
   localVideoPlayerCustomPath: ""
 };
@@ -448,6 +451,28 @@ var BangumiManagerPlugin = class extends Plugin {
         this.getDefaultDashboardPath();
     }
 
+    if (typeof this.settings.characterNoteFolderManuallySet !== "boolean") {
+      const savedCharFolder = this.normalizeDashboardPath(
+        savedSettings && savedSettings.characterNoteFolder
+      );
+      const normRoot = this.normalizeDashboardPath(this.settings.noteRootFolder);
+      const legacyInsideRoot = normRoot ? `${normRoot}/角色典藏` : "动画笔记/角色典藏";
+      this.settings.characterNoteFolderManuallySet = Boolean(
+        savedCharFolder &&
+          savedCharFolder !== "动画笔记/角色典藏" &&
+          savedCharFolder !== legacyInsideRoot &&
+          savedCharFolder !== this.getDefaultCharacterNoteFolder()
+      );
+    }
+
+    if (this.settings.characterNoteFolderManuallySet === true) {
+      this.settings.characterNoteFolder =
+        this.normalizeDashboardPath(this.settings.characterNoteFolder) ||
+        this.getDefaultCharacterNoteFolder();
+    } else {
+      this.settings.characterNoteFolder = this.getDefaultCharacterNoteFolder();
+    }
+
     this.settings.baseFilePath =
       this.settings.baseFolderPath +
       "/动画库.base";
@@ -464,6 +489,7 @@ var BangumiManagerPlugin = class extends Plugin {
 
     this.isPluginWritingNote = new Set();
     this.calloutSyncTimers = new Map();
+    this.characterNoteSyncTimers = new Map();
 
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
@@ -648,6 +674,29 @@ var BangumiManagerPlugin = class extends Plugin {
       this.app.vault.on(
         "modify",
         (file) => {
+          if (file && file.extension === "md" && characterArchiveService.isCharacterNotePath(this, file)) {
+            if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) {
+              return;
+            }
+            if (!this.characterNoteSyncTimers) {
+              this.characterNoteSyncTimers = new Map();
+            }
+            if (this.characterNoteSyncTimers.has(file.path)) {
+              clearTimeout(this.characterNoteSyncTimers.get(file.path));
+            }
+            const timer = setTimeout(async () => {
+              if (this.characterNoteSyncTimers) {
+                this.characterNoteSyncTimers.delete(file.path);
+              }
+              const didSync = await characterArchiveService.syncCharacterNoteToCollection(this, file);
+              if (didSync) {
+                await this.refreshOpenDashboardViews();
+              }
+            }, 450);
+            this.characterNoteSyncTimers.set(file.path, timer);
+            return;
+          }
+
           if (!this.settings.checkOnSave || !this.isTargetNote(file)) {
             return;
           }
@@ -682,6 +731,29 @@ var BangumiManagerPlugin = class extends Plugin {
     );
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
+        if (file && file.extension === "md" && characterArchiveService.isCharacterNotePath(this, file)) {
+          if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) {
+            return;
+          }
+          if (!this.characterNoteSyncTimers) {
+            this.characterNoteSyncTimers = new Map();
+          }
+          if (this.characterNoteSyncTimers.has(file.path)) {
+            clearTimeout(this.characterNoteSyncTimers.get(file.path));
+          }
+          const timer = setTimeout(async () => {
+            if (this.characterNoteSyncTimers) {
+              this.characterNoteSyncTimers.delete(file.path);
+            }
+            const didSync = await characterArchiveService.syncCharacterNoteToCollection(this, file);
+            if (didSync) {
+              await this.refreshOpenDashboardViews();
+            }
+          }, 450);
+          this.characterNoteSyncTimers.set(file.path, timer);
+          return;
+        }
+
         if (!this.isTargetNote(file)) {
           return;
         }
@@ -724,6 +796,15 @@ var BangumiManagerPlugin = class extends Plugin {
         }, 800);
       })
     );
+    if (this.app.workspace && typeof this.app.workspace.onLayoutReady === "function") {
+      this.app.workspace.onLayoutReady(async () => {
+        try {
+          await characterArchiveService.reconcileCharacterCollectionWithNotes(this);
+        } catch (e) {
+          console.warn("[Bangumi Manager] 角色典藏笔记启动同步失败:", e);
+        }
+      });
+    }
     if (this.settings.checkOnStartup) {
       this.startupTimer = window.setTimeout(
         async () => {
@@ -760,6 +841,12 @@ var BangumiManagerPlugin = class extends Plugin {
         clearTimeout(t);
       }
       this.calloutSyncTimers.clear();
+    }
+    if (this.characterNoteSyncTimers) {
+      for (const t of this.characterNoteSyncTimers.values()) {
+        clearTimeout(t);
+      }
+      this.characterNoteSyncTimers.clear();
     }
 
     if (this.managerRibbon) {
@@ -872,8 +959,14 @@ var BangumiManagerPlugin = class extends Plugin {
   }
 
   isTargetNote(file) {
+    if (!file || file.extension !== "md") {
+      return false;
+    }
+    if (characterArchiveService.isCharacterNotePath(this, file)) {
+      return false;
+    }
     return Boolean(
-      file && file.extension === "md" && file.path.startsWith(
+      file.path.startsWith(
         this.settings.noteRootFolder + "/"
       )
     );
@@ -915,6 +1008,9 @@ getCurrentSeasonName() {
   async initializeMissingFiles() {
     await this.ensureVaultFolder(
       this.settings.noteRootFolder
+    );
+    await this.ensureVaultFolder(
+      this.settings.characterNoteFolder || this.getDefaultCharacterNoteFolder()
     );
     await this.ensureVaultFolder(
       this.settings.coverFolder
@@ -1836,6 +1932,17 @@ if (this.settings.seasonViewMode === "current") {
     return noteRoot
       ? noteRoot + "/追番广场"
       : "追番广场";
+  }
+
+  getDefaultCharacterNoteFolder() {
+    const noteRoot = this.normalizeDashboardPath(
+      this.settings.noteRootFolder
+    );
+    if (!noteRoot || !noteRoot.includes("/")) {
+      return "角色典藏";
+    }
+    const parentDir = noteRoot.slice(0, noteRoot.lastIndexOf("/"));
+    return parentDir + "/角色典藏";
   }
 
   getDefaultDashboardPath() {
@@ -4547,6 +4654,22 @@ if (this.settings.seasonViewMode === "current") {
     if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) return;
     try {
       const content = await this.app.vault.read(file);
+      const parsed = parseFrontmatter(content);
+      if (parsed && parsed.fields && "我的评分" in parsed.fields) {
+        const myScore = cleanValue(parsed.fields.我的评分);
+        if (!this.settings.personalRatingCache) {
+          this.settings.personalRatingCache = {};
+        }
+        if (myScore && myScore !== "未评分" && myScore !== "未知") {
+          if (this.settings.personalRatingCache[file.path] !== myScore) {
+            this.settings.personalRatingCache[file.path] = myScore;
+            await this.saveData(this.settings);
+          }
+        } else if (file.path in this.settings.personalRatingCache) {
+          delete this.settings.personalRatingCache[file.path];
+          await this.saveData(this.settings);
+        }
+      }
       const synced = syncNoteCalloutFromFrontmatter(content);
       if (synced && synced !== content) {
         if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
@@ -4626,6 +4749,15 @@ if (this.settings.seasonViewMode === "current") {
       }
       if (updates.score !== undefined) {
         item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+        if (!this.settings.personalRatingCache) {
+          this.settings.personalRatingCache = {};
+        }
+        if (item.personalScore !== null && Number.isFinite(item.personalScore)) {
+          this.settings.personalRatingCache[file.path] = String(item.personalScore);
+        } else {
+          delete this.settings.personalRatingCache[file.path];
+        }
+        await this.saveData(this.settings);
       }
       if (updates.downloadPath !== undefined) {
         item.downloadPath = updates.downloadPath;
