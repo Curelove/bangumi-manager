@@ -1,5 +1,4 @@
-const fs = require("fs");
-const path = require("path");
+const { tryRequireNode, isDesktopNodeAvailable, extnameLower, joinPosixPath } = require("./platform-env.js");
 
 var VIDEO_EXTENSIONS = [
   ".mp4",
@@ -104,11 +103,15 @@ function extractEpisodeNumberFromFileName(fileName) {
 
 let electronShell = null;
 try {
-  electronShell = require("electron").shell;
+  const electronMod = tryRequireNode("electron");
+  electronShell = electronMod ? electronMod.shell : null;
 } catch (e) {}
 
 async function openLocalPathSafely(targetPath) {
   if (!targetPath) return false;
+  if (!isDesktopNodeAvailable()) {
+    return false;
+  }
   try {
     if (electronShell && typeof electronShell.openPath === "function") {
       const errMsg = await electronShell.openPath(targetPath);
@@ -129,6 +132,19 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
     return {
       error: "\u65E0\u4E0B\u8F7D\u8DEF\u5F84",
       downloadPath: "",
+      fileCount: 0,
+      newCount: 0,
+      videoFiles: [],
+      nextEpisodeFile: null,
+      nextEpisodeNumber: null
+    };
+  }
+  const fs = tryRequireNode("fs");
+  const path = tryRequireNode("path");
+  if (!fs || !isDesktopNodeAvailable()) {
+    return {
+      error: "\u79FB\u52A8\u7AEF\u73AF\u5883",
+      downloadPath,
       fileCount: 0,
       newCount: 0,
       videoFiles: [],
@@ -162,20 +178,25 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
     };
   }
   const rawVideoEntries = entries.filter((entry) => {
-    if (!entry.isFile()) {
+    try {
+      if (!entry || typeof entry.isFile !== "function" || !entry.isFile()) {
+        return false;
+      }
+      return VIDEO_EXTENSIONS.includes(
+        extnameLower(entry.name)
+      );
+    } catch (_) {
       return false;
     }
-    return VIDEO_EXTENSIONS.includes(
-      path.extname(entry.name).toLowerCase()
-    );
   });
   const videoFiles = rawVideoEntries.map((entry, index) => {
-    const fullPath = path.join(downloadPath, entry.name);
+    const fullPath = path ? path.join(downloadPath, entry.name) : joinPosixPath(downloadPath, entry.name);
     const parsedEp = extractEpisodeNumberFromFileName(entry.name);
     return {
       name: entry.name,
       path: fullPath,
-      episode: parsedEp !== null ? parsedEp : (index + 1)
+      episode: parsedEp !== null ? parsedEp : (index + 1),
+      hasExplicitEp: parsedEp !== null
     };
   });
   videoFiles.sort((a, b) => {
@@ -187,12 +208,20 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
 
   const currentWatched = Number(watchedEpisodes) || 0;
   const targetNextEp = currentWatched + 1;
+  const hasAnyExplicitEp = videoFiles.some((vf) => vf.hasExplicitEp);
+  const unwatchedFiles = hasAnyExplicitEp
+    ? videoFiles.filter((vf) => Number(vf.episode) > currentWatched)
+    : videoFiles.slice(currentWatched);
+
   let nextEpisodeFile = null;
   let nextEpisodeNumber = null;
-  const matched = videoFiles.find(vf => vf.episode === targetNextEp);
+  const matched = videoFiles.find((vf) => vf.episode === targetNextEp);
   if (matched) {
     nextEpisodeFile = matched.path;
     nextEpisodeNumber = matched.episode;
+  } else if (unwatchedFiles.length > 0) {
+    nextEpisodeFile = unwatchedFiles[0].path;
+    nextEpisodeNumber = unwatchedFiles[0].episode;
   } else if (currentWatched < videoFiles.length) {
     const fallback = videoFiles[currentWatched];
     if (fallback) {
@@ -201,15 +230,21 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
     }
   }
 
+  const maxEpisodeNumber = videoFiles.reduce(
+    (maxEp, vf) => (Number.isFinite(vf.episode) && vf.episode > maxEp ? vf.episode : maxEp),
+    0
+  );
+
   return {
     error: null,
     downloadPath,
     fileCount: videoFiles.length,
-    newCount: Math.max(
-      0,
-      videoFiles.length - currentWatched
-    ),
+    newCount: hasAnyExplicitEp
+      ? unwatchedFiles.length
+      : Math.max(0, videoFiles.length - currentWatched),
     videoFiles,
+    unwatchedFiles,
+    maxEpisodeNumber,
     nextEpisodeFile,
     nextEpisodeNumber
   };

@@ -1,9 +1,12 @@
-const fs = require("fs");
+const { Notice } = require("obsidian");
+const { tryRequireNode, isMobileEnv, isDesktopNodeAvailable } = require("./platform-env.js");
+const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 const { openLocalPathSafely, inspectLocalFolder } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const animeDownloadService = require("./anime-download-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const characterArchiveService = require("./character-archive-service.js");
+const multiHallArchiveService = require("./multi-hall-archive-service.js");
 
 /**
  * 提取同系列作品的季数、OVA、剧场版、篇章或副标题区分信息，
@@ -276,13 +279,11 @@ function sortCatalogItems(items, sortBy = "year_desc") {
 function ensureDeskState(plugin, container, options = {}) {
   if (!container._deskState) {
     const saved = plugin.settings?.curatorDeskState || {};
+    const validSavedModes = ["desk", "catalog", "character", "gallery", "voice", "game"];
     container._deskState = {
-      workspaceMode:
-        saved.workspaceMode === "desk" ||
-        saved.workspaceMode === "catalog" ||
-        saved.workspaceMode === "character"
-          ? saved.workspaceMode
-          : "auto", // "auto" | "desk" | "catalog" | "character"
+      workspaceMode: validSavedModes.includes(saved.workspaceMode)
+        ? saved.workspaceMode
+        : "auto", // "auto" | "desk" | "catalog" | "character" | "gallery" | "voice" | "game"
       workspaceModeCustomized: Boolean(saved.workspaceModeCustomized),
       roxyGrimoireDismissed: Boolean(
         plugin.settings?.roxyGrimoireDismissed ?? saved.roxyGrimoireDismissed
@@ -339,54 +340,63 @@ function persistDeskPrefs(plugin, state) {
 function computeLocalUpdatedItems(items) {
   const list = Array.isArray(items) ? items : [];
   const candidates = [];
+  if (!isDesktopNodeAvailable()) {
+    return candidates;
+  }
+  const fsMod = tryRequireNode("fs");
 
   for (const item of list) {
-    const rawPath = String(item?.downloadPath || "").trim();
-    if (!rawPath || rawPath === "无") {
-      item._localInspect = null;
-      continue;
-    }
-
-    const localRes = inspectLocalFolder(rawPath, item.watchedEpisodes);
-    if (!localRes || localRes.error) {
-      item._localInspect = localRes || null;
-      continue;
-    }
-
-    const statusMatch = String(item.localUpdateStatus || "").match(/已更新\s*(\d+)\s*集/);
-    const explicitNewCount = statusMatch ? Number(statusMatch[1]) : 0;
-    const effectiveNewCount = Math.max(Number(localRes.newCount) || 0, explicitNewCount);
-
-    // 文件夹内无视频文件且无未看更新集数 -> 排除
-    if (localRes.fileCount <= 0 && effectiveNewCount <= 0) {
-      item._localInspect = localRes;
-      continue;
-    }
-
-    // 已看完的老番且没有多出未看新集 -> 排除
-    if (item.state === "已看" && effectiveNewCount <= 0) {
-      item._localInspect = localRes;
-      continue;
-    }
-
-    let latestVideoMtime = 0;
-    if (Array.isArray(localRes.videoFiles)) {
-      for (const vf of localRes.videoFiles) {
-        try {
-          const st = fs.statSync(vf.path);
-          if (st && st.mtimeMs > latestVideoMtime) {
-            latestVideoMtime = st.mtimeMs;
-          }
-        } catch (e) {}
+    try {
+      const rawPath = String(item?.downloadPath || "").trim();
+      if (!rawPath || rawPath === "无") {
+        if (item) item._localInspect = null;
+        continue;
       }
-    }
 
-    item._localInspect = {
-      ...localRes,
-      newCount: effectiveNewCount,
-      latestVideoMtime
-    };
-    candidates.push(item);
+      const localRes = inspectLocalFolder(rawPath, item.watchedEpisodes);
+      if (!localRes || localRes.error) {
+        item._localInspect = localRes || null;
+        continue;
+      }
+
+      const statusMatch = String(item.localUpdateStatus || "").match(/已更新\s*(\d+)\s*集/);
+      const explicitNewCount = statusMatch ? Number(statusMatch[1]) : 0;
+      const effectiveNewCount = Math.max(Number(localRes.newCount) || 0, explicitNewCount);
+
+      // 文件夹内无视频文件且无未看更新集数 -> 排除
+      if (localRes.fileCount <= 0 && effectiveNewCount <= 0) {
+        item._localInspect = localRes;
+        continue;
+      }
+
+      // 已看完的老番且没有多出未看新集 -> 排除
+      if (item.state === "已看" && effectiveNewCount <= 0) {
+        item._localInspect = localRes;
+        continue;
+      }
+
+      let latestVideoMtime = 0;
+      if (fsMod && Array.isArray(localRes.videoFiles)) {
+        for (const vf of localRes.videoFiles) {
+          try {
+            const st = fsMod.statSync(vf.path);
+            if (st && st.mtimeMs > latestVideoMtime) {
+              latestVideoMtime = st.mtimeMs;
+            }
+          } catch (e) {}
+        }
+      }
+
+      item._localInspect = {
+        ...localRes,
+        newCount: effectiveNewCount,
+        latestVideoMtime
+      };
+      candidates.push(item);
+    } catch (itemErr) {
+      console.warn("[Bangumi Manager] computeLocalUpdatedItems skipped item due to error:", item?.name || "", itemErr);
+      if (item) item._localInspect = null;
+    }
   }
 
   candidates.sort((a, b) => {
@@ -610,18 +620,18 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
       contentEl.addClass("curator-season-mgr-modal");
 
       contentEl.createEl("h2", {
-        text: "案头追番席 · 多季度席位与滑动显示设置"
+        text: "追番 · 多季度席位与滑动显示设置"
       });
       contentEl.createEl("p", {
         cls: "curator-season-mgr-desc",
-        text: "您可以自由将多个指定番季（如 2026年10月新番、2026年07月新番、往期补番季等）固定到「案头追番席」顶栏，并调整横向左右滑动或网格展开模式。"
+        text: "您可以自由将多个指定番季（如 2026年10月新番、2026年07月新番、往期补番季等）固定到「追番」顶栏，并调整横向左右滑动或网格展开模式。"
       });
 
       // 1. 显示模式与数量上限
       const prefSection = contentEl.createDiv("curator-season-mgr-box");
       prefSection.createDiv({
         cls: "curator-season-mgr-subtitle",
-        text: "一、案头追番席浏览模式与显示上限"
+        text: "一、追番浏览模式与显示上限"
       });
 
       const prefRow = prefSection.createDiv("curator-season-mgr-pref-row");
@@ -816,11 +826,175 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
 }
 
 /**
+ * 新用户「清爽开馆便签」：当真实馆藏为 0 部且未开启示例预览时渲染，不弹强制遮罩、不堆砌全 0 废占位
+ */
+function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
+  hostMount.empty();
+  const rootContainer = helpers.rootContainer || hostMount.closest(".curator-desk-root");
+  const deskOptions = helpers.deskOptions || {};
+
+  const box = hostMount.createDiv("curator-starter-desk");
+  box.dataset.ui = "starter-desk";
+
+  const head = box.createDiv("curator-starter-head");
+  head.createDiv({
+    cls: "curator-starter-kicker",
+    text: "WELCOME TO BANGUMI ARCHIVE · 开馆便签"
+  });
+  head.createEl("h2", {
+    cls: "curator-starter-title",
+    text: "欢迎来到你的番剧与原画典藏馆"
+  });
+  head.createDiv({
+    cls: "curator-starter-sub",
+    text: "当前笔记库中还没有收录动画案卷。无需复杂设置，任选下方最顺手的一种方式即可立起第一份典藏："
+  });
+
+  const grid = box.createDiv("curator-starter-grid");
+
+  // 路径 1：在线搜索单部喜欢的番剧立即建档
+  const cardSearch = grid.createDiv("curator-starter-card");
+  cardSearch.createDiv({ cls: "curator-starter-step", text: "方式一 · 即搜即藏" });
+  cardSearch.createEl("h3", { cls: "curator-starter-card-title", text: "🔍 搜一部喜欢的动画立即建档" });
+  cardSearch.createDiv({
+    cls: "curator-starter-card-desc",
+    text: "直接检索 Bangumi 条目，自动抓取高清封面、番季年份、制作阵容与评分，一键生成精美本地笔记。"
+  });
+  const searchForm = cardSearch.createDiv("curator-starter-inline-row");
+  const searchInput = searchForm.createEl("input", {
+    cls: "curator-input curator-starter-search-input",
+    type: "text",
+    placeholder: "输入动画名，如：葬送的芙莉莲…"
+  });
+  const searchBtn = searchForm.createEl("button", {
+    cls: "curator-top-btn mod-cta",
+    text: "在线搜索"
+  });
+  searchBtn.dataset.starterAction = "search-anime";
+
+  const triggerSingleImport = async (kw) => {
+    const q = String(kw ?? searchInput.value ?? "").trim();
+    if (typeof plugin.openSingleAnimeImportModal === "function") {
+      await plugin.openSingleAnimeImportModal(q);
+    }
+  };
+  searchBtn.onclick = (e) => {
+    e.preventDefault();
+    triggerSingleImport();
+  };
+  searchInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      triggerSingleImport();
+    }
+  });
+
+  const chipRow = cardSearch.createDiv("curator-starter-chips");
+  chipRow.createSpan({ cls: "curator-starter-chip-label", text: "试试热搜：" });
+  ["葬送的芙莉莲", "孤独摇滚！", "魔法少女小圆", "星际牛仔"].forEach((sampleName) => {
+    const chip = chipRow.createEl("button", {
+      cls: "curator-starter-chip",
+      text: sampleName
+    });
+    chip.onclick = (e) => {
+      e.preventDefault();
+      searchInput.value = sampleName;
+      triggerSingleImport(sampleName);
+    };
+  });
+
+  // 路径 2：填入 Bangumi ID 一键同步历史片单
+  const cardSync = grid.createDiv("curator-starter-card");
+  cardSync.createDiv({ cls: "curator-starter-step", text: "方式二 · 账号迁移" });
+  cardSync.createEl("h3", { cls: "curator-starter-card-title", text: "🔄 同步已有 Bangumi 追番片单" });
+  cardSync.createDiv({
+    cls: "curator-starter-card-desc",
+    text: "如果你平时已经在 bgm.tv 标记过动画，填入你的 Bangumi 数字用户 ID 即可批量同步「在看 / 已看 / 想看」。"
+  });
+  const uidRow = cardSync.createDiv("curator-starter-inline-row");
+  const uidInput = uidRow.createEl("input", {
+    cls: "curator-input curator-starter-uid-input",
+    type: "text",
+    placeholder: "Bangumi 数字 ID（如 854123）"
+  });
+  uidInput.value = String(plugin.settings?.bangumiUserId || "").trim();
+  const syncBtn = uidRow.createEl("button", {
+    cls: "curator-top-btn",
+    text: "保存并批量同步"
+  });
+  syncBtn.dataset.starterAction = "sync-bgm";
+  syncBtn.onclick = async (e) => {
+    e.preventDefault();
+    const val = String(uidInput.value || "").trim();
+    if (val) {
+      plugin.settings.bangumiUserId = val;
+      await plugin.saveSettings();
+    }
+    if (typeof plugin.openBatchAnimeImportModal === "function") {
+      await plugin.openBatchAnimeImportModal();
+    }
+  };
+
+  // 路径 3：零污染开启 3 部示例样片预览（同时打通 2D 与 3D 展厅）
+  const cardSample = grid.createDiv("curator-starter-card is-sample-card");
+  cardSample.createDiv({ cls: "curator-starter-step", text: "方式三 · 零打扰逛展" });
+  cardSample.createEl("h3", { cls: "curator-starter-card-title", text: "✨ 先载入 3 部示例样片逛逛展厅" });
+  cardSample.createDiv({
+    cls: "curator-starter-card-desc",
+    text: "纯内存虚拟样片，绝不在你的笔记库新建任何文件；可立即体验二维追番席、统计年鉴与「三维白昼原画室」！"
+  });
+  const sampleActions = cardSample.createDiv("curator-starter-sample-actions");
+  const startSampleBtn = sampleActions.createEl("button", {
+    cls: "curator-top-btn is-3d-entry mod-cta",
+    text: "✨ 载入 3 部示例样片预览"
+  });
+  startSampleBtn.dataset.starterAction = "start-sample-preview";
+  startSampleBtn.onclick = async (e) => {
+    e.preventDefault();
+    setSamplePreviewActive(plugin, true);
+    roxyMascotService.emitRoxyEvent(plugin, {
+      type: "onboarding:sample_start",
+      state: "explain",
+      category: "样片导览",
+      priority: roxyMascotService.PRIORITY.NORMAL,
+      dedupeKey: "onboarding:sample_start",
+      message: "欢迎光临！我已经为您临时摆上了 3 部示例原画案卷，您可以随意翻阅二维案头或点击右上角进入「三维原画档案室」体验，不会弄乱您的笔记库哦。"
+    });
+    if (rootContainer) {
+      await renderCuratorDesk(plugin, rootContainer, deskOptions, helpers);
+    }
+  };
+
+  const sample3DBtn = sampleActions.createEl("button", {
+    cls: "curator-top-btn is-subtle",
+    text: "🧊 直接带样片进入三维原画室"
+  });
+  sample3DBtn.dataset.starterAction = "start-sample-3d";
+  sample3DBtn.onclick = async (e) => {
+    e.preventDefault();
+    setSamplePreviewActive(plugin, true);
+    if (typeof deskOptions?.onEnter3D === "function") {
+      await deskOptions.onEnter3D();
+    } else {
+      await plugin.openScoreDashboardView();
+      const leaves = plugin.app.workspace.getLeavesOfType("bangumi-score-dashboard-view");
+      if (leaves.length > 0 && leaves[0].view && typeof leaves[0].view.enter3D === "function") {
+        await leaves[0].view.enter3D();
+      }
+    }
+  };
+}
+
+/**
  * 渲染案头追番席（首屏核心高频工作区：专注「正在追番」、「本地更新」与「自定义季度席位」，消除与馆藏编目总览的状态筛选重复）
  */
 function renderActiveDeskSection(plugin, deskMount, state, helpers) {
   deskMount.empty();
   const items = state.items || [];
+  if (items.length === 0) {
+    renderNewUserStarterDesk(plugin, deskMount, helpers);
+    return;
+  }
   const watchingItems = sortCatalogItems(
     items.filter((it) => it.state === "在看"),
     "progress_desc"
@@ -869,7 +1043,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
 
   const header = deskMount.createDiv("curator-section-header curator-desk-header");
   const titleWrap = header.createDiv("curator-section-title-wrap");
-  titleWrap.createEl("h2", { cls: "curator-section-title", text: "案头追番席" });
+  titleWrap.createEl("h2", { cls: "curator-section-title", text: "追番" });
   titleWrap.createSpan({
     cls: `curator-section-badge ${hasWatching ? "is-watching-active" : "is-standby-mode"}`,
     text: hasWatching
@@ -972,7 +1146,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
       text: "✦"
     });
     noticeLeft.createSpan({
-      text: "当前案头暂无「在看」作品。以下为您展示待命候补案卷（可左右滑动浏览全部），点击「▶ 置入在看」即可开启连载追踪，或切换至「🗂️ 馆藏编目总览」检索全部馆藏。"
+      text: "当前暂无「在看」作品。以下为您展示待命候补案卷（可左右滑动浏览全部），点击「▶ 置入在看」即可开启连载追踪，或切换至「🗂️ 编目总览」检索全部馆藏。"
     });
     const fallbackActions = fallbackBanner.createDiv("curator-desk-fallback-actions");
     if (pinnedSeasons.length > 0) {
@@ -988,7 +1162,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     if (typeof helpers?.switchWorkspaceMode === "function") {
       const toCatalogBtn = fallbackActions.createEl("button", {
         cls: "curator-mini-btn",
-        text: "🗂️ 前往馆藏编目总览 →"
+        text: "🗂️ 前往编目总览 →"
       });
       toCatalogBtn.onclick = () => {
         helpers.switchWorkspaceMode("catalog", { statusFilter: planItems.length > 0 ? "想看" : "all" });
@@ -1215,7 +1389,11 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
 
   const edition = extractEditionInfo(item);
   const coverWrap = card.createDiv("curator-desk-cover-wrap");
-  const coverUrl = item.file ? plugin.getCoverResourceUrl(item.cover, item.file.path) : "";
+  const coverUrl = item.file
+    ? plugin.getCoverResourceUrl(item.cover, item.file.path)
+    : item.cover
+    ? plugin.getCoverResourceUrl(item.cover, "")
+    : "";
   if (coverUrl) {
     const img = coverWrap.createEl("img", { cls: "curator-desk-cover" });
     img.alt = item.name;
@@ -1260,9 +1438,9 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     plugin.openStateMenu(e, item);
   };
 
-  // 检测真实本地文件夹视频状态
+  // 检测真实本地文件夹视频状态（仅桌面端可用，移动端保持清爽不误探桌面盘符）
   const localResult =
-    item.downloadPath && item.downloadPath !== "无"
+    isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无"
       ? inspectLocalFolder(item.downloadPath, item.watchedEpisodes)
       : null;
 
@@ -1491,7 +1669,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     reviewStudioService.openAnimeReviewStudioModal(plugin, item);
   };
 
-  if (plugin.settings?.enableDownloadAssistant !== false) {
+  if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
     const dlBtn = actionsRow.createEl("button", {
       cls: "curator-action-link is-download",
       text: item.rssUrl ? "⬇ 追更/下载" : "⬇ 下载/RSS"
@@ -1509,7 +1687,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     };
   }
 
-  if (item.downloadPath && item.downloadPath !== "无") {
+  if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
     const dirBtn = actionsRow.createEl("button", {
       cls: "curator-action-link",
       text: "📂 目录"
@@ -1556,6 +1734,37 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
       helpers.openTrendModal(item);
     };
   }
+
+  const triggerDeskWand = () => {
+    multiHallArchiveService.openMagicWandRelationModal(
+      plugin,
+      {
+        type: "anime",
+        name: item.name,
+        title: item.name,
+        studio: item.studio,
+        file: item.file
+      },
+      state.items || [],
+      {
+        onSwitchMode: helpers.switchWorkspaceMode,
+        onFilterCatalog: helpers.switchWorkspaceMode
+          ? (kw) => helpers.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+          : null
+      }
+    );
+  };
+  const wandBtn = actionsRow.createEl("button", {
+    cls: "curator-action-link",
+    text: "🪄 关联"
+  });
+  wandBtn.title = "长按卡片或点击打开洛琪希魔杖同源星轨关联谱";
+  wandBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    triggerDeskWand();
+  };
+  multiHallArchiveService.bindMagicWandLongPress(card, triggerDeskWand);
 }
 
 /**
@@ -1573,6 +1782,10 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
   }
 
   const allItems = state.items || [];
+  if (allItems.length === 0) {
+    renderNewUserStarterDesk(plugin, catalogMount, helpers);
+    return;
+  }
   const metrics = computeDeskMetrics(allItems);
 
   // 1. 按状态或展柜/自定义分区筛选
@@ -1618,7 +1831,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
 
     header = catalogMount.createDiv("curator-section-header curator-catalog-header");
     const titleWrap = header.createDiv("curator-section-title-wrap");
-    titleWrap.createEl("h2", { cls: "curator-section-title", text: "馆藏编目总览" });
+    titleWrap.createEl("h2", { cls: "curator-section-title", text: "编目总览" });
     const countBadge = titleWrap.createSpan({
       cls: "curator-section-badge"
     });
@@ -1938,7 +2151,11 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       });
     }
 
-    const coverUrl = item.file ? plugin.getCoverResourceUrl(item.cover, item.file.path) : "";
+    const coverUrl = item.file
+      ? plugin.getCoverResourceUrl(item.cover, item.file.path)
+      : item.cover
+      ? plugin.getCoverResourceUrl(item.cover, "")
+      : "";
     if (coverUrl) {
       const img = posterWrap.createEl("img", { cls: "bangumi-grid-poster curator-gallery-poster" });
       img.alt = item.name;
@@ -2073,7 +2290,7 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       reviewStudioService.openAnimeReviewStudioModal(plugin, item);
     };
 
-    if (item.downloadPath && item.downloadPath !== "无") {
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
       const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
       if (localResult && !localResult.error && localResult.fileCount > 0 && localResult.nextEpisodeFile) {
         const nextEpNum = localResult.nextEpisodeNumber || (watched + 1);
@@ -2112,7 +2329,7 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       }
     }
 
-    if (plugin.settings?.enableDownloadAssistant !== false) {
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
       const dlBtn = quietActions.createEl("button", {
         cls: "curator-gallery-quiet-link",
         text: "下载"
@@ -2142,6 +2359,37 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
         helpers.openTrendModal(item);
       };
     }
+
+    const triggerGalleryWand = () => {
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "anime",
+          name: item.name,
+          title: item.name,
+          studio: item.studio,
+          file: item.file
+        },
+        state.items || [],
+        {
+          onSwitchMode: helpers.switchWorkspaceMode,
+          onFilterCatalog: helpers.switchWorkspaceMode
+            ? (kw) => helpers.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    const wandGalleryBtn = quietActions.createEl("button", {
+      cls: "curator-gallery-quiet-link",
+      text: "🪄"
+    });
+    wandGalleryBtn.title = "长按卡片或点击打开洛琪希魔杖同源星轨关联谱";
+    wandGalleryBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      triggerGalleryWand();
+    };
+    multiHallArchiveService.bindMagicWandLongPress(card, triggerGalleryWand);
 
     const openNoteBtn = quietActions.createEl("button", {
       cls: "curator-gallery-quiet-link",
@@ -2291,7 +2539,11 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     // 2. 缩略图列
     const colCover = row.createDiv("col-cover");
     const thumbWrap = colCover.createDiv("curator-index-thumb-wrap");
-    const coverUrl = item.file ? plugin.getCoverResourceUrl(item.cover, item.file.path) : "";
+    const coverUrl = item.file
+      ? plugin.getCoverResourceUrl(item.cover, item.file.path)
+      : item.cover
+      ? plugin.getCoverResourceUrl(item.cover, "")
+      : "";
     if (coverUrl) {
       const img = thumbWrap.createEl("img", { cls: "curator-index-thumb" });
       img.alt = item.name;
@@ -2458,20 +2710,20 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       reviewStudioService.openAnimeReviewStudioModal(plugin, item);
     };
 
-    const noteBtn = colActions.createEl("button", {
-      cls: "curator-table-action-btn",
-      text: "笔记"
-    });
-    noteBtn.onclick = async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (item.file) {
+    if (item.file) {
+      const noteBtn = colActions.createEl("button", {
+        cls: "curator-table-action-btn",
+        text: "笔记"
+      });
+      noteBtn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         const leaf = plugin.app.workspace.getLeaf(true);
         await leaf.openFile(item.file);
-      }
-    };
+      };
+    }
 
-    if (plugin.settings?.enableDownloadAssistant !== false) {
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
       const dlBtn = colActions.createEl("button", {
         cls: "curator-table-action-btn",
         text: "⬇下载"
@@ -2489,7 +2741,7 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       };
     }
 
-    if (item.downloadPath && item.downloadPath !== "无") {
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
       const dirBtn = colActions.createEl("button", {
         cls: "curator-table-action-btn",
         text: "目录"
@@ -3165,6 +3417,21 @@ function renderUnifiedScoreRankBody(plugin, body, items, state) {
         if (isExpanded && groupItems.length > 0) {
           renderChronologyTreeDrawer(plugin, row, studioName, groupItems);
         }
+        multiHallArchiveService.bindMagicWandLongPress(row, () => {
+          const deskRoot = row.closest(".curator-desk-root");
+          const rt = deskRoot && deskRoot._deskRuntime;
+          multiHallArchiveService.openMagicWandRelationModal(
+            plugin,
+            { type: "studio", title: studioName, studio: studioName },
+            items,
+            {
+              onSwitchMode: rt ? rt.switchWorkspaceMode : null,
+              onFilterCatalog: rt
+                ? (kw) => rt.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+                : null
+            }
+          );
+        });
         return;
       }
 
@@ -3978,7 +4245,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
 
   const contentRow = canvas.createDiv("curator-roxy-grimoire-content");
 
-  // 左侧：原创洛琪希案头魔导静物插画（宽檐巫师帽 + 蓝发麻花辫发梢与缎带 + 阿库娅·哈提亚水王魔杖 + 典藏番剧魔导书 + 热红茶与水滴史莱姆）
+  // 左侧：原创洛琪希案头魔导静物插画（宽檐巫师帽 + 蓝发麻花辫发梢与缎带 + 洛琪希水王魔杖 + 典藏番剧魔导书 + 热红茶与水滴史莱姆）
   const artBox = contentRow.createDiv("curator-roxy-grimoire-art-box");
   artBox.innerHTML = `<svg class="curator-roxy-grimoire-art" viewBox="0 0 210 138" xmlns="http://www.w3.org/2000/svg">
     <defs>
@@ -4005,7 +4272,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
     <!-- 桌面柔和投影 -->
     <ellipse cx="105" cy="122" rx="84" ry="9" fill="#5a432b" fill-opacity="0.14"/>
 
-    <!-- 阿库娅·哈提亚 (Aqua Heartia) 魔杖斜靠在案卷后方 -->
+    <!-- 洛琪希水王魔杖斜靠在案卷后方 -->
     <g transform="rotate(-19 108 72)">
       <path d="M22,74 L172,74" stroke="#6d4929" stroke-width="5.2" stroke-linecap="round"/>
       <path d="M26,73 L170,73" stroke="#9e7348" stroke-width="1.6" stroke-linecap="round"/>
@@ -4996,23 +5263,34 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     text: "二维案头编目台"
   });
 
-  // 紧凑核心馆藏摘要
+  // 紧凑核心馆藏摘要（0 部新馆态收起全 0 废胶囊，改为柔和开馆提示）
+  const isZeroAnimeOnboarding = items.length === 0;
+  const isSampleMode = items.length > 0 && items.some((it) => Boolean(it?.isSamplePreviewItem));
   const metrics = computeDeskMetrics(items);
   const summaryStrip = topRow1.createDiv("curator-summary-strip");
-  const summaryDefs = [
-    { label: "所有收藏", val: `${metrics.total} 部`, role: "summary-total" },
-    { label: "在看", val: `${metrics.stateCounts["在看"]}`, role: "summary-watching" },
-    { label: "已看", val: `${metrics.stateCounts["已看"]}`, role: "summary-completed" },
-    { label: "想看", val: `${metrics.stateCounts["想看"]}`, role: "summary-plan" },
-    { label: "个人均分", val: `${metrics.personalAvg}`, role: "summary-myavg" },
-    { label: "BGM 均分", val: `${metrics.bgmAvg}`, role: "summary-bgmavg" }
-  ];
-  summaryDefs.forEach((sd) => {
-    const pill = summaryStrip.createDiv("curator-summary-pill");
-    pill.createSpan({ cls: "curator-summary-label", text: sd.label });
-    const valSpan = pill.createSpan({ cls: "curator-summary-val curator-mono", text: sd.val });
-    valSpan.dataset.statRole = sd.role;
-  });
+  if (isZeroAnimeOnboarding) {
+    const onboardingPill = summaryStrip.createDiv("curator-summary-pill is-onboarding-pill");
+    onboardingPill.dataset.ui = "onboarding-summary-pill";
+    onboardingPill.createSpan({
+      cls: "curator-summary-label",
+      text: "🌱 新馆待启 · 挑选一部喜欢的动画开启典藏（也可先载入示例样片逛展）"
+    });
+  } else {
+    const summaryDefs = [
+      { label: "所有收藏", val: `${metrics.total} 部`, role: "summary-total" },
+      { label: "在看", val: `${metrics.stateCounts["在看"]}`, role: "summary-watching" },
+      { label: "已看", val: `${metrics.stateCounts["已看"]}`, role: "summary-completed" },
+      { label: "想看", val: `${metrics.stateCounts["想看"]}`, role: "summary-plan" },
+      { label: "个人均分", val: `${metrics.personalAvg}`, role: "summary-myavg" },
+      { label: "BGM 均分", val: `${metrics.bgmAvg}`, role: "summary-bgmavg" }
+    ];
+    summaryDefs.forEach((sd) => {
+      const pill = summaryStrip.createDiv("curator-summary-pill");
+      pill.createSpan({ cls: "curator-summary-label", text: sd.label });
+      const valSpan = pill.createSpan({ cls: "curator-summary-val curator-mono", text: sd.val });
+      valSpan.dataset.statRole = sd.role;
+    });
+  }
 
   // 顶栏右侧主操作按钮组（仅保留全局级操作：刷新、恢复默认布局、打开 Markdown/番剧档案馆、三维原画档案室）
   const actionsCol = topRow1.createDiv("curator-topbar-actions");
@@ -5044,6 +5322,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     state.viewMode = "gallery";
     state.deskTab = "auto";
     state.catalogExpanded = false;
+    plugin.settings.workspaceTabOrder = ["desk", "catalog", "character", "gallery", "voice", "game"];
+    await plugin.saveSettings();
     roxyMascotService.emitRoxyEvent(plugin, {
       type: "layout:reset_warn",
       state: "warn2",
@@ -5094,24 +5374,62 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     options.bindToggle3DBtn(enter3DBtn);
   }
 
+  if (isSampleMode) {
+    const sampleBar = container.createDiv("curator-sample-preview-bar");
+    sampleBar.dataset.ui = "sample-preview-bar";
+    const sampleInfo = sampleBar.createDiv("curator-sample-preview-info");
+    sampleInfo.createSpan({ cls: "curator-sample-preview-badge", text: "✨ 示例样片预览中" });
+    sampleInfo.createSpan({
+      cls: "curator-sample-preview-text",
+      text: "当前展示 3 部纯内存示例样片（不会在笔记库生成任何文件）。一旦收录真实动画将自动退场。"
+    });
+    const sampleBtns = sampleBar.createDiv("curator-sample-preview-actions");
+    const addFirstBtn = sampleBtns.createEl("button", {
+      cls: "curator-top-btn mod-cta",
+      text: "➕ 搜索收录第一部番"
+    });
+    addFirstBtn.dataset.sampleAction = "add-first-anime";
+    addFirstBtn.onclick = async (e) => {
+      e.preventDefault();
+      if (typeof plugin.openSingleAnimeImportModal === "function") {
+        await plugin.openSingleAnimeImportModal("");
+      }
+    };
+    const syncBgmBtn = sampleBtns.createEl("button", {
+      cls: "curator-top-btn",
+      text: "🔄 同步 Bangumi 片单"
+    });
+    syncBgmBtn.dataset.sampleAction = "sync-bgm";
+    syncBgmBtn.onclick = async (e) => {
+      e.preventDefault();
+      if (typeof plugin.openBatchAnimeImportModal === "function") {
+        await plugin.openBatchAnimeImportModal();
+      }
+    };
+    const exitSampleBtn = sampleBtns.createEl("button", {
+      cls: "curator-top-btn is-subtle",
+      text: "退出示例预览"
+    });
+    exitSampleBtn.dataset.sampleAction = "exit-sample-preview";
+    exitSampleBtn.onclick = async (e) => {
+      e.preventDefault();
+      setSamplePreviewActive(plugin, false);
+      await renderCuratorDesk(plugin, container, options, helpers);
+    };
+  }
+
   // ==================== 2. 统一案头编目主工作台 (.curator-unified-workspace) + 展柜 + 年鉴 ====================
   const watchingCount = Number(metrics.stateCounts["在看"]) || 0;
   const localUpdatedCount = computeLocalUpdatedItems(items).length;
 
-  // 默认模式判定铁律：优先记忆用户上一次停留模式；若首次打开，有「在看」动画则默认「案头追番席」，否则默认「馆藏编目总览」
+  const validModes = ["desk", "catalog", "character", "gallery", "voice", "game"];
   let effectiveWorkspaceMode = "desk";
-  if (
-    state.workspaceModeCustomized &&
-    (state.workspaceMode === "desk" ||
-      state.workspaceMode === "catalog" ||
-      state.workspaceMode === "character")
-  ) {
+  if (state.workspaceModeCustomized && validModes.includes(state.workspaceMode)) {
     effectiveWorkspaceMode = state.workspaceMode;
-  } else if (
-    state.workspaceMode === "desk" ||
-    state.workspaceMode === "catalog" ||
-    state.workspaceMode === "character"
-  ) {
+  } else if (isZeroAnimeOnboarding) {
+    effectiveWorkspaceMode = "desk";
+    state.workspaceMode = "desk";
+  } else if (validModes.includes(state.workspaceMode)) {
     effectiveWorkspaceMode = state.workspaceMode;
   } else {
     effectiveWorkspaceMode = watchingCount > 0 ? "desk" : "catalog";
@@ -5124,47 +5442,216 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const modeBar = unifiedWorkspace.createDiv("curator-workspace-mode-bar");
   const modeTabs = modeBar.createDiv("curator-workspace-mode-tabs");
 
-  const deskModeBtn = modeTabs.createEl("button", {
-    cls: `curator-workspace-mode-btn ${effectiveWorkspaceMode === "desk" ? "is-active" : ""}`
-  });
-  deskModeBtn.dataset.workspaceMode = "desk";
-  deskModeBtn.createSpan({ cls: "curator-ws-mode-icon", text: "📖" });
-  deskModeBtn.createSpan({ cls: "curator-ws-mode-title", text: "案头追番席" });
-  const deskModeBadge = deskModeBtn.createSpan({
-    cls: "curator-ws-mode-badge curator-mono",
-    text:
-      localUpdatedCount > 0
-        ? `在看 ${watchingCount} · 新更 ${localUpdatedCount}`
-        : `在看 ${watchingCount} 部`
-  });
-  deskModeBadge.dataset.statRole = "workspace-desk-badge";
-
-  const catalogModeBtn = modeTabs.createEl("button", {
-    cls: `curator-workspace-mode-btn ${effectiveWorkspaceMode === "catalog" ? "is-active" : ""}`
-  });
-  catalogModeBtn.dataset.workspaceMode = "catalog";
-  catalogModeBtn.createSpan({ cls: "curator-ws-mode-icon", text: "🗂️" });
-  catalogModeBtn.createSpan({ cls: "curator-ws-mode-title", text: "馆藏编目总览" });
-  const catalogModeBadge = catalogModeBtn.createSpan({
-    cls: "curator-ws-mode-badge curator-mono",
-    text: `所有收藏 ${metrics.total} 部`
-  });
-  catalogModeBadge.dataset.statRole = "workspace-catalog-badge";
-
   const charCount = Array.isArray(plugin.settings?.characterCollection)
     ? plugin.settings.characterCollection.length
     : 0;
-  const charModeBtn = modeTabs.createEl("button", {
-    cls: `curator-workspace-mode-btn ${effectiveWorkspaceMode === "character" ? "is-active" : ""}`
-  });
-  charModeBtn.dataset.workspaceMode = "character";
-  charModeBtn.createSpan({ cls: "curator-ws-mode-icon", text: "👑" });
-  charModeBtn.createSpan({ cls: "curator-ws-mode-title", text: "角色典藏阁" });
-  const charModeBadge = charModeBtn.createSpan({
-    cls: "curator-ws-mode-badge curator-mono",
-    text: `角色 ${charCount} 位`
-  });
-  charModeBadge.dataset.statRole = "workspace-char-badge";
+  const illustCount =
+    typeof multiHallArchiveService.collectAllGalleryIllustrations === "function"
+      ? multiHallArchiveService.collectAllGalleryIllustrations(plugin, items).length
+      : Array.isArray(plugin.settings?.illustrationCollection)
+      ? plugin.settings.illustrationCollection.length
+      : 0;
+  const voiceCount = Array.isArray(plugin.settings?.voiceCollection)
+    ? plugin.settings.voiceCollection.length
+    : 0;
+  const gameCount = Array.isArray(plugin.settings?.gameCollection)
+    ? plugin.settings.gameCollection.length
+    : 0;
+
+  // 问题 8b：统一简洁的 6 大顶栏模块名称，并支持用户手动拖拽或点击箭头调整顺序（持久化在 workspaceTabOrder）
+  const workspaceTabDefs = {
+    desk: {
+      mode: "desk",
+      icon: "📖",
+      title: "追番",
+      statRole: "workspace-desk-badge",
+      getBadgeText: () =>
+        localUpdatedCount > 0
+          ? `在看 ${watchingCount} · 新更 ${localUpdatedCount}`
+          : `在看 ${watchingCount} 部`
+    },
+    catalog: {
+      mode: "catalog",
+      icon: "🗂️",
+      title: "编目总览",
+      statRole: "workspace-catalog-badge",
+      getBadgeText: () => `收藏 ${metrics.total} 部`
+    },
+    character: {
+      mode: "character",
+      icon: "👑",
+      title: "角色典藏",
+      statRole: "workspace-char-badge",
+      getBadgeText: () => `角色 ${charCount} 位`
+    },
+    gallery: {
+      mode: "gallery",
+      icon: "🖼️",
+      title: "画册典藏",
+      statRole: "workspace-gallery-badge",
+      getBadgeText: () => `画作 ${illustCount} 幅`
+    },
+    voice: {
+      mode: "voice",
+      icon: "🎙️",
+      title: "台词音声",
+      statRole: "workspace-voice-badge",
+      getBadgeText: () => `音声 ${voiceCount} 条`
+    },
+    game: {
+      mode: "game",
+      icon: "🎮",
+      title: "游戏典藏",
+      statRole: "workspace-game-badge",
+      getBadgeText: () => `游戏 ${gameCount} 部`
+    }
+  };
+
+  const getOrderedWorkspaceModes = () => {
+    const saved = Array.isArray(plugin.settings?.workspaceTabOrder)
+      ? plugin.settings.workspaceTabOrder
+      : [];
+    const seen = new Set();
+    const out = [];
+    for (const m of saved) {
+      if (validModes.includes(m) && !seen.has(m)) {
+        seen.add(m);
+        out.push(m);
+      }
+    }
+    for (const m of validModes) {
+      if (!seen.has(m)) {
+        seen.add(m);
+        out.push(m);
+      }
+    }
+    return out;
+  };
+
+  const tabBtnMap = {};
+  const tabBadgeMap = {};
+  let draggingTabMode = null;
+
+  const createWorkspaceTabEl = (modeKey) => {
+    const def = workspaceTabDefs[modeKey];
+    const btn = modeTabs.createEl("button", {
+      cls: `curator-workspace-mode-btn ${effectiveWorkspaceMode === modeKey ? "is-active" : ""}`
+    });
+    btn.dataset.workspaceMode = modeKey;
+    btn.draggable = true;
+    btn.title = `${def.title}（支持直接按住左右拖拽调整模块标签顺序）`;
+
+    const moveLeftSpan = btn.createSpan({
+      cls: "curator-ws-tab-move-btn is-left",
+      text: "‹"
+    });
+    moveLeftSpan.title = `将「${def.title}」向左移动一位`;
+    moveLeftSpan.onclick = async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await shiftWorkspaceTabOrder(modeKey, -1);
+    };
+
+    btn.createSpan({ cls: "curator-ws-mode-icon", text: def.icon });
+    btn.createSpan({ cls: "curator-ws-mode-title", text: def.title });
+    const badge = btn.createSpan({
+      cls: "curator-ws-mode-badge curator-mono",
+      text: def.getBadgeText()
+    });
+    badge.dataset.statRole = def.statRole;
+
+    const moveRightSpan = btn.createSpan({
+      cls: "curator-ws-tab-move-btn is-right",
+      text: "›"
+    });
+    moveRightSpan.title = `将「${def.title}」向右移动一位`;
+    moveRightSpan.onclick = async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await shiftWorkspaceTabOrder(modeKey, 1);
+    };
+
+    btn.addEventListener("dragstart", (ev) => {
+      draggingTabMode = modeKey;
+      btn.classList.add("is-dragging-tab");
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = "move";
+        try {
+          ev.dataTransfer.setData("text/plain", modeKey);
+        } catch (e) {}
+      }
+    });
+    btn.addEventListener("dragend", () => {
+      draggingTabMode = null;
+      modeTabs.querySelectorAll(".curator-workspace-mode-btn").forEach((el) => {
+        el.classList.remove("is-dragging-tab", "is-drag-over-tab");
+      });
+    });
+    btn.addEventListener("dragover", (ev) => {
+      if (!draggingTabMode || draggingTabMode === modeKey) return;
+      ev.preventDefault();
+      btn.classList.add("is-drag-over-tab");
+    });
+    btn.addEventListener("dragleave", () => {
+      btn.classList.remove("is-drag-over-tab");
+    });
+    btn.addEventListener("drop", async (ev) => {
+      ev.preventDefault();
+      btn.classList.remove("is-drag-over-tab");
+      const fromMode = draggingTabMode;
+      draggingTabMode = null;
+      if (!fromMode || fromMode === modeKey) return;
+      const curOrder = getOrderedWorkspaceModes();
+      const fromIdx = curOrder.indexOf(fromMode);
+      const toIdx = curOrder.indexOf(modeKey);
+      if (fromIdx === -1 || toIdx === -1) return;
+      curOrder.splice(fromIdx, 1);
+      curOrder.splice(toIdx, 0, fromMode);
+      plugin.settings.workspaceTabOrder = curOrder;
+      await plugin.saveSettings();
+      syncWorkspaceTabDomOrder(curOrder);
+    });
+
+    tabBtnMap[modeKey] = btn;
+    tabBadgeMap[modeKey] = badge;
+    return btn;
+  };
+
+  const syncWorkspaceTabDomOrder = (orderList) => {
+    orderList.forEach((m) => {
+      const btn = tabBtnMap[m];
+      if (btn) modeTabs.appendChild(btn);
+    });
+  };
+
+  const shiftWorkspaceTabOrder = async (modeKey, delta) => {
+    const curOrder = getOrderedWorkspaceModes();
+    const idx = curOrder.indexOf(modeKey);
+    const targetIdx = idx + delta;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= curOrder.length) return;
+    const tmp = curOrder[idx];
+    curOrder[idx] = curOrder[targetIdx];
+    curOrder[targetIdx] = tmp;
+    plugin.settings.workspaceTabOrder = curOrder;
+    await plugin.saveSettings();
+    syncWorkspaceTabDomOrder(curOrder);
+  };
+
+  getOrderedWorkspaceModes().forEach((m) => createWorkspaceTabEl(m));
+
+  const deskModeBtn = tabBtnMap.desk;
+  const catalogModeBtn = tabBtnMap.catalog;
+  const charModeBtn = tabBtnMap.character;
+  const galleryModeBtn = tabBtnMap.gallery;
+  const voiceModeBtn = tabBtnMap.voice;
+  const gameModeBtn = tabBtnMap.game;
+
+  const deskModeBadge = tabBadgeMap.desk;
+  const catalogModeBadge = tabBadgeMap.catalog;
+  const charModeBadge = tabBadgeMap.character;
+  const galleryModeBadge = tabBadgeMap.gallery;
+  const voiceModeBadge = tabBadgeMap.voice;
+  const gameModeBadge = tabBadgeMap.game;
 
   const quickRibbon = modeBar.createDiv("curator-workspace-quick-ribbon");
 
@@ -5184,6 +5671,21 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       effectiveWorkspaceMode === "character" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
     }`
   );
+  const galleryMount = workspaceStage.createDiv(
+    `curator-mount-gallery curator-workspace-pane ${
+      effectiveWorkspaceMode === "gallery" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
+    }`
+  );
+  const voiceMount = workspaceStage.createDiv(
+    `curator-mount-voice curator-workspace-pane ${
+      effectiveWorkspaceMode === "voice" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
+    }`
+  );
+  const gameMount = workspaceStage.createDiv(
+    `curator-mount-game curator-workspace-pane ${
+      effectiveWorkspaceMode === "game" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
+    }`
+  );
 
   const shelvesMount = container.createDiv("curator-mount-shelves");
   const almanacMount = container.createDiv("curator-mount-almanac");
@@ -5196,23 +5698,55 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     const curCharCount = Array.isArray(plugin.settings?.characterCollection)
       ? plugin.settings.characterCollection.length
       : 0;
+    const curIllustCount =
+      typeof multiHallArchiveService.collectAllGalleryIllustrations === "function"
+        ? multiHallArchiveService.collectAllGalleryIllustrations(plugin, state.items || []).length
+        : Array.isArray(plugin.settings?.illustrationCollection)
+        ? plugin.settings.illustrationCollection.length
+        : 0;
+    const curVoiceCount = Array.isArray(plugin.settings?.voiceCollection)
+      ? plugin.settings.voiceCollection.length
+      : 0;
+    const curGameCount = Array.isArray(plugin.settings?.gameCollection)
+      ? plugin.settings.gameCollection.length
+      : 0;
     if (deskModeBadge) {
       deskModeBadge.textContent =
         curLocalUpd > 0 ? `在看 ${curWatching} · 新更 ${curLocalUpd}` : `在看 ${curWatching} 部`;
     }
     if (catalogModeBadge) {
-      catalogModeBadge.textContent = `所有收藏 ${curMetrics.total} 部`;
+      catalogModeBadge.textContent = `收藏 ${curMetrics.total} 部`;
     }
     if (charModeBadge) {
       charModeBadge.textContent = `角色 ${curCharCount} 位`;
     }
+    if (galleryModeBadge) {
+      galleryModeBadge.textContent = `画作 ${curIllustCount} 幅`;
+    }
+    if (voiceModeBadge) {
+      voiceModeBadge.textContent = `音声 ${curVoiceCount} 条`;
+    }
+    if (gameModeBadge) {
+      gameModeBadge.textContent = `游戏 ${curGameCount} 部`;
+    }
+
+    const reorderToggleBtn = quickRibbon.createEl("button", {
+      cls: `curator-ws-quick-jump-btn ${modeTabs.classList.contains("is-reorder-mode") ? "is-active" : ""}`,
+      text: modeTabs.classList.contains("is-reorder-mode") ? "✓ 完成标签排序" : "⇄ 调整标签顺序"
+    });
+    reorderToggleBtn.title = "点击开启/关闭顶栏 6 大模块标签的左右调序箭头（也可直接按住任意标签拖拽排序）";
+    reorderToggleBtn.onclick = (e) => {
+      e.preventDefault();
+      modeTabs.classList.toggle("is-reorder-mode");
+      renderQuickRibbon();
+    };
 
     if (state.workspaceMode === "desk") {
       const hintSpan = quickRibbon.createSpan({
         cls: "curator-ws-ribbon-hint",
-        text: "聚焦当季连载与本地剧集跟进"
+        text: "长按任意卡片可唤醒 🪄 洛琪希魔杖 · 同源关联检索"
       });
-      hintSpan.title = "案头追番席专注于正在追番、本地视频更新与季度席位";
+      hintSpan.title = "追番席专注于正在追番、本地视频更新与季度席位；长按卡片或点击 🪄 查看跨馆同源关联";
 
       const quickSearchBtn = quickRibbon.createEl("button", {
         cls: "curator-ws-quick-jump-btn",
@@ -5223,29 +5757,10 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
         e.preventDefault();
         switchWorkspaceMode("catalog", { focusSearch: true });
       };
-    } else if (state.workspaceMode === "character") {
-      quickRibbon.createSpan({
-        cls: "curator-ws-ribbon-hint",
-        text: "汇聚角色履历与萌娘百科萌点偏好洞察"
-      });
-      const backDeskBtn = quickRibbon.createEl("button", {
-        cls: "curator-ws-quick-jump-btn",
-        text: `← 返回案头追番席 (在看 ${curWatching} 部)`
-      });
-      backDeskBtn.onclick = (e) => {
-        e.preventDefault();
-        switchWorkspaceMode("desk");
-      };
     } else {
-      if (curMetrics.totalReviewsCount > 0) {
-        quickRibbon.createSpan({
-          cls: "curator-ws-ribbon-stat curator-mono",
-          text: `💬 累计观片手札 ${curMetrics.totalReviewsCount} 条`
-        });
-      }
       const backDeskBtn = quickRibbon.createEl("button", {
         cls: "curator-ws-quick-jump-btn",
-        text: `← 返回案头追番席 (在看 ${curWatching} 部)`
+        text: `← 返回追番 (在看 ${curWatching} 部)`
       });
       backDeskBtn.dataset.workspaceAction = "jump-to-desk";
       backDeskBtn.onclick = (e) => {
@@ -5255,9 +5770,13 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     }
   };
 
+  const getWandCallbacks = () => ({
+    onSwitchMode: switchWorkspaceMode,
+    onFilterCatalog: (kw) => switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+  });
+
   const switchWorkspaceMode = (nextMode, switchOpts = {}) => {
-    const targetMode =
-      nextMode === "catalog" ? "catalog" : nextMode === "character" ? "character" : "desk";
+    const targetMode = validModes.includes(nextMode) ? nextMode : "desk";
     const prevMode = state.workspaceMode;
     state.workspaceMode = targetMode;
     state.workspaceModeCustomized = true;
@@ -5267,7 +5786,11 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       state.statusFilter = switchOpts.statusFilter;
       needCatalogRefresh = true;
     }
-    if (switchOpts.searchQuery !== undefined && state.searchQuery !== switchOpts.searchQuery) {
+    if (
+      targetMode === "catalog" &&
+      switchOpts.searchQuery !== undefined &&
+      state.searchQuery !== switchOpts.searchQuery
+    ) {
       state.searchQuery = switchOpts.searchQuery;
       needCatalogRefresh = true;
     }
@@ -5278,11 +5801,12 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     deskModeBtn.classList.toggle("is-active", targetMode === "desk");
     catalogModeBtn.classList.toggle("is-active", targetMode === "catalog");
     charModeBtn.classList.toggle("is-active", targetMode === "character");
+    galleryModeBtn.classList.toggle("is-active", targetMode === "gallery");
+    voiceModeBtn.classList.toggle("is-active", targetMode === "voice");
+    gameModeBtn.classList.toggle("is-active", targetMode === "game");
 
     const animCls =
-      targetMode === "catalog" || targetMode === "character"
-        ? "is-switching-to-catalog"
-        : "is-switching-to-desk";
+      targetMode !== "desk" ? "is-switching-to-catalog" : "is-switching-to-desk";
     workspaceStage.classList.remove("is-switching-to-catalog", "is-switching-to-desk");
 
     deskMount.classList.toggle("is-workspace-pane-active", targetMode === "desk");
@@ -5291,6 +5815,12 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     catalogMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "catalog");
     characterMount.classList.toggle("is-workspace-pane-active", targetMode === "character");
     characterMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "character");
+    galleryMount.classList.toggle("is-workspace-pane-active", targetMode === "gallery");
+    galleryMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "gallery");
+    voiceMount.classList.toggle("is-workspace-pane-active", targetMode === "voice");
+    voiceMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "voice");
+    gameMount.classList.toggle("is-workspace-pane-active", targetMode === "game");
+    gameMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "game");
 
     if (prevMode !== targetMode) {
       void workspaceStage.offsetWidth;
@@ -5303,7 +5833,6 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     }
 
     if (targetMode === "catalog") {
-      // 当从隐藏态切换到馆藏编目总览时，刷新一次以确保两排折叠列数基于真实可见宽度精确计算
       renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
       if (switchOpts.focusSearch) {
         requestAnimationFrame(() => {
@@ -5312,11 +5841,35 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
         });
       }
     } else if (targetMode === "character") {
+      if (switchOpts.searchQuery !== undefined && plugin.__characterArchiveUiState) {
+        plugin.__characterArchiveUiState.searchQuery = switchOpts.searchQuery;
+      }
       characterArchiveService.renderCharacterArchiveWorkspace(
         plugin,
         characterMount,
         state.items || [],
         { compactAlmanacMode: false }
+      );
+    } else if (targetMode === "gallery") {
+      multiHallArchiveService.renderIllustrationGalleryWorkspace(
+        plugin,
+        galleryMount,
+        state.items || [],
+        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
+      );
+    } else if (targetMode === "voice") {
+      multiHallArchiveService.renderVoiceLineArchiveWorkspace(
+        plugin,
+        voiceMount,
+        state.items || [],
+        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
+      );
+    } else if (targetMode === "game") {
+      multiHallArchiveService.renderGameLibraryWorkspace(
+        plugin,
+        gameMount,
+        state.items || [],
+        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
       );
     } else if (needCatalogRefresh) {
       renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
@@ -5331,23 +5884,27 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   deskModeBtn.onclick = (e) => {
     e.preventDefault();
-    if (state.workspaceMode !== "desk") {
-      switchWorkspaceMode("desk");
-    }
+    if (state.workspaceMode !== "desk") switchWorkspaceMode("desk");
   };
-
   catalogModeBtn.onclick = (e) => {
     e.preventDefault();
-    if (state.workspaceMode !== "catalog") {
-      switchWorkspaceMode("catalog");
-    }
+    if (state.workspaceMode !== "catalog") switchWorkspaceMode("catalog");
   };
-
   charModeBtn.onclick = (e) => {
     e.preventDefault();
-    if (state.workspaceMode !== "character") {
-      switchWorkspaceMode("character");
-    }
+    if (state.workspaceMode !== "character") switchWorkspaceMode("character");
+  };
+  galleryModeBtn.onclick = (e) => {
+    e.preventDefault();
+    if (state.workspaceMode !== "gallery") switchWorkspaceMode("gallery");
+  };
+  voiceModeBtn.onclick = (e) => {
+    e.preventDefault();
+    if (state.workspaceMode !== "voice") switchWorkspaceMode("voice");
+  };
+  gameModeBtn.onclick = (e) => {
+    e.preventDefault();
+    if (state.workspaceMode !== "game") switchWorkspaceMode("game");
   };
 
   const syncTopbarControls = () => {
@@ -5369,6 +5926,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   };
 
   const runtimeHelpers = Object.assign({}, helpers, {
+    rootContainer: container,
+    deskOptions: options,
     syncTopbarControls,
     switchWorkspaceMode,
     renderQuickRibbon,
@@ -5376,6 +5935,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     deskMount,
     catalogMount,
     characterMount,
+    galleryMount,
+    voiceMount,
+    gameMount,
     shelvesMount,
     almanacMount
   });
@@ -5391,9 +5953,39 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       state.items || [],
       { compactAlmanacMode: false }
     );
+  } else if (effectiveWorkspaceMode === "gallery") {
+    multiHallArchiveService.renderIllustrationGalleryWorkspace(
+      plugin,
+      galleryMount,
+      state.items || [],
+      { wandCallbacks: getWandCallbacks() }
+    );
+  } else if (effectiveWorkspaceMode === "voice") {
+    multiHallArchiveService.renderVoiceLineArchiveWorkspace(
+      plugin,
+      voiceMount,
+      state.items || [],
+      { wandCallbacks: getWandCallbacks() }
+    );
+  } else if (effectiveWorkspaceMode === "game") {
+    multiHallArchiveService.renderGameLibraryWorkspace(
+      plugin,
+      gameMount,
+      state.items || [],
+      { wandCallbacks: getWandCallbacks() }
+    );
   }
-  renderCustomShelvesSection(plugin, shelvesMount, state, container, options);
-  renderAlmanacSection(plugin, almanacMount, state, container, options);
+  if (isZeroAnimeOnboarding) {
+    shelvesMount.empty();
+    shelvesMount.style.display = "none";
+    almanacMount.empty();
+    almanacMount.style.display = "none";
+  } else {
+    shelvesMount.style.display = "";
+    almanacMount.style.display = "";
+    renderCustomShelvesSection(plugin, shelvesMount, state, container, options);
+    renderAlmanacSection(plugin, almanacMount, state, container, options);
+  }
 
   // 挂载或刷新二维洛琪希馆藏记录员（低打扰、可最小化、可暂时隐藏、可永久关闭）
   roxyMascotService.mountRoxy2DMascot(plugin, container, state, runtimeHelpers);
@@ -5629,7 +6221,7 @@ function getCuratorDeskStyles() {
     ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view{padding:4px 14px 28px !important;overflow-x:hidden !important;}",
     /* 容器级响应式工作台（宽屏提升约 14% 有效编目面积，同时保留两侧纸本台面呼吸留白，绝不产生横向溢出） */
     ".bangumi-score-dashboard{width:100%;max-width:100%;box-sizing:border-box;container-type:inline-size;container-name:curator-desk;}",
-    ".curator-desk-root{width:min(96%, 1560px);max-width:1560px;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;}",
+    ".curator-desk-root{width:min(98.5%, 2240px);max-width:2240px;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;}",
     ".curator-mono{font-variant-numeric:tabular-nums;font-family:var(--font-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace);}",
     /* 1. 统一单一顶栏 */
     ".curator-desk-topbar{position:relative;z-index:5;margin:0 0 18px;padding:14px 18px;border-radius:12px;border:1px solid color-mix(in srgb, #b8966c 34%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 94%, #f4efe6 6%);box-shadow:0 6px 20px rgba(42,32,22,0.06);display:flex;flex-direction:column;gap:12px;}",
@@ -6079,10 +6671,16 @@ function getCuratorDeskStyles() {
     /* 9. 统一案头编目主工作台 (.curator-unified-workspace) & 双模式切换与过渡 */
     ".curator-unified-workspace{margin-bottom:22px;border-radius:13px;border:1px solid color-mix(in srgb, #9e784b 30%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 64%, #f7f1e7 36%);box-shadow:0 6px 20px rgba(42,32,22,0.05);overflow:hidden;}",
     ".curator-workspace-mode-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 16px;background:linear-gradient(180deg, color-mix(in srgb, var(--background-primary) 88%, #f4ede0 12%), color-mix(in srgb, var(--background-secondary) 78%, #efe5d4 22%));border-bottom:1px solid color-mix(in srgb, #9e784b 24%, var(--background-modifier-border));}",
-    ".curator-workspace-mode-tabs{display:inline-flex;align-items:center;gap:6px;padding:3px;border-radius:9px;background:var(--background-primary);border:1px solid color-mix(in srgb, #9e784b 26%, var(--background-modifier-border));}",
-    ".curator-workspace-mode-btn{cursor:pointer;display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:7px;border:none;background:transparent;color:var(--text-muted);font-size:12.5px;font-weight:600;transition:all .16s cubic-bezier(0.22,1,0.36,1);}",
+    ".curator-workspace-mode-tabs{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;padding:3px;border-radius:9px;background:var(--background-primary);border:1px solid color-mix(in srgb, #9e784b 26%, var(--background-modifier-border));}",
+    ".curator-workspace-mode-btn{cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;border:none;background:transparent;color:var(--text-muted);font-size:12.5px;font-weight:600;transition:all .16s cubic-bezier(0.22,1,0.36,1);user-select:none;}",
     ".curator-workspace-mode-btn:hover{color:var(--text-normal);background:var(--background-modifier-hover);}",
     ".curator-workspace-mode-btn.is-active{background:linear-gradient(135deg,#8f683d,#a87d4c);color:#fffdf9 !important;box-shadow:0 3px 10px rgba(143,104,61,0.25);}",
+    ".curator-workspace-mode-btn.is-dragging-tab{opacity:0.48;transform:scale(0.96);}",
+    ".curator-workspace-mode-btn.is-drag-over-tab{outline:2px dashed #8f683d;outline-offset:1px;}",
+    ".curator-ws-tab-move-btn{display:none;align-items:center;justify-content:center;width:16px;height:16px;border-radius:4px;font-size:12px;font-weight:800;line-height:1;background:rgba(143,104,61,0.16);color:inherit;opacity:0.8;transition:all .12s ease;}",
+    ".curator-ws-tab-move-btn:hover{opacity:1;background:rgba(143,104,61,0.38);transform:scale(1.1);}",
+    ".curator-workspace-mode-tabs.is-reorder-mode .curator-ws-tab-move-btn{display:inline-flex;}",
+    ".curator-ws-quick-jump-btn.is-active{border-style:solid;background:#8f683d;color:#fffdf9;}",
     ".curator-ws-mode-icon{font-size:13px;line-height:1;}",
     ".curator-ws-mode-title{letter-spacing:0.02em;}",
     ".curator-ws-mode-badge{font-size:10.5px;padding:1px 7px;border-radius:999px;background:color-mix(in srgb, var(--background-secondary) 88%, #eee3d1 12%);color:var(--text-muted);font-weight:600;}",
@@ -6569,10 +7167,10 @@ function getCuratorDeskStyles() {
     ".curator-char-photowall-tile{cursor:pointer;position:relative;border-radius:8px;overflow:hidden;border:1px solid color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));background:radial-gradient(circle at 50% 40%, color-mix(in srgb, var(--background-secondary) 85%, #f7ebd7 15%), color-mix(in srgb, var(--background-primary) 90%, #241b12 10%));box-shadow:0 2px 8px rgba(28,20,12,0.08);transition:transform .22s cubic-bezier(0.22,1,0.36,1), box-shadow .22s ease, border-color .2s ease;}",
     ".curator-char-photowall-tile:hover{transform:translateY(-3px);border-color:#8f683d;box-shadow:0 8px 20px rgba(28,20,12,0.18);z-index:2;}",
     ".curator-char-photowall-imgwrap{width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;}",
-    ".curator-char-photowall-img{width:100% !important;height:100% !important;object-fit:contain !important;display:block;transition:transform .32s cubic-bezier(0.22,1,0.36,1);}",
+    ".curator-char-photowall-img{width:100% !important;height:100% !important;object-fit:cover;display:block;transition:transform .32s cubic-bezier(0.22,1,0.36,1);}",
     ".curator-char-photowall-tile:hover .curator-char-photowall-img{transform:scale(1.03);}",
     ".curator-char-photowall-topbar{position:absolute;top:6px;left:6px;right:6px;display:flex;align-items:center;justify-content:space-between;pointer-events:none;z-index:3;}",
-    ".curator-char-photowall-score{padding:1.5px 6px;font-size:10px;font-weight:800;border-radius:5px;background:rgba(28,20,12,0.78);color:#f7df9c;border:1px solid rgba(217,167,74,0.45);backdrop-filter:blur(4px);}",
+    ".curator-char-photowall-score{padding:1.5px 6px;font-size:10px;font-weight:800;border-radius:5px;background:rgba(28,20,12,0.78);color:#f7df9c;border:1px solid rgba(217,167,74,0.45);backdrop-filter:blur(4px);white-space:nowrap;flex-shrink:0;}",
     ".curator-char-photowall-cropbtn{pointer-events:auto;cursor:pointer;padding:2px 6px;font-size:11px;border-radius:5px;border:1px solid rgba(255,255,255,0.28);background:rgba(28,20,12,0.75);color:#fffdf9;opacity:0;transform:scale(0.9);transition:all .18s ease;}",
     ".curator-char-photowall-tile:hover .curator-char-photowall-cropbtn{opacity:1;transform:scale(1);}",
     ".curator-char-photowall-cropbtn:hover{background:#8f683d;border-color:#f7df9c;}",
@@ -6654,8 +7252,55 @@ function getCuratorDeskStyles() {
     ".curator-char-detail-block-title{font-size:11.5px;font-weight:800;color:#8f683d;}",
     ".curator-char-detail-summary{font-size:12px;line-height:1.55;color:var(--text-muted);max-height:110px;overflow-y:auto;padding:6px 8px;border-radius:6px;background:var(--background-secondary);}",
     ".curator-char-detail-footer{margin-top:12px;}",
+    /* 新用户清爽开馆便签 & 示例样片预览横幅 */
+    ".curator-summary-pill.is-onboarding-pill{background:color-mix(in srgb, #c8943c 12%, var(--background-secondary));border:1px solid color-mix(in srgb, #c8943c 35%, var(--background-modifier-border));padding:5px 12px;}",
+    ".curator-sample-preview-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px 16px;margin:0 0 12px 0;padding:10px 14px;border-radius:10px;border:1px solid color-mix(in srgb, #c8943c 44%, var(--background-modifier-border));background:linear-gradient(90deg, color-mix(in srgb, #f7df9c 18%, var(--background-secondary)), var(--background-primary));box-shadow:0 3px 10px rgba(42,30,16,0.05);}",
+    ".curator-sample-preview-info{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0;}",
+    ".curator-sample-preview-badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:800;background:#8f683d;color:#fffdf8;}",
+    ".curator-sample-preview-text{font-size:12.5px;color:var(--text-normal);}",
+    ".curator-sample-preview-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}",
+    ".curator-starter-desk{padding:22px 24px;border-radius:14px;border:1px solid color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));background:linear-gradient(180deg, color-mix(in srgb, #fbf6ec 55%, var(--background-primary)), var(--background-primary));box-shadow:0 8px 24px rgba(32,22,12,0.05);display:flex;flex-direction:column;gap:18px;}",
+    ".curator-starter-head{display:flex;flex-direction:column;gap:5px;border-bottom:1px dashed color-mix(in srgb, #8f683d 26%, var(--background-modifier-border));padding-bottom:14px;}",
+    ".curator-starter-kicker{font-size:11px;font-weight:800;letter-spacing:.08em;color:#8f683d;text-transform:uppercase;}",
+    ".curator-starter-title{margin:0;font-size:20px;font-weight:800;color:var(--text-normal);}",
+    ".curator-starter-sub{font-size:13px;color:var(--text-muted);line-height:1.55;}",
+    ".curator-starter-grid{display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:14px;align-items:stretch;}",
+    "@media (max-width: 1020px){.curator-starter-grid{grid-template-columns:1fr;}}",
+    ".curator-starter-card{display:flex;flex-direction:column;gap:10px;padding:16px 16px 15px;border-radius:11px;border:1px solid var(--background-modifier-border);background:var(--background-primary);transition:border-color .18s ease, box-shadow .18s ease;}",
+    ".curator-starter-card:hover{border-color:color-mix(in srgb, #8f683d 48%, var(--background-modifier-border));box-shadow:0 6px 18px rgba(38,26,14,0.06);}",
+    ".curator-starter-card.is-sample-card{background:linear-gradient(180deg, color-mix(in srgb, #f7df9c 14%, var(--background-primary)), var(--background-primary));border-color:color-mix(in srgb, #c8943c 38%, var(--background-modifier-border));}",
+    ".curator-starter-step{font-size:11px;font-weight:800;color:#8f683d;letter-spacing:.04em;}",
+    ".curator-starter-card-title{margin:0;font-size:15px;font-weight:800;color:var(--text-normal);}",
+    ".curator-starter-card-desc{font-size:12.5px;line-height:1.55;color:var(--text-muted);flex:1;}",
+    ".curator-starter-inline-row{display:flex;align-items:center;gap:7px;}",
+    ".curator-starter-inline-row .curator-input{flex:1;min-width:0;}",
+    ".curator-starter-chips{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding-top:2px;}",
+    ".curator-starter-chip-label{font-size:11.5px;color:var(--text-muted);}",
+    ".curator-starter-chip{cursor:pointer;padding:2px 9px;border-radius:999px;font-size:11.5px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);transition:all .15s ease;}",
+    ".curator-starter-chip:hover{border-color:#8f683d;color:#8f683d;background:color-mix(in srgb, #f7df9c 18%, var(--background-secondary));}",
+    ".curator-starter-sample-actions{display:flex;flex-wrap:wrap;gap:8px;}",
     reviewStudioService.getReviewStudioStyles(),
-    roxyMascotService.getRoxy2DMascotStyles()
+    roxyMascotService.getRoxy2DMascotStyles(),
+    multiHallArchiveService.getMultiHallStyles(),
+    /* Android / 移动端窄屏触控适配（置于级联末尾以确保覆盖子模块桌面间距） */
+    "@media (max-width: 768px){",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:10px 10px 88px !important;box-sizing:border-box !important;}",
+    "  .curator-topbar-row1{flex-direction:column;align-items:stretch !important;gap:10px !important;}",
+    "  .curator-topbar-actions{display:flex;flex-wrap:wrap;gap:6px !important;}",
+    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
+    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:10px 12px !important;margin-bottom:0 !important;min-width:0 !important;}",
+    "  .curator-workspace-mode-tabs{display:flex !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:2px;}",
+    "  .curator-workspace-mode-tabs::-webkit-scrollbar{display:none;}",
+    "  .curator-workspace-mode-btn{flex:0 0 auto !important;padding:7px 11px !important;}",
+    "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
+    "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;}",
+    "  .curator-ws-ribbon-hint{display:none !important;}",
+    "  .curator-workspace-stage{padding:10px 12px 14px !important;min-width:0 !important;}",
+    "  .curator-gallery-grid{grid-template-columns:repeat(2, minmax(0, 1fr)) !important;gap:10px !important;}",
+    "  .curator-desk-grid.is-watching-grid, .curator-desk-grid.is-standby-grid{grid-template-columns:1fr !important;}",
+    "  .curator-starter-desk{padding:15px 14px;}",
+    "  .curator-starter-inline-row{flex-direction:column;align-items:stretch;}",
+    "}"
   ].join("\n");
 }
 

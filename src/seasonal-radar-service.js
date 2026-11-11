@@ -172,7 +172,7 @@ function getTotalAnimeCountForYearOrSeason(plugin, yearNum, seasonMonth = null) 
 }
 
 /**
- * 检查本地封面附件目录（如 附件/Bangumi Images）下是否已存在指定番剧的本地封面文件
+ * 检查本地封面附件目录（默认：附件/动画封面）下是否已存在指定番剧的本地封面文件
  * 若已存在则直接返回本地 Vault 资源路径，避免重复请求远程外链
  */
 function resolveLocalCoverForSubject(plugin, subjectId, vaultItem = null) {
@@ -213,7 +213,7 @@ function resolveLocalCoverForSubject(plugin, subjectId, vaultItem = null) {
     return { hasLocal: false, localPath: "", resourceUrl: "" };
   }
 
-  const coverFolder = String(plugin?.settings?.coverFolder || "附件/Bangumi Images")
+  const coverFolder = String(plugin?.settings?.coverFolder || "附件/动画封面")
     .replace(/\\/g, "/")
     .replace(/\/+$/, "");
   const exts = ["jpg", "png", "webp", "jpeg", "gif", "avif"];
@@ -1585,7 +1585,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
     });
     batchCoverBtn.title =
       uncachedWithRemote.length > 0
-        ? `将当前季度尚未缓存的 ${uncachedWithRemote.length} 张番剧封面批量下载至本地目录 (${plugin.settings.coverFolder || "附件/Bangumi Images"})`
+        ? `将当前季度尚未缓存的 ${uncachedWithRemote.length} 张番剧封面批量下载至本地目录 (${plugin.settings.coverFolder || "附件/动画封面"})`
         : "本季所有展示番剧均已具备本地封面缓存";
     if (uncachedWithRemote.length === 0) {
       batchCoverBtn.disabled = true;
@@ -1596,7 +1596,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
       if (pending.length === 0) return;
 
       batchCoverBtn.disabled = true;
-      const folder = plugin.settings.coverFolder || "附件/Bangumi Images";
+      const folder = plugin.settings.coverFolder || "附件/动画封面";
       let done = 0;
       let success = 0;
       const concurrency = 4;
@@ -1827,7 +1827,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
             cacheSingleBtn.disabled = true;
             cacheSingleBtn.textContent = "缓存中…";
             try {
-              const folder = plugin.settings.coverFolder || "附件/Bangumi Images";
+              const folder = plugin.settings.coverFolder || "附件/动画封面";
               await noteManager.saveCoverLocally(plugin.app, folder, sub.id, sub.cover);
               renderSubjectsGrid(record);
             } catch (err) {

@@ -5,8 +5,8 @@
  * 同时为第六期（RhineLabUI 3D 交互式空间）提供标准化的三维曲线数据管道。
  */
 
-const fs = require("fs");
-const path = require("path");
+const { requestUrl } = require("obsidian");
+const { tryRequireNode, isDesktopNodeAvailable } = require("./platform-env.js");
 
 // 内存运行时缓存：Map<subjectId, { timestamp: number, data: any }>
 const memoryCache = new Map();
@@ -17,7 +17,8 @@ const MEMORY_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 小时
  */
 function ensureDirSync(dirPath) {
   try {
-    if (!fs.existsSync(dirPath)) {
+    const fs = tryRequireNode("fs");
+    if (fs && !fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true });
     }
   } catch (e) {
@@ -30,7 +31,9 @@ function ensureDirSync(dirPath) {
  */
 function getDiskCachePath(app, subjectId) {
   try {
-    if (!app || !app.vault || !app.vault.adapter) return null;
+    if (!isDesktopNodeAvailable()) return null;
+    const path = tryRequireNode("path");
+    if (!path || !app || !app.vault || !app.vault.adapter) return null;
     let basePath = "";
     if (typeof app.vault.adapter.getBasePath === "function") {
       basePath = app.vault.adapter.getBasePath();
@@ -48,8 +51,9 @@ function getDiskCachePath(app, subjectId) {
  * 从本地磁盘缓存读取
  */
 function readDiskCache(app, subjectId) {
+  const fs = tryRequireNode("fs");
   const filePath = getDiskCachePath(app, subjectId);
-  if (!filePath || !fs.existsSync(filePath)) return null;
+  if (!fs || !filePath || !fs.existsSync(filePath)) return null;
   try {
     const raw = fs.readFileSync(filePath, "utf-8");
     const json = JSON.parse(raw);
@@ -63,8 +67,9 @@ function readDiskCache(app, subjectId) {
  * 写入本地磁盘缓存
  */
 function writeDiskCache(app, subjectId, data) {
+  const fs = tryRequireNode("fs");
   const filePath = getDiskCachePath(app, subjectId);
-  if (!filePath) return;
+  if (!fs || !filePath) return;
   try {
     fs.writeFileSync(filePath, JSON.stringify(data), "utf-8");
   } catch (e) {
@@ -73,30 +78,46 @@ function writeDiskCache(app, subjectId, data) {
 }
 
 /**
- * 通用 HTTP GET 请求（优先使用 Obsidian requestUrl，回退使用 https）
+ * 通用 HTTP GET 请求（优先使用 Obsidian requestUrl，回退使用 fetch / https）
  */
 async function requestNetabaApi(url) {
-  // 1. 尝试使用 Obsidian 全局 requestUrl
-  try {
-    if (typeof window !== "undefined" && typeof window.requestUrl === "function") {
-      const resp = await window.requestUrl({
+  // 1. 尝试使用 Obsidian requestUrl
+  const reqFn = typeof requestUrl === "function"
+    ? requestUrl
+    : (typeof window !== "undefined" && typeof window.requestUrl === "function" ? window.requestUrl : null);
+  if (reqFn) {
+    try {
+      const resp = await reqFn({
         url,
         method: "GET",
         headers: {
-          "User-Agent": "ObsidianBangumiManager/0.3.x (https://github.com)"
+          "User-Agent": "ObsidianBangumiManager/0.6.0 (https://github.com/Curelove/bangumi-manager)"
         }
       });
       if (resp.status === 200) {
         return typeof resp.json === "object" ? resp.json : JSON.parse(resp.text);
       }
+    } catch (e) {
+      console.warn("Obsidian requestUrl 请求 Netaba 失败，尝试回退:", e);
     }
-  } catch (e) {
-    console.warn("Obsidian requestUrl 请求 Netaba 失败，尝试 https 回退:", e);
   }
 
-  // 2. 回退使用 Node.js 原生 https
+  // 2. 尝试原生 fetch（移动端兼容）
+  if (typeof fetch === "function") {
+    try {
+      const resp = await fetch(url);
+      if (resp.ok) {
+        return await resp.json();
+      }
+    } catch (e) {}
+  }
+
+  // 3. 回退使用桌面端 Node.js https
+  const https = tryRequireNode("https");
+  if (!https) {
+    throw new Error("Netaba 网络请求失败，当前环境无法连接");
+  }
   return new Promise((resolve, reject) => {
-    const https = require("https");
     https.get(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ObsidianBangumiManager"

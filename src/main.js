@@ -83,6 +83,17 @@ const curatorDesk = require("./dashboard-2d-desk.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
 const characterArchiveService = require("./character-archive-service.js");
+const multiHallArchiveService = require("./multi-hall-archive-service.js");
+const {
+  tryRequireNode,
+  isDesktopNodeAvailable,
+  canSafelyAutoReconcileVaultFolder
+} = require("./platform-env.js");
+const {
+  isSamplePreviewActive,
+  setSamplePreviewActive,
+  buildSamplePreviewItems
+} = require("./onboarding-sample-service.js");
 
 const bangumiApi = require("./bangumi-api.js");
 const importManager = require("./import-manager.js");
@@ -94,8 +105,9 @@ const createNetabaModals = require("./netaba-modals.js");
 var DEFAULT_SETTINGS = {
   mode: "lazy",
   dashboard3dPerfMode: "medium",
+  atelier3DModelStyle: "standard",
   noteRootFolder: "动画笔记",
-  coverFolder: "\u9644\u4EF6/Bangumi Images",
+  coverFolder: "附件/动画封面",
   baseFilePath: "动画笔记/追番广场/动画库.base",
   baseFolderPath: "动画笔记/追番广场",
   baseFolderPathManuallySet: false,
@@ -105,7 +117,9 @@ var DEFAULT_SETTINGS = {
   checkOnStartup: true,
   checkOnSave: true,
   seasonViewMode: "none",
-  showManagerRibbon: false,
+  showManagerRibbon: true,
+  managerRibbonIcon: BANGUMI_TV_MANAGER_ICON_ID,
+  dashboardRibbonIcon: BANGUMI_ARCHIVE_HALL_ICON_ID,
   bangumiUserId: "",
   batchLastUserId: "",
   batchCreateDownloadFolder: false,
@@ -168,9 +182,11 @@ var DEFAULT_SETTINGS = {
   dashboardShowStudioStats: true,
   customQuerySections: [],
   customCollectionSections: [],
+  enableRoxy2DMascotMaster: true,
   enableRoxy2DMascot: true,
   roxy2DMinimized: false,
   roxyForceLightweight2D: false,
+  roxyQuietMode: false,
   roxyPullToTopHintDismissed: false,
   dashboardScoreRankTab: "personal",
   dashboardScoreRankLimit: 10,
@@ -190,6 +206,8 @@ var DEFAULT_SETTINGS = {
   qbittorrentAutoCreateFolder: true,
   workspaceDefaultMode: "auto",
   workspaceModeCustomized: false,
+  workspaceTabOrder: ["desk", "catalog", "character", "gallery", "voice", "game"],
+  characterImageFolder: "附件/角色立绘",
   reviewImageFolder: "附件/观片手札图片",
   reviewEnterToSubmit: true,
   reviewCopyWithHeader: false,
@@ -201,7 +219,30 @@ var DEFAULT_SETTINGS = {
   characterNoteFolderManuallySet: false,
   characterLineupAutoRemoveBg: true,
   localVideoPlayerMode: "auto",
-  localVideoPlayerCustomPath: ""
+  localVideoPlayerCustomPath: "",
+  roxyDockExpandOnClickOnly: true,
+  customMascotName: "",
+  customMascotPortraits: {},
+  customMascotDialogues: {},
+  illustrationGalleryFolder: "附件/画册典藏",
+  gameImageFolder: "附件/游戏封面",
+  imageFoldersCustomized: false,
+  imageFoldersSplitV2Migrated: false,
+  illustExcludeAI: true,
+  illustAgeMode: "safe",
+  illustDownloadSizeMode: "regular",
+  illustSearchMode: "fuzzy",
+  illustRowHeight: 240,
+  illustCaptionMode: "hover",
+  illustrationCollection: [],
+  voiceArchiveFolder: "附件/台词音声库",
+  voiceArchivePadBeforeSec: 0.25,
+  voiceArchivePadAfterSec: 0.35,
+  voiceCollection: [],
+  gameLibraryRootFolder: "",
+  gameNoteFolder: "游戏笔记",
+  gameCollection: [],
+  ffmpegCustomPath: ""
 };
 
 var DEFAULT_PRESET_QUERY_SECTION = {
@@ -342,7 +383,42 @@ var BangumiScoreDashboardView = class extends ItemView {
     }
   }
 
+  onResize() {
+    if (this.space3DInstance && typeof this.space3DInstance.handleResize === "function") {
+      try {
+        this.space3DInstance.handleResize();
+      } catch (_) {}
+    }
+    if (this.dashboardEl) {
+      const triggerAvesGrids = () => {
+        if (!this.dashboardEl || !this.dashboardEl.isConnected) return;
+        const grids = this.dashboardEl.querySelectorAll(".is-aves-justified");
+        grids.forEach((g) => {
+          if (typeof g._avesTriggerRelayout === "function") {
+            g._avesTriggerRelayout();
+          }
+        });
+      };
+      triggerAvesGrids();
+      if (this._resizeSettleTimer) clearTimeout(this._resizeSettleTimer);
+      this._resizeSettleTimer = setTimeout(() => {
+        this._resizeSettleTimer = null;
+        triggerAvesGrids();
+      }, 250);
+    }
+  }
+
   async onClose() {
+    if (this._resizeSettleTimer) {
+      clearTimeout(this._resizeSettleTimer);
+      this._resizeSettleTimer = null;
+    }
+    if (this.plugin && typeof this.plugin._activeIllustWatcherCleanup === "function") {
+      try {
+        this.plugin._activeIllustWatcherCleanup();
+      } catch (_) {}
+      this.plugin._activeIllustWatcherCleanup = null;
+    }
     this.destroy3D();
     this.dashboardEl = null;
     this.contentEl.empty();
@@ -477,6 +553,83 @@ var BangumiManagerPlugin = class extends Plugin {
       this.settings.baseFolderPath +
       "/动画库.base";
 
+    // 归一化二维馆藏记录员前置开关与子开关
+    if (typeof this.settings.enableRoxy2DMascotMaster !== "boolean") {
+      this.settings.enableRoxy2DMascotMaster =
+        this.settings.enableRoxy2DMascot !== false ||
+        Boolean(this.settings.roxyForceLightweight2D);
+    }
+
+    // 归一化分类图片路径：按语义划分为独立默认目录（附件/动画封面、附件/角色立绘、附件/画册典藏、附件/观片手札图片、附件/游戏封面）
+    const CATEGORY_IMAGE_DEFAULTS = {
+      coverFolder: "附件/动画封面",
+      characterImageFolder: "附件/角色立绘",
+      reviewImageFolder: "附件/观片手札图片",
+      illustrationGalleryFolder: "附件/画册典藏",
+      gameImageFolder: "附件/游戏封面"
+    };
+    const LEGACY_SHARED_IMAGE_FOLDER = "附件/Bangumi Images";
+    for (const [k, defDir] of Object.entries(CATEGORY_IMAGE_DEFAULTS)) {
+      const normVal = this.normalizeDashboardPath(this.settings[k]);
+      if (!normVal || (!this.settings.imageFoldersSplitV2Migrated && normVal === LEGACY_SHARED_IMAGE_FOLDER)) {
+        this.settings[k] = defDir;
+      } else {
+        this.settings[k] = normVal;
+      }
+    }
+    this.settings.voiceArchiveFolder =
+      this.normalizeDashboardPath(this.settings.voiceArchiveFolder) || "附件/台词音声库";
+    if (typeof this.settings.illustExcludeAI !== "boolean") {
+      this.settings.illustExcludeAI = true;
+    }
+    if (!["safe", "safe_strict", "all", "r18"].includes(this.settings.illustAgeMode)) {
+      this.settings.illustAgeMode = "safe";
+    }
+    if (!["small", "regular", "original"].includes(this.settings.illustDownloadSizeMode)) {
+      this.settings.illustDownloadSizeMode = "regular";
+    }
+    if (!["fuzzy", "tag", "broad"].includes(this.settings.illustSearchMode)) {
+      this.settings.illustSearchMode = "fuzzy";
+    }
+    if (![185, 240, 310].includes(Number(this.settings.illustRowHeight))) {
+      this.settings.illustRowHeight = 240;
+    }
+    if (!["hover", "always"].includes(this.settings.illustCaptionMode)) {
+      this.settings.illustCaptionMode = "hover";
+    }
+    if (!["standard", "hd_cel_folio", "hd_collector_box"].includes(this.settings.atelier3DModelStyle)) {
+      this.settings.atelier3DModelStyle = "standard";
+    }
+    if (!this.settings.ribbonDefaultsV060Migrated) {
+      this.settings.showDashboardRibbon = true;
+      this.settings.showManagerRibbon = true;
+      this.settings.ribbonDefaultsV060Migrated = true;
+    }
+    if (typeof this.settings.dashboardRibbonIcon !== "string" || !this.settings.dashboardRibbonIcon.trim()) {
+      this.settings.dashboardRibbonIcon = BANGUMI_ARCHIVE_HALL_ICON_ID;
+    }
+    if (typeof this.settings.managerRibbonIcon !== "string" || !this.settings.managerRibbonIcon.trim()) {
+      this.settings.managerRibbonIcon = BANGUMI_TV_MANAGER_ICON_ID;
+    }
+    this.defaultDashboardRibbonIcon = BANGUMI_ARCHIVE_HALL_ICON_ID;
+    this.defaultManagerRibbonIcon = BANGUMI_TV_MANAGER_ICON_ID;
+
+    // 归一化顶部六个工作台页签顺序
+    const defaultTabOrder = ["desk", "catalog", "character", "gallery", "voice", "game"];
+    if (!Array.isArray(this.settings.workspaceTabOrder)) {
+      this.settings.workspaceTabOrder = [...defaultTabOrder];
+    } else {
+      const validSet = new Set(defaultTabOrder);
+      const cleaned = [];
+      for (const k of this.settings.workspaceTabOrder) {
+        if (validSet.has(k) && !cleaned.includes(k)) cleaned.push(k);
+      }
+      for (const k of defaultTabOrder) {
+        if (!cleaned.includes(k)) cleaned.push(k);
+      }
+      this.settings.workspaceTabOrder = cleaned;
+    }
+
     if (!Array.isArray(this.settings.customQuerySections)) {
       this.settings.customQuerySections = [];
     }
@@ -490,6 +643,24 @@ var BangumiManagerPlugin = class extends Plugin {
     this.isPluginWritingNote = new Set();
     this.calloutSyncTimers = new Map();
     this.characterNoteSyncTimers = new Map();
+    this.pathMigrationListeners = new Set();
+    this.pathMigrationState = {
+      status: "idle",
+      categoryKey: "",
+      categoryLabel: "",
+      oldPath: "",
+      newPath: "",
+      total: 0,
+      processed: 0,
+      movedFiles: 0,
+      updatedNotes: 0,
+      failed: 0,
+      currentItem: "",
+      startedAt: 0,
+      finishedAt: 0,
+      lastError: "",
+      logs: []
+    };
 
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
@@ -796,12 +967,187 @@ var BangumiManagerPlugin = class extends Plugin {
         }, 800);
       })
     );
+
+    const isGalleryMediaVaultPath = (rawPath) => {
+      const clean = String(rawPath || "")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+/, "");
+      if (!clean || !/\.(png|jpe?g|webp|gif|avif|bmp)$/i.test(clean)) return false;
+      const cleanLower = clean.toLowerCase();
+      const galleryFolderNorm = String(this.settings.illustrationGalleryFolder || "附件/画册典藏")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+|\/+$/g, "")
+        .toLowerCase();
+      if (galleryFolderNorm && cleanLower.startsWith(galleryFolderNorm + "/")) {
+        return true;
+      }
+      const coll = Array.isArray(this.settings.illustrationCollection)
+        ? this.settings.illustrationCollection
+        : [];
+      return coll.some((it) => {
+        const lp = String(it?.localPath || "")
+          .trim()
+          .replace(/\\/g, "/")
+          .replace(/^\/+/, "")
+          .toLowerCase();
+        return lp === cleanLower;
+      });
+    };
+
+    const scheduleGalleryVaultSync = (delayMs = 180) => {
+      if (this._galleryVaultSyncTimer) clearTimeout(this._galleryVaultSyncTimer);
+      this._galleryVaultSyncTimer = setTimeout(async () => {
+        this._galleryVaultSyncTimer = null;
+        try {
+          const hasSavedIllusts =
+            Array.isArray(this.settings.illustrationCollection) &&
+            this.settings.illustrationCollection.length > 0;
+          const canReconcile = await canSafelyAutoReconcileVaultFolder(
+            this.app,
+            this.settings.illustrationGalleryFolder || "附件/画册典藏",
+            hasSavedIllusts
+          );
+          if (canReconcile) {
+            await multiHallArchiveService.reconcileIllustrationCollectionWithDisk(this);
+          }
+        } catch (_) {}
+        if (typeof this._activeGalleryRefresh === "function") {
+          this._activeGalleryRefresh();
+        }
+        if (typeof document !== "undefined") {
+          try {
+            const latestCount = multiHallArchiveService.collectAllGalleryIllustrations(this).length;
+            document
+              .querySelectorAll('[data-stat-role="workspace-gallery-badge"]')
+              .forEach((el) => {
+                el.textContent = `画作 ${latestCount} 幅`;
+              });
+          } catch (_) {}
+        }
+      }, delayMs);
+    };
+
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (this.pathMigrationState?.status === "running") return;
+        if (file && isGalleryMediaVaultPath(file.path)) {
+          scheduleGalleryVaultSync(160);
+        }
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("rename", async (file, oldPath) => {
+        if (this.pathMigrationState?.status === "running") return;
+        if (isGalleryMediaVaultPath(oldPath) || (file && isGalleryMediaVaultPath(file.path))) {
+          try {
+            await multiHallArchiveService.handleVaultGalleryFileRename(this, oldPath, file?.path || "");
+          } catch (_) {}
+          scheduleGalleryVaultSync(180);
+        }
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (!this._layoutReadyDone || this.pathMigrationState?.status === "running") return;
+        if (file && isGalleryMediaVaultPath(file.path)) {
+          scheduleGalleryVaultSync(260);
+        }
+      })
+    );
+
     if (this.app.workspace && typeof this.app.workspace.onLayoutReady === "function") {
       this.app.workspace.onLayoutReady(async () => {
+        this._layoutReadyDone = true;
+        try {
+          const legacySharedDir = "附件/Bangumi Images";
+          const legacyFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
+          if (legacyFolderObj && Array.isArray(legacyFolderObj.children) && legacyFolderObj.children.length > 0) {
+            const splitOrder = [
+              { key: "characterImageFolder", targetDir: this.settings.characterImageFolder || "附件/角色立绘" },
+              { key: "reviewImageFolder", targetDir: this.settings.reviewImageFolder || "附件/观片手札图片" },
+              { key: "gameImageFolder", targetDir: this.settings.gameImageFolder || "附件/游戏封面" },
+              { key: "illustrationGalleryFolder", targetDir: this.settings.illustrationGalleryFolder || "附件/画册典藏" },
+              { key: "coverFolder", targetDir: this.settings.coverFolder || "附件/动画封面" }
+            ];
+            for (const item of splitOrder) {
+              if (item.targetDir && item.targetDir !== legacySharedDir) {
+                await this.migrateVaultFolderPath(item.key, legacySharedDir, item.targetDir, {
+                  showNotice: false,
+                  strictCategoryFilter: true
+                });
+              }
+            }
+          }
+          // 若旧版共享目录已排空且未被任何当前目录配置指向，自动清理空文件夹
+          try {
+            const configuredDirs = [
+              this.settings.coverFolder,
+              this.settings.characterImageFolder,
+              this.settings.reviewImageFolder,
+              this.settings.illustrationGalleryFolder,
+              this.settings.gameImageFolder
+            ].map((d) => String(d || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""));
+            if (!configuredDirs.includes(legacySharedDir)) {
+              const postFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
+              if (postFolderObj && Array.isArray(postFolderObj.children) && postFolderObj.children.length === 0) {
+                await this.app.vault.delete(postFolderObj);
+              }
+              const fs = tryRequireNode("fs");
+              const path = tryRequireNode("path");
+              const vaultBase =
+                isDesktopNodeAvailable() &&
+                fs &&
+                path &&
+                this.app?.vault?.adapter &&
+                typeof this.app.vault.adapter.getBasePath === "function"
+                  ? this.app.vault.adapter.getBasePath()
+                  : "";
+              if (vaultBase) {
+                const absLegacy = path.join(vaultBase, ...legacySharedDir.split("/"));
+                if (fs.existsSync(absLegacy) && fs.statSync(absLegacy).isDirectory()) {
+                  const leftFiles = fs.readdirSync(absLegacy);
+                  if (leftFiles.length === 0) {
+                    fs.rmdirSync(absLegacy);
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+          if (!this.settings.imageFoldersSplitV2Migrated) {
+            this.settings.imageFoldersSplitV2Migrated = true;
+            await this.saveSettings();
+          }
+        } catch (legacyErr) {
+          console.warn("[Bangumi Manager] 旧版共享图片目录自动分类迁移失败:", legacyErr);
+        }
         try {
           await characterArchiveService.reconcileCharacterCollectionWithNotes(this);
         } catch (e) {
           console.warn("[Bangumi Manager] 角色典藏笔记启动同步失败:", e);
+        }
+        try {
+          const hasSavedIllusts =
+            Array.isArray(this.settings.illustrationCollection) &&
+            this.settings.illustrationCollection.length > 0;
+          const canReconcile = await canSafelyAutoReconcileVaultFolder(
+            this.app,
+            this.settings.illustrationGalleryFolder || "附件/画册典藏",
+            hasSavedIllusts
+          );
+          if (canReconcile) {
+            await multiHallArchiveService.reconcileIllustrationCollectionWithDisk(this);
+          }
+        } catch (e) {
+          console.warn("[Bangumi Manager] 画册典藏磁盘对账启动同步失败:", e);
+        }
+        try {
+          await this.refreshOpenDashboardViews();
+        } catch (e) {
+          console.warn("[Bangumi Manager] 启动时刷新已打开档案馆视图失败:", e);
         }
       });
     }
@@ -836,6 +1182,13 @@ var BangumiManagerPlugin = class extends Plugin {
     clearTimeout(this.saveCheckTimer);
     clearTimeout(this.startupTimer);
     clearTimeout(this.dashboardAutoRefreshTimer);
+    clearTimeout(this._galleryVaultSyncTimer);
+    if (typeof this._activeIllustWatcherCleanup === "function") {
+      try {
+        this._activeIllustWatcherCleanup();
+      } catch (_) {}
+      this._activeIllustWatcherCleanup = null;
+    }
     if (this.calloutSyncTimers) {
       for (const t of this.calloutSyncTimers.values()) {
         clearTimeout(t);
@@ -926,8 +1279,11 @@ var BangumiManagerPlugin = class extends Plugin {
     if (!this.settings.showManagerRibbon) {
       return;
     }
+    const iconId =
+      String(this.settings.managerRibbonIcon || "").trim() ||
+      BANGUMI_TV_MANAGER_ICON_ID;
     this.managerRibbon = this.addRibbonIcon(
-      BANGUMI_TV_MANAGER_ICON_ID,
+      iconId,
       "Bangumi 追番管理器",
       () => {
         new ManagerRibbonModal(
@@ -949,8 +1305,11 @@ var BangumiManagerPlugin = class extends Plugin {
       return;
     }
 
+    const iconId =
+      String(this.settings.dashboardRibbonIcon || "").trim() ||
+      BANGUMI_ARCHIVE_HALL_ICON_ID;
     this.dashboardRibbon = this.addRibbonIcon(
-      BANGUMI_ARCHIVE_HALL_ICON_ID,
+      iconId,
       "打开番剧档案馆",
       async () => {
         await this.openScoreDashboardView();
@@ -1013,10 +1372,25 @@ getCurrentSeasonName() {
       this.settings.characterNoteFolder || this.getDefaultCharacterNoteFolder()
     );
     await this.ensureVaultFolder(
-      this.settings.coverFolder
+      this.settings.gameNoteFolder || "游戏笔记"
+    );
+    await this.ensureVaultFolder(
+      this.settings.coverFolder || "附件/动画封面"
+    );
+    await this.ensureVaultFolder(
+      this.settings.characterImageFolder || "附件/角色立绘"
     );
     await this.ensureVaultFolder(
       this.settings.reviewImageFolder || "附件/观片手札图片"
+    );
+    await this.ensureVaultFolder(
+      this.settings.illustrationGalleryFolder || "附件/画册典藏"
+    );
+    await this.ensureVaultFolder(
+      this.settings.gameImageFolder || "附件/游戏封面"
+    );
+    await this.ensureVaultFolder(
+      this.settings.voiceArchiveFolder || "附件/台词音声库"
     );
     if (this.settings.enableBaseFileGeneration === true) {
       await this.createBaseFileIfMissing(false);
@@ -1038,21 +1412,643 @@ getCurrentSeasonName() {
     if (!folderPath) {
       return;
     }
-    if (this.app.vault.getAbstractFileByPath(
-      folderPath
-    )) {
+    const cleanPath = String(folderPath)
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/^\/+|\/+$/g, "");
+    if (!cleanPath) return;
+    if (this.app.vault.getAbstractFileByPath(cleanPath)) {
       return;
     }
-    try {
-      await this.app.vault.createFolder(
-        folderPath
-      );
-    } catch (error) {
-      if (!this.app.vault.getAbstractFileByPath(
-        folderPath
-      )) {
-        throw error;
+    const segments = cleanPath.split("/").filter(Boolean);
+    let cur = "";
+    for (const seg of segments) {
+      cur = cur ? `${cur}/${seg}` : seg;
+      if (!this.app.vault.getAbstractFileByPath(cur)) {
+        try {
+          await this.app.vault.createFolder(cur);
+        } catch (error) {
+          if (!this.app.vault.getAbstractFileByPath(cur)) {
+            throw error;
+          }
+        }
       }
+    }
+  }
+
+  getPathMigrationSnapshot() {
+    if (!this.pathMigrationState) {
+      this.pathMigrationState = {
+        status: "idle",
+        categoryKey: "",
+        categoryLabel: "",
+        oldPath: "",
+        newPath: "",
+        total: 0,
+        processed: 0,
+        movedFiles: 0,
+        updatedNotes: 0,
+        failed: 0,
+        currentItem: "",
+        startedAt: 0,
+        finishedAt: 0,
+        lastError: "",
+        logs: []
+      };
+    }
+    return Object.assign({}, this.pathMigrationState, {
+      logs: Array.isArray(this.pathMigrationState.logs)
+        ? [...this.pathMigrationState.logs]
+        : []
+    });
+  }
+
+  onPathMigrationChange(listener) {
+    if (typeof listener !== "function") return () => {};
+    if (!this.pathMigrationListeners) {
+      this.pathMigrationListeners = new Set();
+    }
+    this.pathMigrationListeners.add(listener);
+    return () => {
+      this.pathMigrationListeners.delete(listener);
+    };
+  }
+
+  emitPathMigrationState() {
+    if (!this.pathMigrationListeners) return;
+    const snap = this.getPathMigrationSnapshot();
+    for (const fn of this.pathMigrationListeners) {
+      try {
+        fn(snap);
+      } catch (e) {
+        console.warn("[Bangumi Manager] pathMigration listener error:", e);
+      }
+    }
+  }
+
+  appendPathMigrationLog(text, level = "info") {
+    if (!this.pathMigrationState) this.getPathMigrationSnapshot();
+    const logs = Array.isArray(this.pathMigrationState.logs)
+      ? this.pathMigrationState.logs
+      : [];
+    logs.unshift({
+      ts: Date.now(),
+      text: String(text || ""),
+      level
+    });
+    if (logs.length > 60) logs.length = 60;
+    this.pathMigrationState.logs = logs;
+  }
+
+  /**
+   * 自动化路径迁移引擎：支持所有图片分类目录、台词音声目录、动画笔记目录、角色典藏笔记目录、游戏笔记目录、追番看板路径等变更时的自动迁移与引用同步
+   */
+  async migrateVaultFolderPath(categoryKeyOrObj, oldRawPath, newRawPath, options = {}) {
+    let categoryKey = categoryKeyOrObj;
+    if (categoryKeyOrObj && typeof categoryKeyOrObj === "object") {
+      categoryKey = categoryKeyOrObj.categoryKey || "illustrationGalleryFolder";
+      oldRawPath = categoryKeyOrObj.oldPath ?? categoryKeyOrObj.oldRawPath;
+      newRawPath = categoryKeyOrObj.newPath ?? categoryKeyOrObj.newRawPath;
+      options = Object.assign({}, categoryKeyOrObj, options);
+    }
+    const cleanPath = (p) =>
+      String(p || "")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+|\/+$/g, "");
+    const oldPath = cleanPath(oldRawPath);
+    const newPath = cleanPath(newRawPath);
+
+    if (!oldPath || !newPath || oldPath === newPath) {
+      return { skipped: true, reason: "路径未发生变化" };
+    }
+
+    const CATEGORY_LABELS = {
+      noteRootFolder: "动画笔记根目录",
+      characterNoteFolder: "角色典藏笔记目录",
+      gameNoteFolder: "游戏典藏笔记目录",
+      baseFolderPath: "传统动画库与看板目录",
+      dashboardPath: "Markdown 追番看板文件",
+      coverFolder: "动画封面图片目录",
+      characterImageFolder: "角色典藏立绘目录",
+      reviewImageFolder: "观片手札图片目录",
+      illustrationGalleryFolder: "画册典藏图片目录",
+      gameImageFolder: "游戏典藏封面目录",
+      voiceArchiveFolder: "台词音声保存目录",
+      unifiedImageFolder: "全部图片附件目录"
+    };
+    const categoryLabel = options.categoryLabel || CATEGORY_LABELS[categoryKey] || categoryKey;
+
+    this.getPathMigrationSnapshot();
+    this.pathMigrationState = Object.assign(this.pathMigrationState, {
+      status: "running",
+      categoryKey,
+      categoryLabel,
+      oldPath,
+      newPath,
+      total: 0,
+      processed: 0,
+      movedFiles: 0,
+      updatedNotes: 0,
+      failed: 0,
+      currentItem: "正在扫描待迁移文件与引用...",
+      startedAt: Date.now(),
+      finishedAt: 0,
+      lastError: ""
+    });
+    this.appendPathMigrationLog(`开始迁移「${categoryLabel}」：${oldPath} → ${newPath}`, "info");
+    this.emitPathMigrationState();
+
+    if (options.showNotice !== false) {
+      new Notice(`🔄 正在自动迁移「${categoryLabel}」(${oldPath} → ${newPath})...`, 4000);
+    }
+
+    try {
+      // 1. 如果是单个文件迁移（如 dashboardPath）
+      if (categoryKey === "dashboardPath") {
+        const lastSlash = newPath.lastIndexOf("/");
+        if (lastSlash > 0) {
+          await this.ensureVaultFolder(newPath.slice(0, lastSlash));
+        }
+        const existingOld = this.app.vault.getAbstractFileByPath(oldPath);
+        this.pathMigrationState.total = existingOld ? 1 : 0;
+        this.emitPathMigrationState();
+        if (existingOld && existingOld.path) {
+          this.pathMigrationState.currentItem = existingOld.path;
+          this.emitPathMigrationState();
+          if (this.app.fileManager && typeof this.app.fileManager.renameFile === "function") {
+            await this.app.fileManager.renameFile(existingOld, newPath);
+          } else {
+            await this.app.vault.rename(existingOld, newPath);
+          }
+          this.pathMigrationState.movedFiles = 1;
+          this.pathMigrationState.processed = 1;
+        }
+        this.pathMigrationState.status = "completed";
+        this.pathMigrationState.currentItem = "";
+        this.pathMigrationState.finishedAt = Date.now();
+        this.appendPathMigrationLog(
+          `完成迁移「${categoryLabel}」：移动 ${this.pathMigrationState.movedFiles} 个文件`,
+          "success"
+        );
+        this.emitPathMigrationState();
+        return { success: true, movedFiles: this.pathMigrationState.movedFiles, updatedNotes: 0 };
+      }
+
+      await this.ensureVaultFolder(newPath);
+
+      const allFiles = this.app.vault.getFiles ? this.app.vault.getFiles() : [];
+      const prefix = oldPath + "/";
+      const filesInOldFolder = allFiles.filter((f) => f && f.path && f.path.startsWith(prefix));
+
+      // 检查是否有其他图片分类仍在使用 oldPath（用于在共享目录拆分时精准筛选归属文件）
+      const imageKeys = [
+        "coverFolder",
+        "characterImageFolder",
+        "reviewImageFolder",
+        "illustrationGalleryFolder",
+        "gameImageFolder"
+      ];
+      const isImageCategory = imageKeys.includes(categoryKey) || categoryKey === "unifiedImageFolder";
+      const otherImageCategoriesStillUsingOld =
+        isImageCategory && categoryKey !== "unifiedImageFolder"
+          ? imageKeys.some((k) => k !== categoryKey && cleanPath(this.settings[k]) === oldPath)
+          : false;
+
+      // 收集集合引用集合以便精准识别文件归属
+      const charImageSet = new Set();
+      if (Array.isArray(this.settings.characterCollection)) {
+        for (const c of this.settings.characterCollection) {
+          if (!c) continue;
+          [c.localAvatar, c.localImagePath, c.avatar, c.imageUrl].forEach((p) => {
+            if (p && !/^https?:\/\//i.test(String(p))) {
+              const cp = cleanPath(p);
+              if (cp) charImageSet.add(cp);
+            }
+          });
+          if (Array.isArray(c.customPortraits)) {
+            c.customPortraits.forEach((p) => {
+              if (p && !/^https?:\/\//i.test(String(p))) {
+                const cp = cleanPath(p);
+                if (cp) charImageSet.add(cp);
+              }
+            });
+          }
+        }
+      }
+      const illustImageSet = new Set(
+        (Array.isArray(this.settings.illustrationCollection) ? this.settings.illustrationCollection : [])
+          .map((it) => cleanPath(it && it.localPath))
+          .filter(Boolean)
+      );
+      const gameImageSet = new Set();
+      if (Array.isArray(this.settings.gameCollection)) {
+        for (const g of this.settings.gameCollection) {
+          if (!g) continue;
+          [g.coverUrl, g.coverLocalPath].forEach((p) => {
+            if (p && !/^https?:\/\//i.test(String(p))) {
+              const cp = cleanPath(p);
+              if (cp) gameImageSet.add(cp);
+            }
+          });
+        }
+      }
+      const voiceFileSet = new Set(
+        (Array.isArray(this.settings.voiceCollection) ? this.settings.voiceCollection : [])
+          .map((v) => cleanPath(v && v.audioPath))
+          .filter(Boolean)
+      );
+
+      const shouldMoveFile = (file) => {
+        const name = String(file.name || "").toLowerCase();
+        const ext = String(file.extension || "").toLowerCase();
+        const rel = file.path.slice(prefix.length);
+        if (!rel) return false;
+        // 防止当新目录是旧目录的子目录时递归迁移新目录自身
+        if (newPath.startsWith(prefix) && file.path.startsWith(newPath + "/")) {
+          return false;
+        }
+
+        if (categoryKey === "unifiedImageFolder") {
+          return /^(png|jpg|jpeg|webp|gif|avif|svg|bmp)$/i.test(ext);
+        }
+        if (isImageCategory) {
+          if (!/^(png|jpg|jpeg|webp|gif|avif|svg|bmp)$/i.test(ext)) return false;
+          if (
+            !otherImageCategoriesStillUsingOld &&
+            !options.strictCategoryFilter &&
+            oldPath !== "附件/Bangumi Images"
+          ) {
+            return true;
+          }
+          if (options.moveAllFilesInFolder && !options.strictCategoryFilter) {
+            return true;
+          }
+          if (categoryKey === "coverFolder") {
+            return name.startsWith("bangumi-cover-") && !name.startsWith("bangumi-cover-char-");
+          }
+          if (categoryKey === "characterImageFolder") {
+            return (
+              charImageSet.has(file.path) ||
+              name.startsWith("bangumi-cover-char-") ||
+              name.startsWith("character-") ||
+              name.startsWith("bgm-char-") ||
+              name.startsWith("char-")
+            );
+          }
+          if (categoryKey === "reviewImageFolder") {
+            return name.startsWith("review-") || /^bgm\d+_ep/i.test(name);
+          }
+          if (categoryKey === "gameImageFolder") {
+            return gameImageSet.has(file.path) || name.startsWith("game-cover-");
+          }
+          if (categoryKey === "illustrationGalleryFolder") {
+            if (illustImageSet.has(file.path) || name.startsWith("illust-") || name.startsWith("illust_")) {
+              return true;
+            }
+            if (
+              name.startsWith("bangumi-cover-") ||
+              name.startsWith("character-") ||
+              name.startsWith("bgm-char-") ||
+              name.startsWith("char-") ||
+              name.startsWith("review-") ||
+              /^bgm\d+_ep/i.test(name) ||
+              name.startsWith("game-cover-") ||
+              charImageSet.has(file.path) ||
+              gameImageSet.has(file.path)
+            ) {
+              return false;
+            }
+            return true;
+          }
+        }
+        if (categoryKey === "voiceArchiveFolder") {
+          return (
+            voiceFileSet.has(file.path) ||
+            /^(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(ext)
+          );
+        }
+        if (categoryKey === "baseFolderPath") {
+          return name === "动画库.base" || ext === "base";
+        }
+        if (categoryKey === "characterNoteFolder" || categoryKey === "gameNoteFolder") {
+          return ext === "md";
+        }
+        if (categoryKey === "noteRootFolder") {
+          const charFolder = cleanPath(this.settings.characterNoteFolder);
+          const gameFolder = cleanPath(this.settings.gameNoteFolder);
+          if (charFolder && charFolder !== oldPath && file.path.startsWith(charFolder + "/")) {
+            return false;
+          }
+          if (gameFolder && gameFolder !== oldPath && file.path.startsWith(gameFolder + "/")) {
+            return false;
+          }
+          return true;
+        }
+        return true;
+      };
+
+      const targetFiles = filesInOldFolder.filter(shouldMoveFile);
+      const renamedMap = new Map(); // oldFilePath -> newFilePath
+
+      this.pathMigrationState.total = targetFiles.length;
+      this.emitPathMigrationState();
+
+      for (const file of targetFiles) {
+        const oldFilePath = file.path;
+        const relPath = oldFilePath.slice(prefix.length);
+        const destFilePath = `${newPath}/${relPath}`;
+        this.pathMigrationState.currentItem = oldFilePath;
+        this.emitPathMigrationState();
+
+        try {
+          const slashIdx = destFilePath.lastIndexOf("/");
+          if (slashIdx > 0) {
+            await this.ensureVaultFolder(destFilePath.slice(0, slashIdx));
+          }
+          const existingDest = this.app.vault.getAbstractFileByPath(destFilePath);
+          if (!existingDest) {
+            if (this.app.fileManager && typeof this.app.fileManager.renameFile === "function") {
+              await this.app.fileManager.renameFile(file, destFilePath);
+            } else {
+              await this.app.vault.rename(file, destFilePath);
+            }
+          }
+          renamedMap.set(oldFilePath, destFilePath);
+          this.pathMigrationState.movedFiles += 1;
+        } catch (moveErr) {
+          this.pathMigrationState.failed += 1;
+          this.appendPathMigrationLog(`移动文件失败 ${oldFilePath}: ${moveErr?.message || moveErr}`, "error");
+        }
+        this.pathMigrationState.processed += 1;
+        this.emitPathMigrationState();
+      }
+
+      // 2. 同步更新插件配置集合中的路径引用
+      const remapPathValue = (val) => {
+        const raw = String(val || "").trim();
+        if (!raw) return raw;
+        const norm = cleanPath(raw);
+        if (renamedMap.has(norm)) return renamedMap.get(norm);
+        if (norm.startsWith(prefix)) {
+          const candidate = `${newPath}/${norm.slice(prefix.length)}`;
+          if (this.app.vault.getAbstractFileByPath(candidate)) {
+            return candidate;
+          }
+        }
+        return raw;
+      };
+
+      let collectionsModified = false;
+
+      if (Array.isArray(this.settings.characterCollection)) {
+        for (const ch of this.settings.characterCollection) {
+          if (!ch) continue;
+          if (ch.localAvatar) {
+            const nextAv = remapPathValue(ch.localAvatar);
+            if (nextAv !== ch.localAvatar) {
+              ch.localAvatar = nextAv;
+              collectionsModified = true;
+            }
+          }
+          if (ch.avatar && !/^https?:\/\//i.test(ch.avatar)) {
+            const nextAv2 = remapPathValue(ch.avatar);
+            if (nextAv2 !== ch.avatar) {
+              ch.avatar = nextAv2;
+              collectionsModified = true;
+            }
+          }
+          if (ch.localImagePath) {
+            const nextP = remapPathValue(ch.localImagePath);
+            if (nextP !== ch.localImagePath) {
+              ch.localImagePath = nextP;
+              collectionsModified = true;
+            }
+          }
+          if (ch.imageUrl && !/^https?:\/\//i.test(ch.imageUrl)) {
+            const nextU = remapPathValue(ch.imageUrl);
+            if (nextU !== ch.imageUrl) {
+              ch.imageUrl = nextU;
+              collectionsModified = true;
+            }
+          }
+          if (Array.isArray(ch.customPortraits)) {
+            ch.customPortraits = ch.customPortraits.map((p) => {
+              if (p && !/^https?:\/\//i.test(String(p))) {
+                const nextCp = remapPathValue(p);
+                if (nextCp !== p) collectionsModified = true;
+                return nextCp;
+              }
+              return p;
+            });
+          }
+          if (ch.notePath) {
+            const nextN = remapPathValue(ch.notePath);
+            if (nextN !== ch.notePath) {
+              ch.notePath = nextN;
+              collectionsModified = true;
+            }
+          }
+          if (ch.animePath) {
+            const nextA = remapPathValue(ch.animePath);
+            if (nextA !== ch.animePath) {
+              ch.animePath = nextA;
+              collectionsModified = true;
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(this.settings.illustrationCollection)) {
+        for (const ill of this.settings.illustrationCollection) {
+          if (!ill) continue;
+          if (ill.localPath) {
+            const nextP = remapPathValue(ill.localPath);
+            if (nextP !== ill.localPath) {
+              ill.localPath = nextP;
+              collectionsModified = true;
+            }
+          }
+          if (ill.sourceNotePath) {
+            const nextS = remapPathValue(ill.sourceNotePath);
+            if (nextS !== ill.sourceNotePath) {
+              ill.sourceNotePath = nextS;
+              collectionsModified = true;
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(this.settings.voiceCollection)) {
+        for (const vc of this.settings.voiceCollection) {
+          if (!vc) continue;
+          if (vc.audioPath) {
+            const nextA = remapPathValue(vc.audioPath);
+            if (nextA !== vc.audioPath) {
+              vc.audioPath = nextA;
+              collectionsModified = true;
+            }
+          }
+          if (vc.sourceNotePath) {
+            const nextS = remapPathValue(vc.sourceNotePath);
+            if (nextS !== vc.sourceNotePath) {
+              vc.sourceNotePath = nextS;
+              collectionsModified = true;
+            }
+          }
+        }
+      }
+
+      if (Array.isArray(this.settings.gameCollection)) {
+        for (const gm of this.settings.gameCollection) {
+          if (!gm) continue;
+          if (gm.coverUrl && !/^https?:\/\//i.test(gm.coverUrl)) {
+            const nextCu = remapPathValue(gm.coverUrl);
+            if (nextCu !== gm.coverUrl) {
+              gm.coverUrl = nextCu;
+              collectionsModified = true;
+            }
+          }
+          if (gm.coverLocalPath) {
+            const nextC = remapPathValue(gm.coverLocalPath);
+            if (nextC !== gm.coverLocalPath) {
+              gm.coverLocalPath = nextC;
+              collectionsModified = true;
+            }
+          }
+          if (gm.notePath) {
+            const nextN = remapPathValue(gm.notePath);
+            if (nextN !== gm.notePath) {
+              gm.notePath = nextN;
+              collectionsModified = true;
+            }
+          }
+        }
+      }
+
+      if (this.settings.personalRatingCache && typeof this.settings.personalRatingCache === "object") {
+        const nextCache = {};
+        for (const [k, v] of Object.entries(this.settings.personalRatingCache)) {
+          const nextK = remapPathValue(k);
+          nextCache[nextK] = v;
+          if (nextK !== k) collectionsModified = true;
+        }
+        this.settings.personalRatingCache = nextCache;
+      }
+
+      if (Array.isArray(this.settings.customCollectionSections)) {
+        for (const sec of this.settings.customCollectionSections) {
+          if (!sec || !Array.isArray(sec.items)) continue;
+          for (const item of sec.items) {
+            if (item && item.path) {
+              const nextP = remapPathValue(item.path);
+              if (nextP !== item.path) {
+                item.path = nextP;
+                collectionsModified = true;
+              }
+            }
+          }
+        }
+      }
+
+      // 3. 扫描并更新笔记 Frontmatter 与正文中显式包含 oldPath/ 的路径引用
+      if (renamedMap.size > 0) {
+        const mdFiles = this.app.vault.getMarkdownFiles ? this.app.vault.getMarkdownFiles() : [];
+        for (const mdFile of mdFiles) {
+          try {
+            const content = await this.app.vault.read(mdFile);
+            if (!content || !content.includes(oldPath)) continue;
+            let updatedContent = content;
+            for (const [fromP, toP] of renamedMap.entries()) {
+              if (updatedContent.includes(fromP)) {
+                updatedContent = updatedContent.split(fromP).join(toP);
+              }
+            }
+            if (updatedContent !== content) {
+              if (this.isPluginWritingNote) this.isPluginWritingNote.add(mdFile.path);
+              try {
+                await this.app.vault.modify(mdFile, updatedContent);
+                this.pathMigrationState.updatedNotes += 1;
+              } finally {
+                if (this.isPluginWritingNote) {
+                  setTimeout(() => this.isPluginWritingNote.delete(mdFile.path), 1500);
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      // 4. 若旧目录已彻底排空，尝试清理空的旧目录
+      try {
+        const oldFolderAbstract = this.app.vault.getAbstractFileByPath(oldPath);
+        if (
+          oldFolderAbstract &&
+          Array.isArray(oldFolderAbstract.children) &&
+          oldFolderAbstract.children.length === 0
+        ) {
+          await this.app.vault.delete(oldFolderAbstract);
+        }
+        const fs = tryRequireNode("fs");
+        const path = tryRequireNode("path");
+        const vaultBase =
+          isDesktopNodeAvailable() &&
+          this.app?.vault?.adapter &&
+          typeof this.app.vault.adapter.getBasePath === "function"
+            ? this.app.vault.adapter.getBasePath()
+            : "";
+        if (vaultBase && fs && path) {
+          const absOld = path.join(vaultBase, ...oldPath.split("/"));
+          if (fs.existsSync(absOld) && fs.statSync(absOld).isDirectory()) {
+            const left = fs.readdirSync(absOld);
+            if (left.length === 0) {
+              fs.rmdirSync(absOld);
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (collectionsModified) {
+        await this.saveSettings();
+      }
+
+      this.pathMigrationState.status = "completed";
+      this.pathMigrationState.currentItem = "";
+      this.pathMigrationState.finishedAt = Date.now();
+      this.appendPathMigrationLog(
+        `完成迁移「${categoryLabel}」：共移动 ${this.pathMigrationState.movedFiles} 个文件，更新 ${this.pathMigrationState.updatedNotes} 篇笔记引用`,
+        "success"
+      );
+      this.emitPathMigrationState();
+
+      await this.refreshOpenDashboardViews();
+
+      if (options.showNotice !== false) {
+        new Notice(
+          `✅ 「${categoryLabel}」自动迁移完成：已迁移 ${this.pathMigrationState.movedFiles} 个文件，同步更新 ${this.pathMigrationState.updatedNotes} 篇笔记引用。`,
+          5500
+        );
+      }
+
+      return {
+        success: true,
+        movedFiles: this.pathMigrationState.movedFiles,
+        updatedNotes: this.pathMigrationState.updatedNotes,
+        failed: this.pathMigrationState.failed
+      };
+    } catch (error) {
+      const msg = error?.message || String(error);
+      this.pathMigrationState.status = "failed";
+      this.pathMigrationState.lastError = msg;
+      this.pathMigrationState.currentItem = "";
+      this.pathMigrationState.finishedAt = Date.now();
+      this.appendPathMigrationLog(`迁移「${categoryLabel}」失败：${msg}`, "error");
+      this.emitPathMigrationState();
+
+      if (options.showNotice !== false) {
+        new Notice(`❌ 「${categoryLabel}」路径迁移失败：${msg}`, 7000);
+      }
+      return { success: false, error: msg };
     }
   }
   async createBaseFileIfMissing(showNotice = false) {
@@ -1568,6 +2564,15 @@ views:
   }
 
   async checkAllLocalStatus(showNotice) {
+    if (!isDesktopNodeAvailable()) {
+      if (showNotice) {
+        new Notice(
+          "当前为移动端环境，本地桌面视频目录检测已自动跳过（笔记中原有的电脑端路径已安全保留）。",
+          4500
+        );
+      }
+      return;
+    }
     const files = this.app.vault.getMarkdownFiles();
     let checked = 0;
     let updated = 0;
@@ -1604,6 +2609,9 @@ views:
     }
   }
   async checkOneLocalStatus(file) {
+    if (!isDesktopNodeAvailable()) {
+      return "skipped";
+    }
     const content = await this.app.vault.read(file);
     const frontmatter = parseFrontmatter(content);
     if (!frontmatter) {
@@ -1894,6 +2902,18 @@ if (this.settings.seasonViewMode === "current") {
     }
     return result;
   }
+  async openSingleAnimeImportModal(initialQuery = "") {
+    if (typeof openSingleAnimeImport === "function") {
+      await openSingleAnimeImport(this.app, this, { initialQuery });
+    }
+  }
+
+  async openBatchAnimeImportModal() {
+    if (typeof openBatchAnimeImport === "function") {
+      await openBatchAnimeImport(this.app, this);
+    }
+  }
+
   async openScoreDashboardView() {
     const leaves =
       this.app.workspace.getLeavesOfType(
@@ -2162,6 +3182,22 @@ if (this.settings.seasonViewMode === "current") {
       });
     }
 
+    if (result.length > 0) {
+      if (isSamplePreviewActive(this)) {
+        setSamplePreviewActive(this, false);
+      }
+      this._samplePreviewItemsCache = null;
+      return result;
+    }
+
+    if (isSamplePreviewActive(this)) {
+      if (!Array.isArray(this._samplePreviewItemsCache) || this._samplePreviewItemsCache.length === 0) {
+        this._samplePreviewItemsCache = buildSamplePreviewItems();
+      }
+      return this._samplePreviewItemsCache;
+    }
+
+    this._samplePreviewItemsCache = null;
     return result;
   }
 
@@ -2221,7 +3257,8 @@ if (this.settings.seasonViewMode === "current") {
           cls: "internal-link"
         });
 
-        title.dataset.href = item.file.path;
+        const itemPath = item.file?.path || item.filePath || "";
+        title.dataset.href = itemPath;
         title.setAttribute(
           "data-type",
           "file"
@@ -2231,10 +3268,14 @@ if (this.settings.seasonViewMode === "current") {
           event.preventDefault();
           event.stopPropagation();
 
-          const leaf =
-            this.app.workspace.getLeaf(true);
+          if (item.file) {
+            const leaf =
+              this.app.workspace.getLeaf(true);
 
-          await leaf.openFile(item.file);
+            await leaf.openFile(item.file);
+          } else if (item.isSamplePreviewItem) {
+            new Notice("✨ 当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
+          }
         };
 
         const scoreValue = item[scoreKey];
@@ -3395,7 +4436,7 @@ if (this.settings.seasonViewMode === "current") {
       .replace(/^!\[\[|\]\]$/g, "")
       .replace(/^\[\[|\]\]$/g, "");
 
-    if (/^https?:\/\//i.test(cleanPath)) {
+    if (/^(?:https?:|data:|blob:|app:)/i.test(cleanPath)) {
       return cleanPath;
     }
 
@@ -3555,13 +4596,17 @@ if (this.settings.seasonViewMode === "current") {
 
     for (const item of items) {
       const card = grid.createDiv("bangumi-grid-card");
-      card.dataset.filePath = item.file.path;
+      card.dataset.filePath = item.file?.path || item.filePath || "";
 
       card.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const leaf = this.app.workspace.getLeaf(true);
-        await leaf.openFile(item.file);
+        if (item.file) {
+          const leaf = this.app.workspace.getLeaf(true);
+          await leaf.openFile(item.file);
+        } else if (item.isSamplePreviewItem) {
+          new Notice("✨ 当前为示例样片预览，收录真实动画后点击卡片即可直达本地笔记。", 2800);
+        }
       };
 
       const posterWrap = card.createDiv("bangumi-grid-poster-wrap");
@@ -3603,7 +4648,7 @@ if (this.settings.seasonViewMode === "current") {
       };
 
       // 封面海报
-      const coverUrl = this.getCoverResourceUrl(item.cover, item.file.path);
+      const coverUrl = this.getCoverResourceUrl(item.cover, item.file?.path || "");
       if (coverUrl) {
         const img = posterWrap.createEl("img", {
           cls: "bangumi-grid-poster"
@@ -3824,7 +4869,8 @@ if (this.settings.seasonViewMode === "current") {
 
     items.forEach((item, index) => {
       const row = list.createDiv("bangumi-dashboard-rank-row");
-      row.dataset.filePath = item.file.path;
+      const itemPath = item.file?.path || item.filePath || "";
+      row.dataset.filePath = itemPath;
 
       row.createDiv({
         text: String(index + 1),
@@ -3838,13 +4884,17 @@ if (this.settings.seasonViewMode === "current") {
         text: item.name,
         cls: "internal-link"
       });
-      title.dataset.href = item.file.path;
+      title.dataset.href = itemPath;
       title.setAttribute("data-type", "file");
       title.onclick = async (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const leaf = this.app.workspace.getLeaf(true);
-        await leaf.openFile(item.file);
+        if (item.file) {
+          const leaf = this.app.workspace.getLeaf(true);
+          await leaf.openFile(item.file);
+        } else if (item.isSamplePreviewItem) {
+          new Notice("✨ 当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
+        }
       };
 
       const primaryScore = item[primaryKey] !== null
@@ -4690,7 +5740,36 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   async quickUpdateAnimeNote(item, updates) {
-    if (!item || !item.file) return false;
+    if (!item) return false;
+    if (item.isSamplePreviewItem) {
+      if (updates.watchedEpisodes !== undefined) {
+        item.watchedEpisodes = updates.watchedEpisodes;
+        item.WatchedEpisodes = updates.watchedEpisodes;
+      }
+      if (updates.state !== undefined) {
+        item.state = updates.state;
+      }
+      if (updates.score !== undefined) {
+        item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+      }
+      if (updates.addTag) {
+        const tagArr = Array.isArray(item.tags)
+          ? [...item.tags]
+          : String(item.tags || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+        if (!tagArr.includes(updates.addTag)) tagArr.push(updates.addTag);
+        item.tags = tagArr;
+      }
+      if (updates.removeTag) {
+        const tagArr = Array.isArray(item.tags)
+          ? [...item.tags]
+          : String(item.tags || "").split(/[,;\s#\[\]"']+/).filter(Boolean);
+        item.tags = tagArr.filter((t) => t !== updates.removeTag);
+      }
+      await this.applyQuickUpdateToOpenDashboards(item, updates);
+      new Notice("✨ 示例样片体验：已临时更新预览状态（不会写入笔记库）", 2800);
+      return true;
+    }
+    if (!item.file) return false;
     try {
       const file = item.file;
       const content = await this.app.vault.read(file);

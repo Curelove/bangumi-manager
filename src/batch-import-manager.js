@@ -5,7 +5,8 @@ if (!Modal || !Notice) {
   throw new Error("主插件没有传入 Modal 或 Notice。");
 }
 
-var path = require("path");
+const { tryRequireNode, isDesktopNodeAvailable, joinPosixPath } = require("./platform-env.js");
+const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 var bangumiApi = require("./bangumi-api.js");
 var noteManager = require("./note-manager.js");
 var LIST_TYPES = {
@@ -175,16 +176,17 @@ var BatchAnimeImportModal = class extends Modal {
         }
       );
     }
+    const canCreateLocal = isDesktopNodeAvailable();
     const folderLabel = contentEl.createEl(
       "label"
     );
-    folderLabel.style.display = "block";
+    folderLabel.style.display = canCreateLocal ? "block" : "none";
     folderLabel.style.marginTop = "12px";
     const folderCheckbox = folderLabel.createEl(
       "input"
     );
     folderCheckbox.type = "checkbox";
-    folderCheckbox.checked = Boolean(
+    folderCheckbox.checked = canCreateLocal && Boolean(
       this.plugin.settings.batchCreateDownloadFolder
     );
     folderLabel.appendText(
@@ -522,6 +524,12 @@ var BatchAnimeImportModal = class extends Modal {
       await this.updateStatusFile(
         status
       );
+      if (status.createdNotes > 0) {
+        setSamplePreviewActive(this.plugin, false);
+        if (typeof this.plugin.refreshOpenDashboardViews === "function") {
+          await this.plugin.refreshOpenDashboardViews();
+        }
+      }
       this.writeProgress(
         progress,
         this.createSummary(
@@ -885,6 +893,11 @@ var BatchAnimeImportModal = class extends Modal {
     return folder + "/" + fileName + ".md";
   }
   createDownloadFolder(info) {
+    const fs2 = tryRequireNode("fs");
+    const path = tryRequireNode("path");
+    if (!fs2 || !isDesktopNodeAvailable()) {
+      return "\u65E0";
+    }
     const root = String(
       this.plugin.settings.localAnimeRoot || ""
     ).trim();
@@ -894,13 +907,9 @@ var BatchAnimeImportModal = class extends Modal {
     const folderName = noteManager.getSafeFileName(
       info.fileName || info.CN || info.JP
     );
-    const folderPath = path.join(
-      root,
-      info.year,
-      info.season,
-      folderName
-    );
-    const fs2 = require("fs");
+    const folderPath = path
+      ? path.join(root, info.year, info.season, folderName)
+      : joinPosixPath(root, info.year, info.season, folderName);
     fs2.mkdirSync(
       folderPath,
       {

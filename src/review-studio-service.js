@@ -1,13 +1,30 @@
-const fs = require("fs");
-const path = require("path");
-const { execSync, spawn } = require("child_process");
 const noteUtils = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
+const {
+  tryRequireNode,
+  isDesktopNodeAvailable,
+  crossPlatformPath: path,
+  crossPlatformFs: fs
+} = require("./platform-env.js");
 
-let electronShell = null;
-try {
-  electronShell = require("electron").shell;
-} catch (e) {}
+function execSync(...args) {
+  const cp = tryRequireNode("child_process");
+  if (!cp || typeof cp.execSync !== "function") return "";
+  return cp.execSync(...args);
+}
+
+function spawn(...args) {
+  const cp = tryRequireNode("child_process");
+  if (!cp || typeof cp.spawn !== "function") {
+    throw new Error("当前移动端环境不支持启动外部本地播放器进程");
+  }
+  return cp.spawn(...args);
+}
+
+function getElectronShell() {
+  const el = tryRequireNode("electron");
+  return el?.shell || null;
+}
 
 /**
  * 支持的本地视频播放器预设定义
@@ -59,9 +76,10 @@ function expandWindowsEnvVars(rawPath) {
     .replace(/^["']|["']$/g, "")
     .trim();
   if (!s) return "";
+  const envObj = (typeof process !== "undefined" && process && process.env) || {};
   s = s.replace(/%([^%]+)%/g, (_, varName) => {
     const key = String(varName || "").trim();
-    return process.env[key] || process.env[key.toUpperCase()] || `%${key}%`;
+    return envObj[key] || envObj[key.toUpperCase()] || `%${key}%`;
   });
   return s;
 }
@@ -72,6 +90,7 @@ function expandWindowsEnvVars(rawPath) {
  * - 回退使用 PowerShell WScript.Shell 解析快捷方式
  */
 function resolveExecutableOrShortcutPath(rawPath) {
+  if (!isDesktopNodeAvailable()) return "";
   const expanded = expandWindowsEnvVars(rawPath);
   if (!expanded) return "";
 
@@ -85,6 +104,7 @@ function resolveExecutableOrShortcutPath(rawPath) {
 
   if (/\.lnk$/i.test(expanded)) {
     // 1. 优先尝试 Electron 原生 readShortcutLink
+    const electronShell = getElectronShell();
     if (electronShell && typeof electronShell.readShortcutLink === "function") {
       try {
         const parsed = electronShell.readShortcutLink(expanded);
@@ -95,7 +115,8 @@ function resolveExecutableOrShortcutPath(rawPath) {
     }
 
     // 2. 回退使用 PowerShell WScript.Shell 读取 .lnk TargetPath
-    if (process.platform === "win32") {
+    const isWin = typeof process !== "undefined" && process.platform === "win32";
+    if (isWin) {
       try {
         const safeLnk = expanded.replace(/'/g, "''");
         const out = execSync(
@@ -130,10 +151,21 @@ function inferPlayerKindFromExe(exePath) {
  * 自动探测本机已安装的各类主流本地视频播放器（支持直接路径、环境变量、开始菜单 .lnk 快捷方式与注册表）
  */
 function detectInstalledVideoPlayers(plugin) {
-  const appData = process.env.APPDATA || "";
-  const localAppData = process.env.LOCALAPPDATA || "";
-  const programData = process.env.PROGRAMDATA || "C:\\ProgramData";
-  const userProfile = process.env.USERPROFILE || "";
+  if (!isDesktopNodeAvailable()) {
+    return {
+      preferredMode: String(plugin?.settings?.localVideoPlayerMode || "auto").trim() || "auto",
+      activeKind: "system",
+      activeExePath: "",
+      activeLabel: "移动端（仅阅读与编辑手札）",
+      supportsCliSeek: false,
+      detected: {}
+    };
+  }
+  const envObj = (typeof process !== "undefined" && process && process.env) || {};
+  const appData = envObj.APPDATA || "";
+  const localAppData = envObj.LOCALAPPDATA || "";
+  const programData = envObj.PROGRAMDATA || "C:\\ProgramData";
+  const userProfile = envObj.USERPROFILE || "";
 
   const playerCandidates = {
     potplayer: [
@@ -214,7 +246,8 @@ function detectInstalledVideoPlayers(plugin) {
   }
 
   // 注册表兜底探测 PotPlayer 与 弹弹play
-  if (!detected.potplayer.installed && process.platform === "win32") {
+  const isWin = typeof process !== "undefined" && process.platform === "win32";
+  if (!detected.potplayer.installed && isWin) {
     try {
       const regOut = execSync(
         'reg query "HKCU\\Software\\DAUM\\PotPlayer64" /v ProgramPath',
@@ -232,7 +265,7 @@ function detectInstalledVideoPlayers(plugin) {
     } catch (e) {}
   }
 
-  if (!detected.dandanplay.installed && process.platform === "win32") {
+  if (!detected.dandanplay.installed && isWin) {
     try {
       const regOut = execSync(
         'reg query "HKCU\\Software\\Classes\\dandanplay\\shell\\open\\command" /ve',
@@ -361,6 +394,22 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
   const normTs = noteUtils.normalizeTimestampInput(rawTimestamp);
   const seconds = normTs ? noteUtils.parseTimestampToSeconds(normTs) : null;
 
+  if (!isDesktopNodeAvailable()) {
+    if (normTs && typeof navigator !== "undefined" && navigator.clipboard) {
+      const copyPayload = episode ? `EP${String(episode).padStart(2, "0")} ${normTs}` : normTs;
+      await navigator.clipboard.writeText(copyPayload).catch(() => {});
+    }
+    if (NoticeClass) {
+      new NoticeClass(
+        normTs
+          ? `📱 当前为移动端环境，暂不支持拉起电脑端视频播放器（时间码 ${normTs} 已复制到剪贴板）。`
+          : "📱 当前为移动端环境，暂不支持拉起电脑端视频播放器。",
+        4200
+      );
+    }
+    return { ok: false, fallbackCopied: Boolean(normTs), mobileEnv: true };
+  }
+
   const matchRes = findLocalEpisodeVideoFile(item, episode);
   if (!matchRes.found || !matchRes.videoFile) {
     // 温和降级：复制时间码到剪贴板并给出友善轻提示，绝不报错打扰
@@ -487,10 +536,12 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
 }
 
 /**
- * 获取独立的「观片手札图片目录」配置路径（绝不与 coverFolder 混用）
+ * 获取「观片手札图片目录」配置路径（默认：附件/观片手札图片，支持独立配置）
  */
 function getReviewImageFolderPath(plugin) {
-  const raw = String(plugin?.settings?.reviewImageFolder || "附件/观片手札图片")
+  const raw = String(
+    plugin?.settings?.reviewImageFolder || "附件/观片手札图片"
+  )
     .trim()
     .replace(/\\/g, "/")
     .replace(/^\/+/, "")
@@ -2249,7 +2300,7 @@ function getReviewStudioStyles() {
     ".curator-rs-enter-toggle.is-checked{border-color:rgba(143,104,61,0.55);background:color-mix(in srgb, #8f683d 12%, var(--background-primary));color:#7a552c;}",
     ".curator-rs-enter-toggle input[type=checkbox]{margin:0;width:13px;height:13px;accent-color:#8f683d;cursor:pointer;}",
 
-    /* 6. 双轨主工作台（案头追番席 ⇄ 馆藏编目总览）切换器与平滑过渡动画 */
+    /* 6. 双轨主工作台（追番 ⇄ 编目总览）切换器与平滑过渡动画 */
     ".curator-unified-workspace{margin-bottom:20px;border-radius:12px;border:1px solid color-mix(in srgb, #9e784b 28%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 64%, #f7f2e9 36%);padding:12px 16px 16px;box-shadow:0 4px 16px rgba(42,32,22,0.04);}",
     ".curator-workspace-mode-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:10px;margin-bottom:12px;border-bottom:1px solid color-mix(in srgb, #9e784b 22%, var(--background-modifier-border));}",
     ".curator-workspace-switcher{position:relative;display:inline-flex;align-items:center;padding:3px;border-radius:9px;background:color-mix(in srgb, var(--background-primary) 92%, #efe6d5 8%);border:1px solid color-mix(in srgb, #8f683d 32%, var(--background-modifier-border));gap:4px;}",

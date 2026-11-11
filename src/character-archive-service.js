@@ -1,6 +1,12 @@
 const { requestUrl, Notice, Modal } = require("obsidian");
 const noteManager = require("./note-manager.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
+const multiHallArchiveService = require("./multi-hall-archive-service.js");
+const {
+  tryRequireNode,
+  isDesktopNodeAvailable,
+  writeVaultBinaryFile
+} = require("./platform-env.js");
 
 const BGM_USER_AGENT = "BangumiManagerObsidianPlugin/1.3 (https://github.com/bangumi-manager)";
 
@@ -1556,15 +1562,10 @@ function getCleanBrowserUserAgent() {
  */
 function ensureMoegirlPartitionUserAgent() {
   const cleanUa = getCleanBrowserUserAgent();
+  if (!isDesktopNodeAvailable()) return cleanUa;
   try {
-    const electron = require("electron");
-    const remote = electron?.remote || (() => {
-      try {
-        return require("@electron/remote");
-      } catch (_) {
-        return null;
-      }
-    })();
+    const electron = tryRequireNode("electron");
+    const remote = electron?.remote || tryRequireNode("@electron/remote");
     const ses = remote?.session?.fromPartition?.("persist:moegirl");
     if (ses && typeof ses.setUserAgent === "function") {
       ses.setUserAgent(cleanUa);
@@ -1578,6 +1579,9 @@ function ensureMoegirlPartitionUserAgent() {
  * 仅当 moegirl.uk/api.php 接口本身不可达时作为后备使用
  */
 async function fetchMoegirlViaElectronDom(candidateNames = [], timeoutMs = 7500) {
+  if (!isDesktopNodeAvailable()) {
+    return null;
+  }
   if (typeof document === "undefined" || !document.body || !candidateNames.length) {
     return null;
   }
@@ -2453,10 +2457,10 @@ async function fetchDualSourceCharacterProfile(bgmIdOrInput, manualNameHint = ""
 }
 
 /**
- * 保存角色立绘到本地 Vault 封面目录（附件/Bangumi Images/bangumi-cover-char-{id}.jpg）
+ * 保存角色立绘到本地 Vault 角色立绘目录（默认：附件/角色立绘/bangumi-cover-char-{id}.jpg）
  */
 async function saveCharacterAvatarLocally(app, coverFolder, charId, remoteUrl) {
-  const folder = String(coverFolder || "附件/Bangumi Images")
+  const folder = String(coverFolder || "附件/角色立绘")
     .replace(/\\/g, "/")
     .replace(/\/+$/, "");
   const cleanId = String(charId || "").replace(/^char-|^bgm-/i, "").replace(/[^a-zA-Z0-9_-]/g, "");
@@ -2468,24 +2472,34 @@ async function saveCharacterAvatarLocally(app, coverFolder, charId, remoteUrl) {
   // 若是洛琪希 (46465) 且本地已存在插件内置立绘 roxy_explain.png，优先在远程超时前准备或兜底写入本地附件目录
   const tryCopyLocalRoxyPortraitToVault = async () => {
     try {
-      const fs = require("fs");
-      const path = require("path");
+      const targetRel = `${folder}/bangumi-cover-char-46465.png`;
+      const configDir = String(app.vault?.configDir || ".obsidian").replace(/\\/g, "/").replace(/\/+$/, "");
+      const roxyRel = `${configDir}/plugins/bangumi-manager/assets/roxy/roxy_explain.png`;
+      if (app.vault?.adapter?.exists && app.vault?.adapter?.readBinary) {
+        const exists = await app.vault.adapter.exists(roxyRel);
+        if (exists) {
+          const ab = await app.vault.adapter.readBinary(roxyRel);
+          if (ab && ab.byteLength > 512) {
+            await writeVaultBinaryFile(app, targetRel, ab);
+            return targetRel;
+          }
+        }
+      }
+      const fs = tryRequireNode("fs");
+      const path = tryRequireNode("path");
       const vaultBase =
-        app.vault?.adapter && typeof app.vault.adapter.getBasePath === "function"
+        isDesktopNodeAvailable() &&
+        app.vault?.adapter &&
+        typeof app.vault.adapter.getBasePath === "function"
           ? app.vault.adapter.getBasePath()
           : "";
-      if (!vaultBase) return "";
+      if (!fs || !path || !vaultBase) return "";
       const roxySrc = path.join(vaultBase, ".obsidian", "plugins", "bangumi-manager", "assets", "roxy", "roxy_explain.png");
       if (!fs.existsSync(roxySrc)) return "";
       await noteManager.ensureVaultFolder(app, folder);
-      const targetRel = `${folder}/bangumi-cover-char-46465.png`;
       const targetAbs = path.join(vaultBase, ...targetRel.split("/"));
       fs.mkdirSync(path.dirname(targetAbs), { recursive: true });
       fs.copyFileSync(roxySrc, targetAbs);
-      const buf = fs.readFileSync(roxySrc);
-      if (app.vault?.adapter?.writeBinary) {
-        await app.vault.adapter.writeBinary(targetRel, buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)).catch(() => {});
-      }
       return targetRel;
     } catch (_) {
       return "";
@@ -2523,7 +2537,9 @@ async function saveCharacterAvatarLocally(app, coverFolder, charId, remoteUrl) {
 function resolveCharacterAvatarSrc(plugin, charItem, onCachedCallback = null) {
   if (!charItem) return "";
   const app = plugin?.app;
-  const folder = String(plugin?.settings?.coverFolder || "附件/Bangumi Images")
+  const folder = String(
+    plugin?.settings?.characterImageFolder || "附件/角色立绘"
+  )
     .replace(/\\/g, "/")
     .replace(/\/+$/, "");
 
@@ -2541,7 +2557,17 @@ function resolveCharacterAvatarSrc(plugin, charItem, onCachedCallback = null) {
     if (file && typeof app.vault.getResourcePath === "function") {
       return app.vault.getResourcePath(file);
     }
-    if (app.vault.adapter && typeof app.vault.adapter.getResourcePath === "function") {
+    // 仅当桌面端磁盘确实存在该文件（或无在线远程头像兜底）时走 adapter.getResourcePath，避免手机端选择性同步未拉取立绘时渲染破图
+    const fs = tryRequireNode("fs");
+    const path = tryRequireNode("path");
+    const vaultBase =
+      isDesktopNodeAvailable() && typeof app.vault.adapter?.getBasePath === "function"
+        ? app.vault.adapter.getBasePath()
+        : "";
+    const diskExists =
+      Boolean(fs && path && vaultBase) &&
+      fs.existsSync(path.join(vaultBase, ...String(charItem.localAvatar).replace(/\\/g, "/").split("/")));
+    if ((diskExists || !charItem.avatar) && app.vault.adapter && typeof app.vault.adapter.getResourcePath === "function") {
       return app.vault.adapter.getResourcePath(charItem.localAvatar);
     }
   }
@@ -3207,7 +3233,7 @@ async function createOrUpdateCharacterMarkdownNote(plugin, charRecord) {
   if (Array.isArray(charRecord.moePoints) && charRecord.moePoints.length > 0) {
     lines.push(charRecord.moePoints.map((t) => `\`${t}\``).join(" · "), "");
   } else {
-    lines.push("> 暂未录入萌点标签，可在番剧档案馆「角色典藏阁」中添加或同步。", "");
+    lines.push("> 暂未录入萌点标签，可在番剧档案馆「角色典藏」中添加或同步。", "");
   }
 
   if (charRecord.summary) {
@@ -3986,7 +4012,9 @@ function parseCharacterHeightCm(charItem) {
 async function saveCustomCharacterImageFromBuffer(plugin, charItem, arrayBuffer, extHint = "png") {
   const app = plugin?.app;
   if (!app?.vault || !arrayBuffer) return "";
-  const folder = String(plugin?.settings?.coverFolder || "附件/Bangumi Images")
+  const folder = String(
+    plugin?.settings?.characterImageFolder || "附件/角色立绘"
+  )
     .replace(/\\/g, "/")
     .replace(/\/+$/, "");
   await noteManager.ensureVaultFolder(app, folder);
@@ -5632,7 +5660,7 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
     cls: "curator-char-header-title",
     text: options.compactAlmanacMode
       ? "👑 角色典藏与萌娘百科萌点偏好洞察"
-      : "👑 角色典藏阁 · 角色履历与萌娘百科萌点偏好洞察"
+      : "👑 角色典藏 · 角色履历与萌娘百科萌点偏好洞察"
   });
   titleSide.createSpan({
     cls: "curator-char-header-sub curator-mono",
@@ -5689,13 +5717,13 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
       const roxy = createPresetRoxyCharacterRecord();
       roxy.localAvatar = await saveCharacterAvatarLocally(
         plugin.app,
-        plugin.settings.coverFolder,
+        plugin.settings.characterImageFolder || plugin.settings.coverFolder,
         roxy.bgmId,
         roxy.avatar
       );
       plugin.settings.characterCollection.push(roxy);
       await plugin.saveSettings();
-      if (Notice) new Notice("已将「洛琪希·米格路迪亚」收入角色典藏阁！");
+      if (Notice) new Notice("已将「洛琪希·米格路迪亚」收入角色典藏！");
       renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
       await plugin.refreshOpenDashboardViews();
     };
@@ -5777,7 +5805,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
     if (finalRecord.avatar && !finalRecord.localAvatar) {
       const savedAvatar = await saveCharacterAvatarLocally(
         plugin.app,
-        plugin.settings.coverFolder,
+        plugin.settings.characterImageFolder || plugin.settings.coverFolder,
         finalRecord.bgmId || finalRecord.id,
         finalRecord.avatar
       );
@@ -5827,7 +5855,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
       new Notice(
         mergeTargetChar
           ? `已将新数据合并更新至角色「${savedRecord.name}」！`
-          : `已将《${savedRecord.name}》收入角色典藏阁！`
+          : `已将《${savedRecord.name}》收入角色典藏！`
       );
     }
     renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
@@ -6095,7 +6123,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
 
     const saveBtn = submitRow.createEl("button", {
       cls: "curator-btn is-primary",
-      text: "✦ 收入角色典藏阁"
+      text: "✦ 收入角色典藏"
     });
     saveBtn.onclick = async (ev) => {
       ev.preventDefault();
@@ -6151,7 +6179,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
         );
         if (dupes.length > 0 && !forceNewMode) {
           saveBtn.disabled = false;
-          saveBtn.textContent = "✦ 收入角色典藏阁";
+          saveBtn.textContent = "✦ 收入角色典藏";
           openDuplicateCharacterConfirmModal(plugin, dupes[0], finalRecord, {
             onMerge: async (existingChar, incoming) => {
               await commitSaveCharacterRecord(incoming, existingChar, autoNoteCheckbox.checked);
@@ -6166,7 +6194,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
         await commitSaveCharacterRecord(finalRecord, null, autoNoteCheckbox.checked);
       } catch (err) {
         saveBtn.disabled = false;
-        saveBtn.textContent = "✦ 收入角色典藏阁";
+        saveBtn.textContent = "✦ 收入角色典藏";
         if (Notice) new Notice(`保存角色失败：${err.message}`);
       }
     };
@@ -6573,12 +6601,14 @@ function renderCharacterGallerySection(
       : `角色典藏画廊（共 ${filtered.length} 位）`
   });
 
-  // 画廊呈现模式切换器（档案卡片 / 等身标尺陈列架 / 画报照片墙）
+  // 画廊呈现模式切换器（档案卡片 / 等身标尺陈列架；原画报照片墙已独立升格为顶栏「🖼️ 画册典藏阁」）
   const viewSwitcher = leftBarGroup.createDiv("curator-char-view-switcher");
+  if (uiState.galleryViewMode === "photo-wall") {
+    uiState.galleryViewMode = "cards";
+  }
   [
     { id: "cards", label: "📇 档案卡片", title: "经典角色履历与萌点档案卡片视图" },
-    { id: "height-lineup", label: "📏 等身标尺架", title: "按角色真实身高比例并列陈列对比，支持标尺参考线、脚底基准校准与身高排序" },
-    { id: "photo-wall", label: "🖼️ 画报照片墙", title: "Aves 风格自适应画报照片墙，隐藏冗余文字，点击角色查看典藏详情" }
+    { id: "height-lineup", label: "📏 等身标尺架", title: "按角色真实身高比例并列陈列对比，支持标尺参考线、脚底基准校准与身高排序" }
   ].forEach((vm) => {
     const vBtn = viewSwitcher.createEl("button", {
       cls: `curator-char-view-btn ${uiState.galleryViewMode === vm.id ? "is-active" : ""}`,
@@ -6602,6 +6632,19 @@ function renderCharacterGallerySection(
       );
     };
   });
+
+  const jumpIllustHallBtn = viewSwitcher.createEl("button", {
+    cls: "curator-char-view-btn",
+    text: "🖼️ 画册典藏 ↗"
+  });
+  jumpIllustHallBtn.title = "前往独立升格的「🖼️ 画册典藏」（支持 Aves 画报照片墙、本地保存路径配置与在线搜图入库）";
+  jumpIllustHallBtn.onclick = (e) => {
+    e.preventDefault();
+    const deskRoot = galleryHost.closest(".curator-desk-root");
+    if (deskRoot && deskRoot._deskRuntime && typeof deskRoot._deskRuntime.switchWorkspaceMode === "function") {
+      deskRoot._deskRuntime.switchWorkspaceMode("gallery", { scrollToWorkspace: true });
+    }
+  };
 
   const sortWrap = bar.createDiv("curator-char-gallery-sort");
 
@@ -6776,8 +6819,47 @@ function renderCharacterGallerySection(
       nameTitleWrap.createSpan({ cls: "curator-char-card-jp", text: ch.nameJp });
     }
 
-    // 右上角克制直观的快速移除按钮
-    const topRemoveBtn = nameRow.createEl("button", {
+    // 右上角魔杖关联按钮与克制直观的快速移除按钮
+    const topRightBtns = nameRow.createDiv();
+    topRightBtns.style.display = "inline-flex";
+    topRightBtns.style.alignItems = "center";
+    topRightBtns.style.gap = "4px";
+
+    const wandBtn = topRightBtns.createEl("button", {
+      cls: "curator-char-top-remove-btn",
+      text: "🪄"
+    });
+    wandBtn.title = `长按卡片或点击打开「${ch.name}」的洛琪希魔杖全馆同源关联谱`;
+    const triggerCharWand = () => {
+      const deskRoot = galleryHost.closest(".curator-desk-root");
+      const rt = deskRoot && deskRoot._deskRuntime;
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "character",
+          id: ch.id,
+          name: ch.name,
+          title: ch.name,
+          cv: ch.cv,
+          appearances: ch.appearances || []
+        },
+        Array.from(vaultAnimeByTitle.values()),
+        {
+          onSwitchMode: rt ? rt.switchWorkspaceMode : null,
+          onFilterCatalog: rt
+            ? (kw) => rt.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    wandBtn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      triggerCharWand();
+    };
+    multiHallArchiveService.bindMagicWandLongPress(card, triggerCharWand);
+
+    const topRemoveBtn = topRightBtns.createEl("button", {
       cls: "curator-char-top-remove-btn",
       text: "×"
     });
@@ -7964,26 +8046,32 @@ function renderCharacterPhotoWallStage(
   );
 
   const masonry = collapseContainer.createDiv(
-    `curator-char-photowall-grid ${uiState.photoWallCaptionMode === "hover" ? "is-hover-plaque" : "is-always-plaque"}`
+    `curator-char-photowall-grid is-aves-justified ${uiState.photoWallCaptionMode === "hover" ? "is-hover-plaque" : "is-always-plaque"}`
   );
 
   const rowH = Number(uiState.photoWallRowHeight) || 240;
+  const tilesMeta = [];
+  let pendingImgRaf = 0;
+
+  const runCharAvesRelayout = () => {
+    multiHallArchiveService.layoutAvesJustifiedGrid(masonry, tilesMeta, {
+      targetRowHeight: Number(uiState.photoWallRowHeight) || rowH,
+      gap: 8
+    });
+  };
+
+  const scheduleCharImgRelayout = () => {
+    if (pendingImgRaf) return;
+    pendingImgRaf = requestAnimationFrame(() => {
+      pendingImgRaf = 0;
+      if (masonry.isConnected) runCharAvesRelayout();
+    });
+  };
 
   displayList.forEach((ch, idx) => {
     const tile = masonry.createDiv("curator-char-photowall-tile");
     tile.dataset.charId = ch.id;
     tile.style.setProperty("--stagger-idx", String(idx));
-
-    const applyTileAspectLayout = (aspectRatio) => {
-      const clampedAspect = Math.max(0.32, Math.min(2.4, Number(aspectRatio) || 0.68));
-      const baseWidth = Math.round(rowH * clampedAspect);
-      tile.style.height = `${rowH}px`;
-      tile.style.flex = `${Math.round(clampedAspect * 100)} 1 ${baseWidth}px`;
-      tile.style.maxWidth = `${Math.round(baseWidth * 1.48)}px`;
-    };
-
-    // 先以缓存宽高比或默认立绘宽高比初始化，图片加载完成后立即按真实宽高比无损排布
-    applyTileAspectLayout(ch._naturalAspect || 0.66);
 
     const imgWrap = tile.createDiv("curator-char-photowall-imgwrap");
     const avaSrc = resolveCharacterAvatarSrc(plugin, ch, (newUrl) => {
@@ -7991,23 +8079,27 @@ function renderCharacterPhotoWallStage(
       if (existingImg && existingImg.isConnected) existingImg.src = newUrl;
     });
 
+    let imgEl = null;
     if (avaSrc) {
-      const img = imgWrap.createEl("img", {
+      imgEl = imgWrap.createEl("img", {
         cls: "curator-char-photowall-img",
         attr: { src: avaSrc, alt: ch.name }
       });
-      img.loading = "lazy";
+      imgEl.loading = idx < 12 ? "eager" : "lazy";
       const updateFromNaturalSize = () => {
-        if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-          const realAspect = img.naturalWidth / img.naturalHeight;
+        if (imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
+          const realAspect = imgEl.naturalWidth / imgEl.naturalHeight;
+          const prevAspect = Number(ch._naturalAspect) || 0;
           ch._naturalAspect = realAspect;
-          applyTileAspectLayout(realAspect);
+          if (Math.abs(realAspect - prevAspect) > 0.004) {
+            scheduleCharImgRelayout();
+          }
         }
       };
-      if (img.complete && img.naturalWidth > 0) {
-        updateFromNaturalSize();
+      if (imgEl.complete && imgEl.naturalWidth > 0) {
+        ch._naturalAspect = imgEl.naturalWidth / imgEl.naturalHeight;
       } else {
-        img.onload = updateFromNaturalSize;
+        imgEl.onload = updateFromNaturalSize;
       }
     } else {
       imgWrap.createSpan({
@@ -8015,6 +8107,12 @@ function renderCharacterPhotoWallStage(
         text: (ch.name || "角").slice(0, 1)
       });
     }
+
+    tilesMeta.push({
+      el: tile,
+      imgEl,
+      getAspect: () => Number(ch._naturalAspect) || 0.68
+    });
 
     // 右上角轻量评分徽章与快速换图/取景按钮
     const topBar = tile.createDiv("curator-char-photowall-topbar");
@@ -8066,6 +8164,9 @@ function renderCharacterPhotoWallStage(
       openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh);
     };
   });
+
+  runCharAvesRelayout();
+  multiHallArchiveService.attachAvesResizeObserver(collapseContainer, masonry, runCharAvesRelayout);
 
   if (shouldEnableCollapse) {
     const expandBar = wallWrap.createDiv("curator-photowall-expand-bar");

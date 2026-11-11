@@ -1,0 +1,136 @@
+{
+  "packId": "daylight-cel-atelier-hd",
+  "version": "1.0.0",
+  "title": "白昼原画室 · 双风格典藏精装模型与PBR材质包",
+  "totalBytes": 437388,
+  "styles": {
+    "hd_cel_folio": {
+      "file": "cel-folio-hd.glb",
+      "bytes": 221388,
+      "label": "赛璐珞原画装裱夹（精装扩展）",
+      "desc": "顶部三孔原画定位卡头 + 45° 斜切白芯装裱卡窗 + 一体斜拼香槟金画框 + 三维折边黄铜护角与子母螺钉"
+    },
+    "hd_collector_box": {
+      "file": "collector-box-hd.glb",
+      "bytes": 216000,
+      "label": "典藏精装 BD 礼盒（亚麻书函）",
+      "desc": "深炭重磅亚麻装帧外函 + 书脊烫金箍带与朱砂铭牌 + 微露多折内胆册页 + 腰封金线与织锦抽拉书签带"
+    }
+  },
+  "audit": {
+    "cel_folio_hd": [
+      {
+        "name": "cel_01_carrier",
+        "verts": 272,
+        "faces": 272,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.184,
+          -0.068
+        ]
+      },
+      {
+        "name": "cel_02_substrate",
+        "verts": 192,
+        "faces": 186,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.058,
+          0.05
+        ]
+      },
+      {
+        "name": "cel_03_cel_frame",
+        "verts": 48,
+        "faces": 48,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          0.074,
+          0.116
+        ]
+      },
+      {
+        "name": "cel_04_cover",
+        "verts": 112,
+        "faces": 108,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          0.122,
+          0.138
+        ]
+      },
+      {
+        "name": "cel_05_fasteners",
+        "verts": 888,
+        "faces": 960,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.165,
+          0.176
+        ]
+      }
+    ],
+    "collector_box_hd": [
+      {
+        "name": "box_01_carrier",
+        "verts": 552,
+        "faces": 546,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.255,
+          0.128
+        ]
+      },
+      {
+        "name": "box_02_substrate",
+        "verts": 176,
+        "faces": 182,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.058,
+          0.052
+        ]
+      },
+      {
+        "name": "box_03_cel_frame",
+        "verts": 104,
+        "faces": 102,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          0.074,
+          0.134
+        ]
+      },
+      {
+        "name": "box_04_cover",
+        "verts": 112,
+        "faces": 108,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          0.026,
+          0.146
+        ]
+      },
+      {
+        "name": "box_05_fasteners",
+        "verts": 556,
+        "faces": 624,
+        "non_manifold_edges": 0,
+        "zero_area_faces": 0,
+        "three_z_range": [
+          -0.22,
+          0.178
+        ]
+      }
+    ]
+  }
+}

@@ -5,8 +5,8 @@ if (!Modal || !Notice) {
   throw new Error("主插件没有传入 Modal 或 Notice。");
 }
 
-var fs = require("fs");
-var path = require("path");
+const { tryRequireNode, isDesktopNodeAvailable, joinPosixPath } = require("./platform-env.js");
+const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 var bangumiApi = require("./bangumi-api.js");
 var noteManager = require("./note-manager.js");
 var WATCH_STATES2 = [
@@ -15,16 +15,18 @@ var WATCH_STATES2 = [
   "\u60F3\u770B",
   "\u629B\u5F03"
 ];
-async function openSingleAnimeImport2(app, plugin) {
+async function openSingleAnimeImport2(app, plugin, options = {}) {
   new SingleAnimeImportModal(
     app,
-    plugin
+    plugin,
+    options
   ).open();
 }
 var SingleAnimeImportModal = class extends Modal {
-  constructor(app, plugin) {
+  constructor(app, plugin, options = {}) {
     super(app);
     this.plugin = plugin;
+    this.initialQuery = String(options?.initialQuery || "").trim();
     this.results = [];
     this.selectedInfo = null;
   }
@@ -152,6 +154,10 @@ var SingleAnimeImportModal = class extends Modal {
         search();
       }
     };
+    if (this.initialQuery) {
+      keywordInput.value = this.initialQuery;
+      setTimeout(() => search(), 30);
+    }
   }
   async selectResult(result, detailArea) {
     detailArea.empty();
@@ -236,22 +242,24 @@ var SingleAnimeImportModal = class extends Modal {
         }
       );
     }
+    const canCreateLocal = isDesktopNodeAvailable();
     const folderLabel = detailArea.createEl(
       "label"
     );
-    folderLabel.style.display = "block";
+    folderLabel.style.display = canCreateLocal ? "block" : "none";
     folderLabel.style.marginTop = "12px";
     const folderCheckbox = folderLabel.createEl(
       "input"
     );
     folderCheckbox.type = "checkbox";
-    folderCheckbox.checked = true;
+    folderCheckbox.checked = canCreateLocal;
     folderLabel.appendText(
       " \u521B\u5EFA\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939"
     );
     const pathPreview = detailArea.createEl(
       "p"
     );
+    pathPreview.style.display = canCreateLocal ? "block" : "none";
     pathPreview.style.marginTop = "8px";
     pathPreview.style.color = "var(--text-muted)";
     const updatePreview = () => {
@@ -409,6 +417,10 @@ var SingleAnimeImportModal = class extends Modal {
       this.close();
       return;
     }
+    setSamplePreviewActive(this.plugin, false);
+    if (typeof this.plugin.refreshOpenDashboardViews === "function") {
+      await this.plugin.refreshOpenDashboardViews();
+    }
     new Notice(
       "\u5DF2\u521B\u5EFA\u52A8\u753B\u7B14\u8BB0\uFF1A" + result.filePath,
       8e3
@@ -478,6 +490,11 @@ function getTodayString() {
   ).padStart(2, "0");
 }
 function createDownloadFolder(settings, info) {
+  const fs = tryRequireNode("fs");
+  const path = tryRequireNode("path");
+  if (!fs || !isDesktopNodeAvailable()) {
+    return "\u65E0";
+  }
   const root = String(
     settings.localAnimeRoot || ""
   ).trim();
@@ -487,12 +504,9 @@ function createDownloadFolder(settings, info) {
   const folderName = noteManager.getSafeFileName(
     info.CN || info.JP || info.fileName
   );
-  const folderPath = path.join(
-    root,
-    info.year,
-    info.season,
-    folderName
-  );
+  const folderPath = path
+    ? path.join(root, info.year, info.season, folderName)
+    : joinPosixPath(root, info.year, info.season, folderName);
   try {
     fs.mkdirSync(
       folderPath,

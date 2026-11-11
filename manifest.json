@@ -1,9 +1,9 @@
 {
   "id": "bangumi-manager",
   "name": "Bangumi 追番管理器",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "minAppVersion": "1.4.0",
-  "description": "面向 Obsidian 桌面版的 Bangumi 追番与原画典藏馆插件：内置 2D 案头编目台与 3D 原画档案室、角色典藏阁与跨番等身标尺、二十年编年魔导书脊、观片手札帧级空降、漫猫单集唯一 RSS 与 qBittorrent 自动下载查重及洛琪希伴读记录员。",
+  "description": "面向 Obsidian 全平台（桌面与移动端）的 Bangumi 追番与原画典藏馆插件：内置 2D 案头编目台与双风格精装 3D 原画档案室、角色典藏阁与跨番等身标尺、二十年编年魔导书脊、观片手札帧级空降、漫猫单集唯一 RSS 与 qBittorrent 自动下载查重及洛琪希伴读记录员。",
   "author": "苦惹爱",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }

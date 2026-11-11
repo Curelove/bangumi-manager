@@ -1,10 +1,24 @@
 const Modal = globalThis.__BangumiManagerModal;
+const { setIcon, getIconIds } = require("obsidian");
 const {
   checkRoxyHdPortraitsStatus,
   downloadRoxyHdPortraitPack,
   normalizeRoxy2DModeSettings
 } = require("./roxy-mascot-service");
 const reviewStudioService = require("./review-studio-service");
+const {
+  tryRequireNode,
+  isDesktopNodeAvailable,
+  pluginAssetExists,
+  getPluginAssetResourceUrl
+} = require("./platform-env");
+const {
+  STYLE_CATALOG,
+  checkAtelierHdPackStatus,
+  downloadAtelierHdPack,
+  removeAtelierHdPack,
+  preloadAtelierHdPrototypes
+} = require("./atelier-3d-pack-service");
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -84,7 +98,8 @@ var ScoreDataRefreshPromptModal = class extends Modal {
 
     this.contentEl.empty();
   }
-};
+}
+
 class RatingSyncProgressModal extends Modal {
   constructor(app, plugin, onCloseRequest) {
     super(app);
@@ -377,6 +392,313 @@ class RatingSyncStopModal extends Modal {
   }
 }
 
+class PathMigrationStatusModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.unsubscribe = null;
+  }
+
+  onOpen() {
+    this.render();
+    if (this.plugin && typeof this.plugin.onPathMigrationChange === "function") {
+      this.unsubscribe = this.plugin.onPathMigrationChange(() => {
+        this.render();
+      });
+    }
+  }
+
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.style.maxWidth = "640px";
+
+    contentEl.createEl("h2", {
+      text: "📂 路径自动迁移状态"
+    });
+
+    const snap =
+      this.plugin && typeof this.plugin.getPathMigrationSnapshot === "function"
+        ? this.plugin.getPathMigrationSnapshot()
+        : { status: "idle", logs: [] };
+
+    const statusBadgeMap = {
+      idle: { text: "⚪ 空闲（尚未执行过迁移或等待路径变更）", color: "var(--text-muted)" },
+      running: { text: "🔄 正在迁移中…", color: "#d9822b" },
+      completed: { text: "✅ 迁移已完成", color: "#2e8b57" },
+      failed: { text: "❌ 迁移失败", color: "#c94a4a" }
+    };
+    const badgeInfo = statusBadgeMap[snap.status] || statusBadgeMap.idle;
+
+    const summaryBox = contentEl.createDiv();
+    summaryBox.style.padding = "12px 14px";
+    summaryBox.style.borderRadius = "8px";
+    summaryBox.style.border = "1px solid var(--background-modifier-border)";
+    summaryBox.style.background = "var(--background-secondary)";
+    summaryBox.style.marginBottom = "12px";
+
+    const stateLine = summaryBox.createDiv({
+      text: `当前状态：${badgeInfo.text}`
+    });
+    stateLine.style.fontWeight = "700";
+    stateLine.style.fontSize = "14px";
+    stateLine.style.color = badgeInfo.color;
+    stateLine.style.marginBottom = "6px";
+
+    if (snap.categoryLabel || snap.oldPath || snap.newPath) {
+      const routeLine = summaryBox.createDiv({
+        text: `最近任务：${snap.categoryLabel || "目录迁移"} （${snap.oldPath || "—"}  →  ${snap.newPath || "—"}）`
+      });
+      routeLine.style.fontSize = "12.5px";
+      routeLine.style.color = "var(--text-normal)";
+      routeLine.style.marginBottom = "4px";
+    }
+
+    if (snap.status !== "idle") {
+      const statsLine = summaryBox.createDiv({
+        text: `进度：${snap.processed || 0} / ${snap.total || 0} 项 · 已移动文件：${snap.movedFiles || 0} 个 · 已更新笔记引用：${snap.updatedNotes || 0} 篇 · 失败：${snap.failed || 0} 个`
+      });
+      statsLine.style.fontSize = "12px";
+      statsLine.style.color = "var(--text-muted)";
+
+      if (snap.status === "running" && snap.total > 0) {
+        const barOuter = summaryBox.createDiv();
+        barOuter.style.height = "6px";
+        barOuter.style.borderRadius = "999px";
+        barOuter.style.background = "var(--background-modifier-border)";
+        barOuter.style.marginTop = "8px";
+        barOuter.style.overflow = "hidden";
+        const barInner = barOuter.createDiv();
+        const pct = Math.min(100, Math.round(((snap.processed || 0) / snap.total) * 100));
+        barInner.style.width = `${pct}%`;
+        barInner.style.height = "100%";
+        barInner.style.background = "linear-gradient(90deg, #8f683d, #2e8b57)";
+      }
+
+      if (snap.currentItem) {
+        const curLine = summaryBox.createDiv({
+          text: `正在处理：${snap.currentItem}`
+        });
+        curLine.style.fontSize = "11.5px";
+        curLine.style.color = "var(--text-muted)";
+        curLine.style.marginTop = "6px";
+      }
+
+      if (snap.lastError) {
+        const errLine = summaryBox.createDiv({
+          text: `错误信息：${snap.lastError}`
+        });
+        errLine.style.fontSize = "12px";
+        errLine.style.color = "#c94a4a";
+        errLine.style.marginTop = "6px";
+      }
+    }
+
+    const logs = Array.isArray(snap.logs) ? snap.logs : [];
+    if (logs.length > 0) {
+      contentEl.createEl("h4", {
+        text: "最近迁移日志"
+      }).style.margin = "10px 0 6px";
+      const logBox = contentEl.createDiv();
+      logBox.style.maxHeight = "220px";
+      logBox.style.overflowY = "auto";
+      logBox.style.padding = "8px 10px";
+      logBox.style.borderRadius = "6px";
+      logBox.style.border = "1px solid var(--background-modifier-border)";
+      logBox.style.background = "var(--background-primary)";
+      logBox.style.fontSize = "11.5px";
+      logBox.style.lineHeight = "1.55";
+      for (const entry of logs) {
+        const row = logBox.createDiv();
+        const timeStr = entry.ts ? new Date(entry.ts).toLocaleTimeString() : "";
+        row.textContent = `[${timeStr}] ${entry.text}`;
+        if (entry.level === "error") row.style.color = "#c94a4a";
+        else if (entry.level === "success") row.style.color = "#2e8b57";
+        else row.style.color = "var(--text-muted)";
+      }
+    }
+
+    const actions = contentEl.createDiv();
+    actions.style.display = "flex";
+    actions.style.justifyContent = "flex-end";
+    actions.style.marginTop = "14px";
+    const closeBtn = actions.createEl("button", { text: "关闭", cls: "mod-cta" });
+    closeBtn.onclick = () => this.close();
+  }
+
+  onClose() {
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+    this.contentEl.empty();
+  }
+}
+
+const PRESET_RIBBON_ICONS = [
+  { id: "bangumi-archive-hall", label: "双翼档案册" },
+  { id: "bangumi-tv-manager", label: "追番小电视" },
+  { id: "book-open", label: "翻开书册" },
+  { id: "library", label: "馆藏书架" },
+  { id: "film", label: "胶片画格" },
+  { id: "clapperboard", label: "场记板" },
+  { id: "tv", label: "电视屏幕" },
+  { id: "sparkles", label: "星芒策展" },
+  { id: "layers", label: "多轨叠层" },
+  { id: "compass", label: "导览罗盘" },
+  { id: "palette", label: "原画调色" },
+  { id: "folder-heart", label: "典藏夹" },
+  { id: "crown", label: "殿堂王冠" },
+  { id: "star", label: "星标精选" },
+  { id: "box", label: "立体礼盒" },
+  { id: "layout-grid", label: "展架网格" }
+];
+
+function renderSafeRibbonIcon(el, iconId, fallbackId) {
+  if (!el) return;
+  el.empty();
+  if (typeof setIcon === "function") {
+    try {
+      setIcon(el, iconId);
+    } catch (_) {}
+    if (!el.childElementCount && fallbackId && fallbackId !== iconId) {
+      try {
+        setIcon(el, fallbackId);
+      } catch (_) {}
+    }
+  }
+  if (!el.childElementCount) {
+    el.setText("✦");
+  }
+}
+
+class RibbonIconPickerModal extends Modal {
+  constructor(app, options = {}) {
+    super(app);
+    this.targetTitle = options.title || "侧边栏按钮";
+    this.currentIcon = options.currentIcon || "";
+    this.defaultIcon = options.defaultIcon || "bangumi-archive-hall";
+    this.onSelect = options.onSelect;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("bgm-icon-picker-modal");
+    contentEl.style.maxWidth = "640px";
+
+    const topRow = contentEl.createDiv({ cls: "bgm-icon-picker-header" });
+    const titleWrap = topRow.createDiv();
+    titleWrap.createEl("h2", {
+      text: "更换图标",
+      cls: "bgm-icon-picker-title"
+    });
+    titleWrap.createDiv({
+      text: this.targetTitle,
+      cls: "bgm-icon-picker-subtitle"
+    });
+
+    const resetBtn = topRow.createEl("button", {
+      text: "↺ 恢复默认图标"
+    });
+    resetBtn.onclick = async () => {
+      if (typeof this.onSelect === "function") {
+        await this.onSelect(this.defaultIcon);
+      }
+      this.close();
+    };
+
+    contentEl.createDiv({
+      text: "专属与推荐图标",
+      cls: "bgm-icon-picker-section-label"
+    });
+
+    const presetGrid = contentEl.createDiv({ cls: "bgm-icon-picker-preset-grid" });
+    PRESET_RIBBON_ICONS.forEach((item) => {
+      const btn = presetGrid.createEl("button", {
+        type: "button",
+        cls: `bgm-icon-picker-preset${this.currentIcon === item.id ? " is-active" : ""}`
+      });
+      btn.dataset.iconId = item.id;
+      const iconBox = btn.createSpan({ cls: "bgm-icon-picker-svg" });
+      renderSafeRibbonIcon(iconBox, item.id, this.defaultIcon);
+      btn.createSpan({
+        text: item.label,
+        cls: "bgm-icon-picker-preset-name"
+      });
+      btn.onclick = async () => {
+        if (typeof this.onSelect === "function") {
+          await this.onSelect(item.id);
+        }
+        this.close();
+      };
+    });
+
+    contentEl.createDiv({
+      text: "Obsidian 图标库检索",
+      cls: "bgm-icon-picker-section-label"
+    });
+
+    const searchInput = contentEl.createEl("input", {
+      type: "search",
+      cls: "bgm-icon-picker-search",
+      placeholder: "输入英文关键词筛选图标（如 book、film、star、archive、heart）…"
+    });
+
+    const allIcons = (() => {
+      try {
+        const raw = typeof getIconIds === "function" ? getIconIds() : [];
+        const list = Array.isArray(raw) ? raw.filter((id) => typeof id === "string" && id.trim()) : [];
+        return Array.from(new Set(["bangumi-archive-hall", "bangumi-tv-manager", ...list]));
+      } catch (_) {
+        return PRESET_RIBBON_ICONS.map((p) => p.id);
+      }
+    })();
+
+    const countHint = contentEl.createDiv({ cls: "bgm-icon-picker-count" });
+    const libGrid = contentEl.createDiv({ cls: "bgm-icon-picker-grid" });
+
+    const renderLibrary = () => {
+      libGrid.empty();
+      const q = String(searchInput.value || "").trim().toLowerCase();
+      const matched = q
+        ? allIcons.filter((id) => id.toLowerCase().includes(q))
+        : allIcons;
+      const slice = matched.slice(0, 96);
+      countHint.setText(
+        q
+          ? `共匹配 ${matched.length} 个图标（展示前 ${slice.length} 个）`
+          : `共 ${allIcons.length} 个可用图标（当前展示前 ${slice.length} 个，输入关键词可检索全部）`
+      );
+
+      slice.forEach((id) => {
+        const cell = libGrid.createEl("button", {
+          type: "button",
+          cls: `bgm-icon-picker-cell${this.currentIcon === id ? " is-active" : ""}`
+        });
+        cell.title = id;
+        cell.setAttribute("aria-label", id);
+        cell.dataset.iconId = id;
+        renderSafeRibbonIcon(cell, id, this.defaultIcon);
+        cell.onclick = async () => {
+          if (typeof this.onSelect === "function") {
+            await this.onSelect(id);
+          }
+          this.close();
+        };
+      });
+    };
+
+    searchInput.addEventListener("input", renderLibrary);
+    renderLibrary();
+    setTimeout(() => searchInput.focus(), 30);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
 function openRatingSyncProgress(plugin, app) {
   const existing = plugin.ratingSync &&
     plugin.ratingSync.getTask();
@@ -579,10 +901,11 @@ module.exports = function createSettingsTabClass({
     return { matched: true, score: totalScore, matchedTokens: Array.from(new Set(matchedTokens)) };
   }
 
-  function ensureSettingsSpotlightStyles() {
-    if (typeof document === "undefined") return;
-    if (document.getElementById("bangumi-settings-spotlight-styles")) return;
-    const styleEl = document.createElement("style");
+  function ensureSettingsSpotlightStyles(doc) {
+    const targetDoc = doc || (typeof document !== "undefined" ? document : null);
+    if (!targetDoc || !targetDoc.head) return;
+    if (targetDoc.getElementById("bangumi-settings-spotlight-styles")) return;
+    const styleEl = targetDoc.createElement("style");
     styleEl.id = "bangumi-settings-spotlight-styles";
     styleEl.textContent = [
       ".bgm-settings-sticky-hud{position:sticky;top:-18px;z-index:35;margin:-8px -8px 16px -8px;padding:12px 14px 10px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 92%, #f6efe3 8%);backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(28,20,12,0.09);display:flex;flex-direction:column;gap:9px;}",
@@ -617,9 +940,50 @@ module.exports = function createSettingsTabClass({
       ".bgm-settings-empty-search.is-visible{display:flex;}",
       ".bgm-settings-empty-title{font-size:13px;font-weight:700;color:var(--text-normal);}",
       ".bgm-settings-empty-sub{font-size:11.5px;color:var(--text-muted);}",
-      ".bgm-settings-empty-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:4px;}"
+      ".bgm-settings-empty-suggestions{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:4px;}",
+      ".bgm-settings-root-container .setting-item{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px 16px;}",
+      ".bgm-settings-root-container .setting-item > .setting-item-info{flex:1 1 280px;min-width:min(260px, 100%);margin-right:0;}",
+      ".bgm-settings-root-container .setting-item .setting-item-name{word-break:break-word;overflow-wrap:anywhere;}",
+      ".bgm-settings-root-container .setting-item .setting-item-description{word-break:break-word;overflow-wrap:anywhere;line-height:1.5;}",
+      ".bgm-settings-root-container .setting-item > .setting-item-control{flex:0 1 auto;max-width:100%;flex-wrap:wrap;justify-content:flex-end;}",
+      ".bgm-settings-root-container .setting-item > .setting-item-control select.dropdown{max-width:min(220px, 100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+      ".bgm-settings-root-container .setting-item.is-roxy-sub-disabled{opacity:0.5;filter:grayscale(0.35);pointer-events:none;}",
+      ".bgm-guide-step-note{margin:4px 0 14px;padding:10px 14px;border-radius:8px;border-left:3px solid #8f683d;background:color-mix(in srgb, var(--background-secondary) 84%, #f6efe3 16%);font-size:12.6px;line-height:1.62;color:var(--text-muted);}",
+      ".bgm-ribbon-inline-dock{display:inline-flex;align-items:center;padding:3px;border-radius:9px;background:var(--ribbon-background, var(--background-secondary-alt, var(--background-secondary)));border:1px solid var(--background-modifier-border);margin-right:6px;}",
+      ".bgm-ribbon-inline-btn{width:34px !important;height:34px !important;min-width:34px !important;padding:0 !important;border-radius:7px !important;border:1px solid transparent !important;background:transparent !important;color:var(--icon-color, var(--text-muted)) !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;cursor:pointer !important;box-shadow:none !important;transition:background .14s ease, color .14s ease, border-color .14s ease, transform .14s ease !important;}",
+      ".bgm-ribbon-inline-btn:hover{background:var(--background-modifier-hover) !important;color:var(--icon-color-hover, var(--text-normal)) !important;border-color:rgba(143,104,61,0.45) !important;transform:translateY(-1px);}",
+      ".bgm-ribbon-inline-btn svg{width:18px !important;height:18px !important;}",
+      ".bgm-guide-demo-drawer{margin:6px 0 18px;border-radius:10px;border:1px solid color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));background:var(--background-secondary);overflow:hidden;}",
+      ".bgm-guide-demo-summary{cursor:pointer;padding:10px 14px;font-size:12.8px;font-weight:700;color:var(--text-normal);user-select:none;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px;}",
+      ".bgm-guide-demo-summary::-webkit-details-marker{display:none;}",
+      ".bgm-guide-demo-summary::after{content:'展开演示 ▾';font-size:11.5px;font-weight:600;color:#8f683d;}",
+      ".bgm-guide-demo-drawer[open] .bgm-guide-demo-summary{border-bottom:1px solid var(--background-modifier-border);}",
+      ".bgm-guide-demo-drawer[open] .bgm-guide-demo-summary::after{content:'收起演示 ▴';}",
+      ".bgm-guide-demo-body{padding:12px 14px;display:flex;flex-direction:column;gap:12px;background:var(--background-primary);}",
+      ".bgm-guide-demo-item{display:flex;flex-direction:column;gap:6px;}",
+      ".bgm-guide-demo-caption{font-size:12px;line-height:1.55;color:var(--text-muted);}",
+      ".bgm-guide-demo-img{width:100%;max-width:720px;height:auto;border-radius:8px;border:1px solid var(--background-modifier-border);display:block;background:var(--background-secondary);}",
+      ".bgm-pro-upgrade-card{margin:20px 0 18px;padding:16px 18px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 38%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 86%, #f6efe3 14%);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px;}",
+      ".bgm-pro-upgrade-info{flex:1 1 360px;min-width:min(260px, 100%);}",
+      ".bgm-pro-upgrade-title{font-size:14.5px;font-weight:700;color:var(--text-normal);margin-bottom:5px;}",
+      ".bgm-pro-upgrade-desc{font-size:12.5px;line-height:1.6;color:var(--text-muted);}",
+      ".bgm-icon-picker-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px;}",
+      ".bgm-icon-picker-title{margin:0 !important;font-size:1.2em !important;}",
+      ".bgm-icon-picker-subtitle{font-size:12px;color:var(--text-muted);margin-top:3px;}",
+      ".bgm-icon-picker-section-label{font-size:12px;font-weight:700;color:var(--text-muted);margin:12px 0 8px;}",
+      ".bgm-icon-picker-preset-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(128px, 1fr));gap:7px;}",
+      ".bgm-icon-picker-preset{display:flex !important;align-items:center !important;justify-content:flex-start !important;gap:8px;padding:7px 10px !important;height:auto !important;border-radius:8px !important;border:1px solid var(--background-modifier-border) !important;background:var(--background-secondary) !important;cursor:pointer;text-align:left;white-space:normal !important;}",
+      ".bgm-icon-picker-preset:hover,.bgm-icon-picker-cell:hover{border-color:#8f683d !important;background:var(--background-modifier-hover) !important;}",
+      ".bgm-icon-picker-preset.is-active,.bgm-icon-picker-cell.is-active{border-color:#8f683d !important;background:color-mix(in srgb, #8f683d 14%, var(--background-secondary)) !important;box-shadow:0 0 0 1px rgba(143,104,61,0.35);}",
+      ".bgm-icon-picker-svg{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex:0 0 20px;}",
+      ".bgm-icon-picker-svg svg,.bgm-icon-picker-cell svg{width:18px;height:18px;}",
+      ".bgm-icon-picker-preset-name{font-size:12px;font-weight:600;color:var(--text-normal);line-height:1.3;}",
+      ".bgm-icon-picker-search{width:100% !important;margin-bottom:6px;}",
+      ".bgm-icon-picker-count{font-size:11.5px;color:var(--text-muted);margin-bottom:8px;}",
+      ".bgm-icon-picker-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(40px, 1fr));gap:6px;max-height:240px;overflow-y:auto;padding:4px 2px;}",
+      ".bgm-icon-picker-cell{width:40px !important;height:38px !important;padding:0 !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;border-radius:7px !important;border:1px solid var(--background-modifier-border) !important;background:var(--background-secondary) !important;cursor:pointer;}"
     ].join("\n");
-    document.head.appendChild(styleEl);
+    targetDoc.head.appendChild(styleEl);
   }
 
   const BangumiManagerSettingTab = class extends PluginSettingTab {
@@ -631,9 +995,10 @@ module.exports = function createSettingsTabClass({
     this._savedFocusOnlyMode = false;
   }
   display() {
-    ensureSettingsSpotlightStyles();
+    ensureSettingsSpotlightStyles(this.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null));
     const container = this.containerEl;
     container.empty();
+    container.addClass("bgm-settings-root-container");
     const topHudMount = container.createDiv("bgm-settings-top-hud-mount");
     if (this.plugin.settings.mode === "lazy") {
       topHudMount.createEl("h2", {
@@ -667,6 +1032,43 @@ module.exports = function createSettingsTabClass({
       .replace(/\\/g, "/")
       .replace(/^\/+/, "")
       .replace(/[\\/]+$/, "");
+  }
+
+  bindPathInputAutoMigration(textComponent, categoryKey, getCurrentPathFn) {
+    if (!textComponent || !textComponent.inputEl) return;
+    const inputEl = textComponent.inputEl;
+    let baselinePath = this.normalizeVaultFolderPath(getCurrentPathFn());
+
+    inputEl.addEventListener("focus", () => {
+      baselinePath = this.normalizeVaultFolderPath(getCurrentPathFn());
+    });
+
+    const triggerAutoMigrationIfChanged = async () => {
+      const committedPath = this.normalizeVaultFolderPath(getCurrentPathFn());
+      const prevPath = baselinePath;
+      baselinePath = committedPath;
+      if (
+        prevPath &&
+        committedPath &&
+        prevPath !== committedPath &&
+        this.plugin &&
+        typeof this.plugin.migrateVaultFolderPath === "function"
+      ) {
+        this.plugin
+          .migrateVaultFolderPath(categoryKey, prevPath, committedPath)
+          .catch((err) => console.error("[BangumiPathMigration] error:", err));
+      }
+    };
+
+    inputEl.addEventListener("blur", () => {
+      triggerAutoMigrationIfChanged();
+    });
+    inputEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        inputEl.blur();
+      }
+    });
   }
 
   getAutomaticBaseFolderPath() {
@@ -778,7 +1180,7 @@ module.exports = function createSettingsTabClass({
   addNoteRootSetting(container, description) {
     new Setting(container)
       .setName("动画笔记目录")
-      .setDesc(description)
+      .setDesc(description + "（修改路径并离开输入框后将自动迁移目录下已有笔记，可在「查看路径迁移状态」中跟踪进度）")
       .addText((text) => {
         text.setValue(
           String(
@@ -789,6 +1191,8 @@ module.exports = function createSettingsTabClass({
         text.onChange(async (value) => {
           await this.updateNoteRootFolder(value);
         });
+
+        this.bindPathInputAutoMigration(text, "noteRootFolder", () => this.plugin.settings.noteRootFolder || "");
       });
   }
 
@@ -796,7 +1200,7 @@ module.exports = function createSettingsTabClass({
     new Setting(container)
       .setName("角色典藏笔记目录")
       .setDesc(
-        "生成角色典藏 Markdown 笔记的仓库保存位置。默认与「动画笔记目录」处于同一层级（并列文件夹，如：角色典藏），留空则自动恢复为与动画笔记目录同级的默认路径。"
+        "生成角色典藏 Markdown 笔记的仓库保存位置。默认与「动画笔记目录」处于同一层级（如：角色典藏），修改后自动迁移已有笔记。"
       )
       .addText((text) => {
         text
@@ -810,6 +1214,63 @@ module.exports = function createSettingsTabClass({
           .onChange(async (value) => {
             await this.updateCharacterNoteFolder(value);
           });
+
+        this.bindPathInputAutoMigration(
+          text,
+          "characterNoteFolder",
+          () => this.plugin.settings.characterNoteFolder || this.getAutomaticCharacterNoteFolder()
+        );
+      });
+  }
+
+  addGameNoteFolderSetting(container) {
+    new Setting(container)
+      .setName("游戏典藏笔记目录")
+      .setDesc(
+        "生成游戏典藏 Markdown 笔记的仓库保存位置（默认：游戏典藏），修改后自动迁移已有游戏笔记。"
+      )
+      .addText((text) => {
+        text
+          .setPlaceholder("游戏典藏")
+          .setValue(String(this.plugin.settings.gameNoteFolder || "游戏典藏"))
+          .onChange(async (value) => {
+            this.plugin.settings.gameNoteFolder =
+              this.normalizeVaultFolderPath(value) || "游戏典藏";
+            await this.plugin.saveSettings();
+          });
+
+        this.bindPathInputAutoMigration(
+          text,
+          "gameNoteFolder",
+          () => this.plugin.settings.gameNoteFolder || "游戏典藏"
+        );
+      });
+  }
+
+  addPathMigrationStatusSetting(container) {
+    const snap =
+      this.plugin && typeof this.plugin.getPathMigrationSnapshot === "function"
+        ? this.plugin.getPathMigrationSnapshot()
+        : { status: "idle" };
+    const statusTextMap = {
+      idle: "当前状态：⚪ 空闲（等待路径变更）",
+      running: `当前状态：🔄 正在迁移中（${snap.processed || 0}/${snap.total || 0}）`,
+      completed: `当前状态：✅ 迁移已完成（上次移动 ${snap.movedFiles || 0} 个文件，更新 ${snap.updatedNotes || 0} 篇笔记引用）`,
+      failed: `当前状态：❌ 迁移失败（${snap.lastError || "请点击查看详情"}）`
+    };
+    const statusSummary = statusTextMap[snap.status] || statusTextMap.idle;
+
+    new Setting(container)
+      .setName("查看路径迁移状态")
+      .setDesc(
+        "更改任意目录路径（图片、画册、音声或动画/角色/游戏笔记目录）后，插件会自动在后台迁移已有文件并同步更新笔记与典藏引用。\n" +
+          statusSummary
+      )
+      .addButton((button) => {
+        button.setButtonText("查看状态");
+        button.onClick(() => {
+          new PathMigrationStatusModal(this.app, this.plugin).open();
+        });
       });
   }
 
@@ -853,19 +1314,348 @@ module.exports = function createSettingsTabClass({
         text.onChange(async (value) => {
           await this.updateBaseFolderPath(value);
         });
+
+        this.bindPathInputAutoMigration(
+          text,
+          "baseFolderPath",
+          () => this.plugin.settings.baseFolderPath || this.getAutomaticBaseFolderPath()
+        );
       });
+  }
+
+  addStepGuideNote(container, text) {
+    const note = container.createDiv({
+      cls: "bgm-guide-step-note",
+      text
+    });
+    return note;
+  }
+
+  async resolveGuideMediaPrimaryUrl(fileName) {
+    const rel = `assets/guide/${fileName}`;
+    try {
+      if (await pluginAssetExists(this.plugin, rel)) {
+        const localUrl = getPluginAssetResourceUrl(this.plugin, rel);
+        if (localUrl) return localUrl;
+      }
+    } catch (_) {}
+    return `https://cdn.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/guide/${encodeURIComponent(fileName)}`;
+  }
+
+  addGuideDemoDrawer(container, { title, items = [] }) {
+    if (!container || !Array.isArray(items) || items.length === 0) return;
+    const drawer = container.createEl("details", {
+      cls: "bgm-guide-demo-drawer"
+    });
+    drawer.createEl("summary", {
+      cls: "bgm-guide-demo-summary",
+      text: `🎬 查看操作演示：${title}`
+    });
+    const body = drawer.createDiv({ cls: "bgm-guide-demo-body" });
+    let loaded = false;
+
+    drawer.addEventListener("toggle", () => {
+      if (!drawer.open || loaded) return;
+      loaded = true;
+      items.forEach((entry) => {
+        const itemWrap = body.createDiv({ cls: "bgm-guide-demo-item" });
+        if (entry.caption) {
+          itemWrap.createDiv({
+            cls: "bgm-guide-demo-caption",
+            text: entry.caption
+          });
+        }
+        const img = itemWrap.createEl("img", {
+          cls: "bgm-guide-demo-img"
+        });
+        img.loading = "lazy";
+        img.alt = entry.caption || title;
+        const jsdelivrFallbackUrl = `https://cdn.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/guide/${encodeURIComponent(entry.fileName)}`;
+        const rawFallbackUrl = `https://raw.githubusercontent.com/Curelove/bangumi-manager/main/assets/guide/${encodeURIComponent(entry.fileName)}`;
+        let fallbackStage = 0;
+        img.onerror = () => {
+          if (fallbackStage === 0 && img.src !== jsdelivrFallbackUrl) {
+            fallbackStage = 1;
+            img.src = jsdelivrFallbackUrl;
+          } else if (fallbackStage <= 1 && img.src !== rawFallbackUrl) {
+            fallbackStage = 2;
+            img.src = rawFallbackUrl;
+          }
+        };
+        this.resolveGuideMediaPrimaryUrl(entry.fileName)
+          .then((primaryUrl) => {
+            if (img.isConnected) img.src = primaryUrl;
+          })
+          .catch(() => {
+            if (img.isConnected) img.src = jsdelivrFallbackUrl;
+          });
+      });
+    });
+  }
+
+  addRibbonButtonSetting(container, options) {
+    const {
+      name,
+      desc,
+      toggleKey,
+      iconKey,
+      defaultIcon,
+      refreshFn
+    } = options;
+
+    const setting = new Setting(container)
+      .setName(name)
+      .setDesc(desc);
+
+    const getEffectiveIcon = () =>
+      String(this.plugin.settings[iconKey] || "").trim() || defaultIcon;
+
+    const dockWrap = setting.controlEl.createDiv({
+      cls: "bgm-ribbon-inline-dock"
+    });
+    const iconBtn = dockWrap.createEl("button", {
+      type: "button",
+      cls: "clickable-icon side-dock-ribbon-action bgm-ribbon-inline-btn"
+    });
+    iconBtn.dataset.ribbonSettingKey = iconKey;
+    iconBtn.title = "点击更换图标";
+    iconBtn.setAttribute("aria-label", "点击更换图标");
+    renderSafeRibbonIcon(iconBtn, getEffectiveIcon(), defaultIcon);
+
+    iconBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      new RibbonIconPickerModal(this.app, {
+        title: name,
+        currentIcon: getEffectiveIcon(),
+        defaultIcon,
+        onSelect: async (nextIcon) => {
+          this.plugin.settings[iconKey] = String(nextIcon || "").trim() || defaultIcon;
+          await this.plugin.saveSettings();
+          renderSafeRibbonIcon(iconBtn, getEffectiveIcon(), defaultIcon);
+          if (typeof refreshFn === "function") {
+            refreshFn();
+          }
+        }
+      }).open();
+    };
+
+    setting.addToggle((toggle) => {
+      toggle.setValue(this.plugin.settings[toggleKey] !== false);
+      toggle.onChange(async (value) => {
+        this.plugin.settings[toggleKey] = value;
+        await this.plugin.saveSettings();
+        if (typeof refreshFn === "function") {
+          refreshFn();
+        }
+      });
+    });
+
+    return setting;
+  }
+
+  addRoxyHdPackSetting(container) {
+    const roxyModeInfo = normalizeRoxy2DModeSettings(this.plugin);
+    const hdStatus = roxyModeInfo.hdStatus;
+
+    new Setting(container)
+      .setName("洛琪希高清立绘扩展包")
+      .setDesc(
+        hdStatus.installed
+          ? `当前状态：✨ 已安装本地高清立绘扩展包（${hdStatus.foundCount}/${hdStatus.totalCount} 张透明立绘已就绪），已在二维案头编目台启用高清立绘伴读形象。`
+          : `当前状态：未下载高清立绘扩展包（已存在 ${hdStatus.foundCount}/${hdStatus.totalCount} 张），当前自动使用内置轻量像素形象。点击右侧按钮可一键下载 7 张高清透明立绘到本地插件目录，自动解锁高清形象。`
+      )
+      .addButton((button) => {
+        button
+          .setButtonText(hdStatus.installed ? "重新校验 / 补全立绘包" : "📥 一键下载高清立绘包")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("正在下载...");
+            try {
+              const res = await downloadRoxyHdPortraitPack(this.plugin, (done, total) => {
+                button.setButtonText(`下载中 (${done}/${total})...`);
+              });
+              if (res && res.success) {
+                new Notice("洛琪希高清立绘扩展包（7 张 PNG）已下载就位！", 5000);
+                this.plugin.settings.enableRoxy2DMascotMaster = true;
+                this.plugin.settings.roxyForceLightweight2D = false;
+                this.plugin.settings.enableRoxy2DMascot = true;
+                await this.plugin.saveSettings();
+                await this.plugin.refreshOpenDashboardViews();
+                this.display();
+              } else {
+                new Notice(
+                  `高清立绘包下载未全部完成（成功 ${res?.downloaded || 0}/${res?.total || 7}），请检查网络后重试。`,
+                  6000
+                );
+                button.setDisabled(false);
+                button.setButtonText("重试下载立绘包");
+              }
+            } catch (err) {
+              new Notice(`下载高清立绘包失败：${err?.message || err}`, 6000);
+              button.setDisabled(false);
+              button.setButtonText("重试下载立绘包");
+            }
+          });
+      });
+
+    return hdStatus;
+  }
+
+  addAtelier3DPackSettings(container, packFirst = false) {
+    const syncOpen3DSpaces = async () => {
+      try {
+        const leaves =
+          this.app?.workspace?.getLeavesOfType?.("bangumi-score-dashboard-view") ||
+          this.app?.workspace?.getLeavesOfType?.("bangumi-score-dashboard") ||
+          [];
+        for (const lf of leaves) {
+          const sp = lf?.view?.space3DInstance;
+          if (sp && typeof sp.rebuildAllFolioModels === "function") {
+            // eslint-disable-next-line no-await-in-loop
+            await sp.rebuildAllFolioModels();
+          }
+        }
+      } catch (_) {}
+    };
+
+    let styleDropdownRef = null;
+    let dlPackBtnRef = null;
+    let rmPackBtnRef = null;
+    let packSettingRef = null;
+
+    const renderPackRow = () => {
+      const packSetting = new Setting(container)
+        .setName("三维精装模型与 PBR 材质扩展包")
+        .setDesc("正在检测本地精装模型扩展包安装状态…");
+      packSettingRef = packSetting;
+
+      packSetting.addButton((button) => {
+        dlPackBtnRef = button;
+        button
+          .setButtonText("📥 一键下载精装扩展包 (约 428 KB)")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("正在下载...");
+            try {
+              const st = await downloadAtelierHdPack(this.plugin, {
+                onProgress: ({ step, total }) => {
+                  button.setButtonText(`下载中 (${step}/${total})...`);
+                }
+              });
+              if (st.installed) {
+                if (this.plugin.settings.atelier3DModelStyle === "standard") {
+                  this.plugin.settings.atelier3DModelStyle = "hd_cel_folio";
+                  await this.plugin.saveSettings();
+                }
+                await syncOpen3DSpaces();
+                this.display();
+              }
+            } catch (err) {
+              new Notice(`下载三维精装扩展包失败：${err?.message || err}`, 6000);
+              button.setDisabled(false);
+              button.setButtonText("重试下载精装扩展包");
+            }
+          });
+      });
+
+      packSetting.addButton((button) => {
+        rmPackBtnRef = button;
+        button.setButtonText("清理扩展包").onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await removeAtelierHdPack(this.plugin);
+            if (this.plugin.settings.atelier3DModelStyle !== "standard") {
+              this.plugin.settings.atelier3DModelStyle = "standard";
+              await this.plugin.saveSettings();
+            }
+            await syncOpen3DSpaces();
+            this.display();
+          } catch (err) {
+            new Notice(`清理扩展包失败：${err?.message || err}`, 4500);
+            button.setDisabled(false);
+          }
+        });
+      });
+    };
+
+    const renderStyleRow = () => {
+      const styleSetting = new Setting(container)
+        .setName("三维装帧模型风格切换")
+        .setDesc(
+          "切换三维原画档案室中每部动画的实体装帧外观。内置「标准轻量原画夹」零额外体积；安装精装扩展包后可切换为「赛璐珞原画装裱夹」或「典藏精装 BD 礼盒」。"
+        );
+
+      styleSetting.addDropdown((dropdown) => {
+        styleDropdownRef = dropdown;
+        STYLE_CATALOG.forEach((st) => {
+          dropdown.addOption(st.id, st.label);
+        });
+        const curStyle = ["standard", "hd_cel_folio", "hd_collector_box"].includes(
+          this.plugin.settings.atelier3DModelStyle
+        )
+          ? this.plugin.settings.atelier3DModelStyle
+          : "standard";
+        dropdown.setValue(curStyle);
+        dropdown.onChange(async (value) => {
+          if (value !== "standard") {
+            const st = await checkAtelierHdPackStatus(this.plugin);
+            if (!st.installed) {
+              new Notice("请先点击「一键下载精装扩展包」，安装完成后即可切换精装模型。", 4500);
+              dropdown.setValue("standard");
+              return;
+            }
+            await preloadAtelierHdPrototypes(this.plugin);
+          }
+          this.plugin.settings.atelier3DModelStyle = value;
+          await this.plugin.saveSettings();
+          await syncOpen3DSpaces();
+        });
+      });
+    };
+
+    if (packFirst) {
+      renderPackRow();
+      renderStyleRow();
+    } else {
+      renderStyleRow();
+      renderPackRow();
+    }
+
+    checkAtelierHdPackStatus(this.plugin)
+      .then((st) => {
+        if (!packSettingRef?.descEl?.isConnected) return;
+        if (st.installed) {
+          packSettingRef.setDesc(
+            `当前状态：✨ 已安装双风格精装模型扩展包（共 ${st.sizeLabel}，含「赛璐珞原画装裱夹」与「典藏精装 BD 礼盒」两套 GLB 模型及棉纸/亚麻/拉丝金属法线贴图）。支持在此处或三维档案室右上角「◷ 空间设置」内实时切换。`
+          );
+          if (dlPackBtnRef) dlPackBtnRef.setButtonText("重新校验 / 更新扩展包");
+          if (rmPackBtnRef) rmPackBtnRef.buttonEl.style.display = "";
+        } else {
+          packSettingRef.setDesc(
+            `当前状态：尚未安装精装模型扩展包（当前使用内置「标准轻量原画夹」）。点击右侧按钮可按需一键下载双风格精装扩展包（仅 ${st.sizeLabel}，不增加插件主包体积）。`
+          );
+          if (rmPackBtnRef) rmPackBtnRef.buttonEl.style.display = "none";
+          if (styleDropdownRef && this.plugin.settings.atelier3DModelStyle !== "standard") {
+            styleDropdownRef.setValue("standard");
+          }
+        }
+      })
+      .catch(() => {});
   }
 
   displayLazyMode(container) {
     this.addIntroDescription(
       container,
-      "快速开始模式保留首次使用和日常追番所需的设置。其他高级选项可在专业模式中调整，切换模式不会修改已有配置。"
+      "欢迎使用 Bangumi 追番管理器。以下按开馆顺序整理了从导入作品、确认保存目录到解锁完整视觉体验的五个步骤，跟着顺序操作即可快速建立您的专属追番档案馆。切换使用模式只改变设置页展示内容，不会修改任何已有数据。"
     );
 
     new Setting(container)
       .setName("使用模式")
       .setDesc(
-        "快速开始模式仅显示常用设置。切换模式只改变设置项展示，不会修改已有配置。"
+        "当前为面向初次上手与日常使用的快速开始指南；需要调整进阶联动与深度规则时可随时切换至专业模式。"
       )
       .addDropdown((dropdown) => {
         dropdown.addOptions({
@@ -882,14 +1672,65 @@ module.exports = function createSettingsTabClass({
         });
       });
 
+    // 一、账号与导入动画
     container.createEl("h3", {
-      text: "快速开始"
+      text: "一、账号与导入动画"
     });
+    this.addStepGuideNote(
+      container,
+      "如果只想手动搜索并建立几部喜爱的动画笔记，直接点击「导入单个动画」即可开始；如果希望把自己在 Bangumi 上的追番清单一次性搬进仓库，请先填写纯数字 Bangumi 用户 ID，再执行「批量导入动画」。"
+    );
+
+    this.addBangumiUserSetting(container, true);
+
+    new Setting(container)
+      .setName("导入单个动画")
+      .setDesc("通过中文名、日文原名或条目编号搜索 Bangumi，选择作品后自动生成动画笔记并保存高清封面。")
+      .addButton((button) => {
+        button
+          .setButtonText("导入单个动画")
+          .setCta()
+          .onClick(async () => {
+            await openSingleAnimeImport(this.app, this.plugin);
+          });
+      });
+
+    new Setting(container)
+      .setName("批量导入动画")
+      .setDesc("根据上方填写的 Bangumi 用户 ID 读取「在看 / 已看 / 想看」列表，批量创建追番笔记并自动跳过已有条目。")
+      .addButton((button) => {
+        button
+          .setButtonText("批量导入动画")
+          .onClick(async () => {
+            await openBatchAnimeImport(this.app, this.plugin);
+          });
+      });
+
+    this.addGuideDemoDrawer(container, {
+      title: "搜索导入单部动画与批量同步追番列表",
+      items: [
+        {
+          fileName: "guide-import.gif",
+          caption: "输入关键词检索 Bangumi 条目并一键生成带本地封面与元数据的动画笔记。"
+        }
+      ]
+    });
+
+    // 二、相关路径
+    container.createEl("h3", {
+      text: "二、相关路径"
+    });
+    this.addStepGuideNote(
+      container,
+      "插件已为您预设好清晰合理的仓库目录结构，通常保持默认即可直接使用。日后若修改仓库内的笔记或附件目录，离开输入框后插件会在后台自动迁移已有文件并同步更新引用。"
+    );
 
     new Setting(container)
       .setName("本地动画根目录")
       .setDesc(
-        "用于提示和创建本地动画文件夹，不会移动已有视频。"
+        isDesktopNodeAvailable()
+          ? "电脑端存放本地番剧视频的总文件夹路径，用于识别本地话数更新与创建下载子目录，不会移动已有视频。"
+          : "用于桌面端识别本地番剧视频文件夹（当前为移动端环境，会自动保持跨端只读兼容，不会改动电脑端已有路径）。"
       )
       .addText((text) => {
         text.setValue(
@@ -906,19 +1747,33 @@ module.exports = function createSettingsTabClass({
         });
       });
 
-    this.addBangumiUserSetting(container);
-
     this.addNoteRootSetting(
       container,
-      "动画笔记保存位置。Markdown 番剧档案馆会自动放在该目录下的“追番广场”中。"
+      "动画笔记在仓库中的保存目录。Markdown 番剧档案馆快照会自动存放在该目录下的「追番广场」中。"
     );
 
     this.addCharacterNoteFolderSetting(container);
 
+    this.addPathSetting(
+      container,
+      "画册本地保存路径",
+      "illustrationGalleryFolder",
+      "画册典藏插画与本地导入图片在仓库中的保存目录（默认：附件/画册典藏）。"
+    );
+
+    this.addPathSetting(
+      container,
+      "台词音声保存目录",
+      "voiceArchiveFolder",
+      "台词音声抽取与视频台词片段在仓库中的保存目录（默认：附件/台词音声库）。"
+    );
+
+    this.addPathMigrationStatusSetting(container);
+
     new Setting(container)
       .setName("初始化缺失文件")
       .setDesc(
-        "创建缺少的动画笔记目录、封面目录和 Markdown 番剧档案馆（默认不再自动生成传统 动画库.base，如需生成可在专业模式中开启）。已有文件不会被覆盖。"
+        "按上方路径自动补齐缺失的动画笔记目录、封面目录与 Markdown 番剧档案馆快照，不会覆盖任何已有文件。"
       )
       .addButton((button) => {
         button.setButtonText("立即初始化");
@@ -928,35 +1783,108 @@ module.exports = function createSettingsTabClass({
         });
       });
 
-    this.addDashboardSettings(container, true);
-    this.addNetabaSettings(container, true);
-
+    // 三、侧边栏按钮
     container.createEl("h3", {
-      text: "快速操作"
+      text: "三、侧边栏按钮"
     });
 
+    this.addRibbonButtonSetting(container, {
+      name: "显示侧边栏「打开番剧档案馆」按钮",
+      desc: "在 Obsidian 左侧功能栏常驻显示番剧档案馆入口，点击左侧图标可直接更换样式。",
+      toggleKey: "showDashboardRibbon",
+      iconKey: "dashboardRibbonIcon",
+      defaultIcon: this.plugin.defaultDashboardRibbonIcon || "bangumi-archive-hall",
+      refreshFn: () => this.plugin.refreshDashboardRibbon()
+    });
+
+    this.addRibbonButtonSetting(container, {
+      name: "显示侧边栏「Bangumi 追番管理器」按钮",
+      desc: "在 Obsidian 左侧功能栏常驻显示追番管理快捷面板入口，点击左侧图标可直接更换样式。",
+      toggleKey: "showManagerRibbon",
+      iconKey: "managerRibbonIcon",
+      defaultIcon: this.plugin.defaultManagerRibbonIcon || "bangumi-tv-manager",
+      refreshFn: () => this.plugin.refreshManagerRibbon()
+    });
+
+    // 四、下载扩展包
+    container.createEl("h3", {
+      text: "四、下载扩展包"
+    });
+    this.addStepGuideNote(
+      container,
+      "为了保持插件主程序轻巧秒开，高清透明伴读立绘与三维精雕 PBR 装帧模型采用按需扩展包设计。建议在此一键下载两款扩展包，解锁二维编目台与三维原画室的完整视觉表现。"
+    );
+
+    this.addRoxyHdPackSetting(container);
+    this.addAtelier3DPackSettings(container, true);
+
+    this.addGuideDemoDrawer(container, {
+      title: "三维精装模型风格切换与空间设置",
+      items: [
+        {
+          fileName: "guide-3d-styles.gif",
+          caption: "在标准原画夹、赛璐珞原画装裱夹与典藏精装 BD 礼盒三种实体装帧之间实时切换。"
+        }
+      ]
+    });
+
+    // 五、进入番剧档案馆
+    container.createEl("h3", {
+      text: "五、进入番剧档案馆"
+    });
+    this.addStepGuideNote(
+      container,
+      "一切准备就绪！番剧档案馆内置「二维案头编目台」（追番进度、书脊年鉴、角色典藏、画册与台词库）以及「三维原画档案室」（支持高分精选四柱策展，以及状态与收藏轨下的「开架回廊 / 折屏展架」双视图与立式导视牌）。即使尚未导入笔记，也可在馆内开启示例馆藏先行体验。"
+    );
+
     new Setting(container)
-      .setName("显示侧边栏「Bangumi 追番管理器」按钮")
-      .setDesc(
-        "开启后，在 Obsidian 左侧功能栏显示「Bangumi 追番管理器」专属电视徽标按钮。"
-      )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          Boolean(
-            this.plugin.settings.showManagerRibbon
-          )
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.showManagerRibbon =
-            value;
-
-          await this.plugin.saveSettings();
-          this.plugin.refreshManagerRibbon();
-        });
+      .setName("打开番剧档案馆")
+      .setDesc("立即进入番剧档案馆主界面，顶栏可随时在「二维案头编目台」与「三维原画档案室」之间无缝切换。")
+      .addButton((button) => {
+        button
+          .setButtonText("立即打开番剧档案馆")
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.openScoreDashboardView();
+          });
       });
 
-    this.addLazyActions(container);
+    this.addGuideDemoDrawer(container, {
+      title: "番剧档案馆二维编目台与三维双视图实机导览",
+      items: [
+        {
+          fileName: "guide-archive-hall.gif",
+          caption: "二维案头编目台与三维原画档案室一键切换，抽起实体档案夹检阅详情与笔记纸页。"
+        },
+        {
+          fileName: "guide-3d-subview.gif",
+          caption: "三维「状态与收藏轨」常驻立式分栏导视牌，支持在「🏛 开架回廊」与「🖼 折屏展架」双视图间自由切换。"
+        }
+      ]
+    });
+
+    // 底部：专业模式进阶引导卡
+    const proCard = container.createDiv({ cls: "bgm-pro-upgrade-card" });
+    const proInfo = proCard.createDiv({ cls: "bgm-pro-upgrade-info" });
+    proInfo.createDiv({
+      cls: "bgm-pro-upgrade-title",
+      text: "✦ 需要更深入的自动化与定制能力？随时开启「专业模式」"
+    });
+    proInfo.createDiv({
+      cls: "bgm-pro-upgrade-desc",
+      text: "熟悉基础追番编目后，切换到「专业模式」可进一步配置：本地视频播放器与观片手札帧级时间点空降、漫猫单集唯一 RSS 与 qBittorrent 自动下载查重、画册 Pixiv 在线搜图与分级筛选、Netaba 评分趋势对比、自定义多季度展柜以及看板娘角色与台词工坊。"
+    });
+    const proBtn = proCard.createEl("button", {
+      cls: "mod-cta",
+      text: "切换至专业模式 →"
+    });
+    proBtn.onclick = async () => {
+      this.plugin.settings.mode = "professional";
+      await this.plugin.saveSettings();
+      this.display();
+      container.scrollTo?.({ top: 0, behavior: "smooth" });
+    };
+
     this.addHelpAndCommunitySection(container);
   }
 
@@ -998,21 +1926,53 @@ module.exports = function createSettingsTabClass({
 
     this.addCharacterNoteFolderSetting(container);
 
+    this.addGameNoteFolderSetting(container);
+
     this.addBaseFolderSetting(container);
 
     this.addPathSetting(
       container,
-      "封面目录",
+      "动画封面图片目录",
       "coverFolder",
-      "本地封面保存目录。"
+      "动画条目封面图片的本地仓库保存目录（默认：附件/动画封面；修改后自动迁移已有动画封面并更新笔记引用）。"
+    );
+
+    this.addPathSetting(
+      container,
+      "角色典藏立绘目录",
+      "characterImageFolder",
+      "角色典藏立绘与头像图片的仓库保存目录（默认：附件/角色立绘；修改后自动迁移已有角色立绘并更新引用）。"
     );
 
     this.addPathSetting(
       container,
       "观片手札图片目录",
       "reviewImageFolder",
-      "观片手札粘贴截图（Ctrl+V）与上传附图保存的独立仓库目录（默认：附件/观片手札图片，与动画封面目录完全隔离）。"
+      "观片手札粘贴截图（Ctrl+V）、时间轴打点截图与上传附图保存的仓库目录（默认：附件/观片手札图片；修改后自动迁移）。"
     );
+
+    this.addPathSetting(
+      container,
+      "画册本地保存路径（画册典藏图片目录）",
+      "illustrationGalleryFolder",
+      "画册典藏（含 Pixiv 插画、角色画作与本地导入图片）的仓库保存目录（默认：附件/画册典藏；修改后自动迁移已有画册插画）。"
+    );
+
+    this.addPathSetting(
+      container,
+      "游戏典藏封面目录",
+      "gameImageFolder",
+      "游戏典藏封面图片的仓库保存目录（默认：附件/游戏封面；修改后自动迁移）。"
+    );
+
+    this.addPathSetting(
+      container,
+      "台词音声保存目录",
+      "voiceArchiveFolder",
+      "台词音声抽取的语音文件与视频字幕截取音频的仓库保存目录（默认：附件/台词音声库；修改后自动迁移已有音频并更新台词卡片引用）。"
+    );
+
+    this.addPathMigrationStatusSetting(container);
 
     new Setting(container)
       .setName("本地动画根目录")
@@ -1052,26 +2012,14 @@ module.exports = function createSettingsTabClass({
       text: "管理入口"
     });
 
-    new Setting(container)
-      .setName("显示侧边栏「Bangumi 追番管理器」按钮")
-      .setDesc(
-        "开启后，在 Obsidian 左侧功能栏显示「Bangumi 追番管理器」专属电视徽标按钮。"
-      )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          Boolean(
-            this.plugin.settings.showManagerRibbon
-          )
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.showManagerRibbon =
-            value;
-
-          await this.plugin.saveSettings();
-          this.plugin.refreshManagerRibbon();
-        });
-      });
+    this.addRibbonButtonSetting(container, {
+      name: "显示侧边栏「Bangumi 追番管理器」按钮",
+      desc: "开启后，在 Obsidian 左侧功能栏显示「Bangumi 追番管理器」快捷管理面板按钮（点击左侧图标可更换样式）。",
+      toggleKey: "showManagerRibbon",
+      iconKey: "managerRibbonIcon",
+      defaultIcon: this.plugin.defaultManagerRibbonIcon || "bangumi-tv-manager",
+      refreshFn: () => this.plugin.refreshManagerRibbon()
+    });
 
     container.createEl("h3", {
       text: "快速操作"
@@ -1142,6 +2090,7 @@ module.exports = function createSettingsTabClass({
       if (t.includes("季度")) return "📅";
       if (t.includes("笔记") || t.includes("显示")) return "📝";
       if (t.includes("档案馆") || t.includes("仪表盘")) return "🏛️";
+      if (t.includes("画册") || t.includes("Pixiv")) return "🖼️";
       if (t.includes("播放器") || t.includes("手札")) return "🎬";
       if (t.includes("下载") || t.includes("RSS") || t.includes("追番")) return "📥";
       if (t.includes("洛琪希") || t.includes("看板娘")) return "🧙‍♀️";
@@ -1247,7 +2196,7 @@ module.exports = function createSettingsTabClass({
       { label: "🎬 本地播放器联动", q: "播放器" },
       { label: "📥 蜜柑 RSS 与追番下载", q: "下载" },
       { label: "👑 角色典藏目录", q: "角色" },
-      { label: "🧙‍♀️ 洛琪希看板娘", q: "洛琪希" },
+      { label: "🧙‍♀️ 洛琪希记录员", q: "洛琪希" },
       { label: "🏛️ 番剧档案馆", q: "番剧档案馆" },
       { label: "📂 路径与封面目录", q: "目录" }
     ].forEach((sug) => {
@@ -1547,11 +2496,13 @@ module.exports = function createSettingsTabClass({
     }
   }
 
-  addBangumiUserSetting(container) {
+  addBangumiUserSetting(container, isQuickStart = false) {
     new Setting(container)
       .setName("Bangumi 用户 ID")
       .setDesc(
-        "用于批量导入动画、打开 Bangumi 用户评分排行和读取用户评分。快速开始模式下会自动作为 Netaba 用户编号使用。"
+        isQuickStart
+          ? "填写您的 Bangumi 纯数字用户编号（个人主页网址末尾数字），用于一键批量导入您在 Bangumi 上的在看、已看与想看作品并同步个人评分。"
+          : "用于批量导入动画、打开 Bangumi 用户评分排行和读取用户评分。未单独指定 Netaba 用户编号时也会默认复用该 ID。"
       )
       .addText((text) => {
         text.setPlaceholder("例如：890645");
@@ -1594,27 +2545,82 @@ module.exports = function createSettingsTabClass({
       text: "番剧档案馆"
     });
 
+    this.addRibbonButtonSetting(container, {
+      name: "显示侧边栏「打开番剧档案馆」按钮",
+      desc: "开启后，在 Obsidian 左侧功能栏显示「打开番剧档案馆」入口按钮（点击左侧图标可更换样式）。",
+      toggleKey: "showDashboardRibbon",
+      iconKey: "dashboardRibbonIcon",
+      defaultIcon: this.plugin.defaultDashboardRibbonIcon || "bangumi-archive-hall",
+      refreshFn: () => this.plugin.refreshDashboardRibbon()
+    });
+
+    this.addReviewAndPlayerSettings(container, compact);
+
+    container.createEl("h3", {
+      text: "画册典藏与 Pixiv 搜图"
+    });
+
     new Setting(container)
-      .setName("显示侧边栏「打开番剧档案馆」按钮")
+      .setName("画册典藏 · Pixiv 年龄分级筛选")
       .setDesc(
-        "在 Obsidian 左侧功能栏显示「打开番剧档案馆」专属双翼档案册图标（其他番剧档案馆详细设置已全部默认启用，可在专业模式中按需调整）。"
+        "控制「画册典藏」在线搜图时对 Pixiv 年龄阶段内容的过滤策略，与 Pixiv 官方分级对齐（默认仅展示全年龄内容，自动排除 R-18）。"
       )
-      .addToggle((toggle) => {
-        toggle.setValue(
-          this.plugin.settings.showDashboardRibbon !==
-          false
-        );
-
-        toggle.onChange(async (value) => {
-          this.plugin.settings.showDashboardRibbon =
-            value;
-
+      .addDropdown((dropdown) => {
+        dropdown.addOptions({
+          safe: "🛡️ 全年龄（排除 R-18 · 默认）",
+          safe_strict: "🌱 全年龄·严选（排除敏感内容）",
+          all: "🌐 全部年龄（含 R-18）",
+          r18: "🔞 仅 R-18"
+        });
+        const curMode = ["safe", "safe_strict", "all", "r18"].includes(
+          this.plugin.settings.illustAgeMode
+        )
+          ? this.plugin.settings.illustAgeMode
+          : "safe";
+        dropdown.setValue(curMode);
+        dropdown.onChange(async (value) => {
+          this.plugin.settings.illustAgeMode = value;
+          if (this.plugin.__illustGalleryState) {
+            this.plugin.__illustGalleryState.ageMode = value;
+          }
           await this.plugin.saveSettings();
-          this.plugin.refreshDashboardRibbon();
+          await this.plugin.refreshOpenDashboardViews();
         });
       });
 
-    this.addReviewAndPlayerSettings(container, compact);
+    new Setting(container)
+      .setName("画册典藏 · 默认排除 AI 生成作品")
+      .setDesc(
+        "开启后在 Pixiv 在线搜图时默认过滤 AI 生成插画（ai_type=1 与 AI 标签双重识别），也可在画册搜图栏随时一键切换。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(this.plugin.settings.illustExcludeAI !== false);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.illustExcludeAI = value;
+          if (this.plugin.__illustGalleryState) {
+            this.plugin.__illustGalleryState.excludeAI = value;
+          }
+          await this.plugin.saveSettings();
+          await this.plugin.refreshOpenDashboardViews();
+        });
+      });
+
+    container.createEl("h3", {
+      text: "三维原画档案室与精装模型扩展包"
+    });
+
+    this.addAtelier3DPackSettings(container, false);
+
+    if (!isDesktopNodeAvailable()) {
+      const mobileNote = container.createDiv({
+        cls: "setting-item-description",
+        text: "📱 当前运行于移动端环境：桌面端专属的本地播放器、FFmpeg 截取与 qBittorrent 路径配置已自动切换为跨端只读兼容模式，不会修改笔记中原有的电脑路径。"
+      });
+      mobileNote.style.padding = "8px 12px";
+      mobileNote.style.marginBottom = "10px";
+      mobileNote.style.borderRadius = "8px";
+      mobileNote.style.background = "var(--background-secondary)";
+    }
 
     if (compact) {
       return;
@@ -1675,13 +2681,13 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("案头追番席 · 管理多个自定义季度席位与滑动上限")
+      .setName("追番 · 管理多个自定义季度与滑动上限")
       .setDesc(
-        "自由添加或移除多个季度的收藏动画席位（具体哪几个季度由您自行决定），并配置横向左右滑动或网格展开模式与显示数量上限。"
+        "自由添加或移除「追番」面板中展示的多个季度（具体哪几个季度由您自行决定），并配置横向左右滑动或网格展开模式与显示数量上限。"
       )
       .addButton((button) => {
         button
-          .setButtonText("配置季度席位与滑动")
+          .setButtonText("配置季度与滑动")
           .setCta()
           .onClick(async () => {
             if (typeof this.plugin.openDeskSeasonManagerFromSettings === "function") {
@@ -1691,9 +2697,9 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("案头追番席 · 默认排列模式")
+      .setName("追番 · 默认排列模式")
       .setDesc(
-        "选择「横向左右滑动（支持鼠标滚轮与 ‹ › 按钮，不截断卡片数量）」或「多行网格全部展开」。"
+        "选择「横向左右滑动（推荐）」或「多行网格全部展开」。"
       )
       .addDropdown((dropdown) => {
         dropdown.addOptions({
@@ -1711,63 +2717,51 @@ module.exports = function createSettingsTabClass({
         });
       });
 
-    const roxyModeInfo = normalizeRoxy2DModeSettings(this.plugin);
-    const hdStatus = roxyModeInfo.hdStatus;
+    const hdStatus = this.addRoxyHdPackSetting(container);
+
+    const isMasterOn = this.plugin.settings.enableRoxy2DMascotMaster !== false;
+    const isHdMascotOn = isMasterOn && hdStatus.installed && Boolean(this.plugin.settings.enableRoxy2DMascot);
+    const isPixelModeOn = isMasterOn && Boolean(this.plugin.settings.roxyForceLightweight2D);
 
     new Setting(container)
-      .setName("洛琪希高清立绘扩展包（独立附加资源）")
+      .setName("启用二维馆藏记录员")
       .setDesc(
-        hdStatus.installed
-          ? `当前状态：已安装本地高清立绘包（${hdStatus.foundCount}/${hdStatus.totalCount} 张 PNG）。由于 BRAT 仅拉取 main.js 与 manifest.json，新用户若未下载此扩展包，插件会自动适配为已编译进 main.js 的内置轻量像素洛琪希。`
-          : `当前状态：未检测到完整的高清立绘扩展包（已存在 ${hdStatus.foundCount}/${hdStatus.totalCount} 张），当前已自动适配为内置轻量像素洛琪希。点击右侧按钮可免解压一键下载 7 张高清透明立绘到本地插件目录。`
+        "在番剧档案馆「二维案头编目台」右下角启用洛琪希馆藏记录员。此项为启用下方「高清立绘版洛琪希」或「轻量像素形象洛琪希」的前置总开关；关闭此项时，下方两个形象设置将灰显且不可点击。"
       )
-      .addButton((button) => {
-        button
-          .setButtonText(hdStatus.installed ? "重新校验 / 补全立绘包" : "📥 一键下载高清立绘包")
-          .setCta()
-          .onClick(async () => {
-            button.setDisabled(true);
-            button.setButtonText("正在下载...");
-            try {
-              const res = await downloadRoxyHdPortraitPack(this.plugin, (done, total) => {
-                button.setButtonText(`下载中 (${done}/${total})...`);
-              });
-              if (res && res.success) {
-                new Notice("洛琪希高清立绘扩展包（7 张 PNG）已下载就位！", 5000);
-                this.plugin.settings.roxyForceLightweight2D = false;
+      .addToggle((toggle) => {
+        toggle.setValue(isMasterOn);
+        toggle.onChange(async (value) => {
+          this.plugin.settings.enableRoxy2DMascotMaster = value;
+          if (value) {
+            if (!this.plugin.settings.enableRoxy2DMascot && !this.plugin.settings.roxyForceLightweight2D) {
+              if (hdStatus.installed) {
                 this.plugin.settings.enableRoxy2DMascot = true;
-                await this.plugin.saveSettings();
-                await this.plugin.refreshOpenDashboardViews();
-                this.display();
+                this.plugin.settings.roxyForceLightweight2D = false;
               } else {
-                new Notice(
-                  `高清立绘包下载未全部完成（成功 ${res?.downloaded || 0}/${res?.total || 7}），请确认仓库或 Release 中已上传对应图片后重试。`,
-                  6000
-                );
-                button.setDisabled(false);
-                button.setButtonText("重试下载立绘包");
+                this.plugin.settings.enableRoxy2DMascot = false;
+                this.plugin.settings.roxyForceLightweight2D = true;
               }
-            } catch (err) {
-              new Notice(`下载高清立绘包失败：${err?.message || err}`, 6000);
-              button.setDisabled(false);
-              button.setButtonText("重试下载立绘包");
             }
-          });
+            if (this.plugin._roxyCoordinator) {
+              this.plugin._roxyCoordinator.sessionHidden2D = false;
+            }
+          }
+          await this.saveAndRefreshDashboard();
+          this.display();
+        });
       });
 
-    const isHdMascotOn = hdStatus.installed && Boolean(this.plugin.settings.enableRoxy2DMascot);
-    const isPixelModeOn = Boolean(this.plugin.settings.roxyForceLightweight2D);
-    const disableHdToggle = !hdStatus.installed || isPixelModeOn;
-    const hdToggleTooltip = !hdStatus.installed
-      ? "需要先下载“洛琪希高清立绘扩展包”"
-      : isPixelModeOn
-        ? "请先关闭二维像素小人模式"
+    const disableHdToggle = !isMasterOn || !hdStatus.installed;
+    const hdToggleTooltip = !isMasterOn
+      ? "请先开启前置开关“启用二维馆藏记录员”"
+      : !hdStatus.installed
+        ? "需要先下载“洛琪希高清立绘扩展包”"
         : "";
 
     const hdMascotSetting = new Setting(container)
-      .setName("启用二维馆藏记录员（洛琪希看板娘）")
+      .setName("启用高清立绘版洛琪希")
       .setDesc(
-        "在番剧档案馆「二维案头编目台」右下角显示高清立绘版洛琪希馆藏记录员。需先安装上方高清立绘扩展包，且与下方轻量像素模式互斥；若两项同时关闭则隐藏二维记录员。"
+        "在「二维案头编目台」右下角使用高清立绘版洛琪希形象。需先开启前置「启用二维馆藏记录员」并已安装高清立绘扩展包，与下方「启用轻量像素形象洛琪希」互斥切换。"
       )
       .addToggle((toggle) => {
         toggle.setValue(isHdMascotOn);
@@ -1782,34 +2776,41 @@ module.exports = function createSettingsTabClass({
           }
         }
         toggle.onChange(async (value) => {
-          if (!hdStatus.installed || this.plugin.settings.roxyForceLightweight2D) {
+          if (!isMasterOn || !hdStatus.installed) {
             return;
           }
-          this.plugin.settings.enableRoxy2DMascot = value;
           if (value) {
+            this.plugin.settings.enableRoxy2DMascot = true;
             this.plugin.settings.roxyForceLightweight2D = false;
             if (this.plugin._roxyCoordinator) {
               this.plugin._roxyCoordinator.sessionHidden2D = false;
             }
+          } else {
+            this.plugin.settings.enableRoxy2DMascot = false;
+            this.plugin.settings.roxyForceLightweight2D = true;
           }
           await this.saveAndRefreshDashboard();
           this.display();
         });
       });
     hdMascotSetting.setDisabled(disableHdToggle);
-    if (hdToggleTooltip) {
-      hdMascotSetting.settingEl.title = hdToggleTooltip;
-      hdMascotSetting.settingEl.style.opacity = "0.65";
-      if (hdMascotSetting.controlEl) hdMascotSetting.controlEl.title = hdToggleTooltip;
+    if (disableHdToggle) {
+      hdMascotSetting.settingEl.classList.add("is-roxy-sub-disabled");
+      if (hdToggleTooltip) {
+        hdMascotSetting.settingEl.title = hdToggleTooltip;
+        if (hdMascotSetting.controlEl) hdMascotSetting.controlEl.title = hdToggleTooltip;
+      }
     }
 
-    const disablePixelToggle = isHdMascotOn;
-    const pixelToggleTooltip = disablePixelToggle ? "请先关闭“启用二维馆藏记录员（洛琪希看板娘）”" : "";
+    const disablePixelToggle = !isMasterOn;
+    const pixelToggleTooltip = !isMasterOn
+      ? "请先开启前置开关“启用二维馆藏记录员”"
+      : "";
 
     const pixelMascotSetting = new Setting(container)
-      .setName("二维记录员使用内置轻量像素形象（无立绘包适配模式）")
+      .setName("启用轻量像素形象洛琪希")
       .setDesc(
-        "开启后，二维案头编目台将使用内置于 main.js 的轻量矢量像素洛琪希（未下载高清立绘包时默认开启；与上方高清立绘看板娘互斥，两项均关闭时完全停用二维记录员）。"
+        "在「二维案头编目台」右下角使用内置 8 态轻量像素形象洛琪希（assets/roxy-chibi-sprites/），无需下载额外高清立绘包，需先开启前置「启用二维馆藏记录员」，且与上方「启用高清立绘版洛琪希」互斥切换。"
       )
       .addToggle((toggle) => {
         toggle.setValue(isPixelModeOn);
@@ -1824,31 +2825,39 @@ module.exports = function createSettingsTabClass({
           }
         }
         toggle.onChange(async (value) => {
-          if (isHdMascotOn) {
+          if (!isMasterOn) {
             return;
           }
-          this.plugin.settings.roxyForceLightweight2D = value;
           if (value) {
+            this.plugin.settings.roxyForceLightweight2D = true;
             this.plugin.settings.enableRoxy2DMascot = false;
             if (this.plugin._roxyCoordinator) {
               this.plugin._roxyCoordinator.sessionHidden2D = false;
             }
+          } else if (hdStatus.installed) {
+            this.plugin.settings.roxyForceLightweight2D = false;
+            this.plugin.settings.enableRoxy2DMascot = true;
+          } else {
+            this.plugin.settings.enableRoxy2DMascotMaster = false;
+            this.plugin.settings.roxyForceLightweight2D = false;
           }
           await this.saveAndRefreshDashboard();
           this.display();
         });
       });
     pixelMascotSetting.setDisabled(disablePixelToggle);
-    if (pixelToggleTooltip) {
-      pixelMascotSetting.settingEl.title = pixelToggleTooltip;
-      pixelMascotSetting.settingEl.style.opacity = "0.65";
-      if (pixelMascotSetting.controlEl) pixelMascotSetting.controlEl.title = pixelToggleTooltip;
+    if (disablePixelToggle) {
+      pixelMascotSetting.settingEl.classList.add("is-roxy-sub-disabled");
+      if (pixelToggleTooltip) {
+        pixelMascotSetting.settingEl.title = pixelToggleTooltip;
+        if (pixelMascotSetting.controlEl) pixelMascotSetting.controlEl.title = pixelToggleTooltip;
+      }
     }
 
     new Setting(container)
-      .setName("启用三维馆藏记录员（像素洛琪希手办框）")
+      .setName("启用三维馆藏记录员（Q 版洛琪希手办框）")
       .setDesc(
-        "在番剧档案馆「三维原画档案室」左上角边缘显示像素洛琪希桌角手办框。不遮挡 3D 封套与详情面板，仅对档案抽出、归位、笔记纸页、高分策展切换、空轨道等真实事件作出短暂反馈。"
+        "在番剧档案馆「三维原画档案室」左上角边缘显示校准后的 8 态 Q 版洛琪希手办框。不遮挡 3D 封套与详情面板，对档案抽出、归位、笔记纸页、高分策展切换、空轨道等事件作出动态反馈。"
       )
       .addToggle((toggle) => {
         toggle.setValue(
@@ -1865,9 +2874,203 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
+      .setName("馆藏记录员底部控制条仅在点击形象后展开")
+      .setDesc(
+        "开启后，2D 与 3D 洛琪希下方的迷你控制条（静默 / 收纳 / 隐藏等按钮）平时保持自动收起，仅在点击洛琪希弹出气泡时同步展开；也可直接在底栏点击「📌 点立绘展栏 / 📌 固定底栏」随时切换。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(
+          this.plugin.settings.roxyDockExpandOnClickOnly !== false
+        );
+        toggle.onChange(async (value) => {
+          this.plugin.settings.roxyDockExpandOnClickOnly = value;
+          await this.saveAndRefreshDashboard();
+        });
+      });
+
+    new Setting(container)
+      .setName("看板娘角色扩展与台词替换工坊")
+      .setDesc(
+        "支持将洛琪希自定义为任意角色名称、为 8 种情绪状态单独指定本地立绘图片，并自定义各情绪台词或配置全局关键词替换规则。"
+      )
+      .addButton((button) => {
+        button
+          .setButtonText("🎨 打开角色与台词工坊")
+          .onClick(() => {
+            const modal = new Modal(this.app);
+            modal.onOpen = () => {
+              const { contentEl } = modal;
+              contentEl.empty();
+              contentEl.style.maxWidth = "720px";
+              contentEl.createEl("h2", { text: "🎨 看板娘角色扩展与台词替换工坊" });
+              contentEl.createEl("p", {
+                text: "您可以在此把看板娘替换为任意喜爱的角色：自定义角色称呼、为各情绪状态绑定本地图片路径（或 URL），并自定义台词库或关键词替换（留空则自动回退至洛琪希默认配置。隐藏彩蛋提示：连续点击记录员 100 下将触发百戳玩偶替身或全屏弹珠逃跑反应，可通过下方 plushie 槽位自定义替身玩偶图）。"
+              }).style.opacity = "0.82";
+
+              const settings = this.plugin.settings;
+              if (!settings.customMascotPortraits || typeof settings.customMascotPortraits !== "object") {
+                settings.customMascotPortraits = {};
+              }
+              if (!settings.customMascotDialogues || typeof settings.customMascotDialogues !== "object") {
+                settings.customMascotDialogues = {};
+              }
+
+              new Setting(contentEl)
+                .setName("自定义看板娘角色名称")
+                .setDesc("留空默认显示「洛琪希」。填写后将自动替换界面头衔与默认台词中的「洛琪希」称呼。")
+                .addText((text) => {
+                  text
+                    .setPlaceholder("例如：芙莉莲 / 爱丽丝 / 留空默认洛琪希")
+                    .setValue(String(settings.customMascotName || ""))
+                    .onChange(async (val) => {
+                      settings.customMascotName = String(val || "").trim();
+                      await this.saveAndRefreshDashboard();
+                    });
+                });
+
+              contentEl.createEl("h3", { text: "🖼️ 各情绪状态自定义立绘 / 精灵图路径" });
+              const stateDefs = [
+                { key: "guide", label: "引导 / 常态 (guide)" },
+                { key: "pout", label: "鼓腮 / 傲娇 (pout)" },
+                { key: "lecture", label: "讲学 / 严谨 (lecture)" },
+                { key: "alert", label: "警觉 / 提醒 (alert)" },
+                { key: "fluster", label: "害羞 / 慌张 (fluster)" },
+                { key: "helpless", label: "无奈 / 叹气 (helpless)" },
+                { key: "cheer", label: "欢呼 / 夸奖 (cheer)" },
+                { key: "overpoke", label: "戳晕 / 抗议 (overpoke)" },
+                { key: "plushie", label: "百戳玩偶替身 (plushie)" }
+              ];
+
+              stateDefs.forEach((st) => {
+                new Setting(contentEl)
+                  .setName(st.label)
+                  .setDesc("支持本地绝对路径（如 D:/pics/char_guide.png）、仓库内相对路径或 https 图片链接")
+                  .addText((text) => {
+                    text
+                      .setPlaceholder("留空使用内置洛琪希形象")
+                      .setValue(String(settings.customMascotPortraits[st.key] || ""))
+                      .onChange(async (val) => {
+                        const clean = String(val || "").trim();
+                        if (clean) {
+                          settings.customMascotPortraits[st.key] = clean;
+                        } else {
+                          delete settings.customMascotPortraits[st.key];
+                        }
+                        await this.saveAndRefreshDashboard();
+                      });
+                    text.inputEl.style.width = "240px";
+                  })
+                  .addButton((btn) => {
+                    btn.setButtonText("📁 浏览...").onClick(() => {
+                      const fileInput = document.createElement("input");
+                      fileInput.type = "file";
+                      fileInput.accept = "image/*";
+                      fileInput.onchange = async () => {
+                        const file = fileInput.files && fileInput.files[0];
+                        if (!file) return;
+                        let filePath = "";
+                        try {
+                          const electron = isDesktopNodeAvailable() ? tryRequireNode("electron") : null;
+                          filePath = (electron?.webUtils?.getPathForFile && electron.webUtils.getPathForFile(file)) || file.path || "";
+                        } catch (_) {
+                          filePath = file.path || "";
+                        }
+                        if (!filePath && typeof file.arrayBuffer === "function") {
+                          try {
+                            const folder = String(settings.characterImageFolder || "附件/角色立绘")
+                              .replace(/\\/g, "/")
+                              .replace(/\/+$/, "");
+                            await this.plugin.ensureVaultFolder(folder);
+                            const ext = (file.name && file.name.includes("."))
+                              ? file.name.split(".").pop().toLowerCase()
+                              : "png";
+                            const targetRel = `${folder}/custom_mascot_${st.key}_${Date.now()}.${ext}`;
+                            const buf = await file.arrayBuffer();
+                            await this.app.vault.createBinary(targetRel, buf);
+                            filePath = targetRel;
+                          } catch (_) {}
+                        }
+                        if (filePath) {
+                          settings.customMascotPortraits[st.key] = filePath;
+                          await this.saveAndRefreshDashboard();
+                          modal.onOpen();
+                        }
+                      };
+                      fileInput.click();
+                    });
+                  });
+              });
+
+              contentEl.createEl("h3", { text: "💬 台词关键词替换与专属情绪台词池" });
+              const replaceWrap = contentEl.createDiv();
+              replaceWrap.style.marginBottom = "14px";
+              replaceWrap.createEl("div", {
+                text: "全局台词替换规则（每行一条，格式：原词=>新词，例如：魔法=>炼金术）"
+              }).style.fontWeight = "600";
+              const replaceArea = replaceWrap.createEl("textarea");
+              replaceArea.style.width = "100%";
+              replaceArea.style.minHeight = "68px";
+              replaceArea.style.marginTop = "6px";
+              replaceArea.placeholder = "魔法=>炼金术\n魔杖=>法杖";
+              replaceArea.value = String(settings.customMascotDialogues._replaceRules || "");
+              replaceArea.onchange = async () => {
+                settings.customMascotDialogues._replaceRules = String(replaceArea.value || "");
+                await this.saveAndRefreshDashboard();
+              };
+
+              stateDefs.forEach((st) => {
+                const wrap = contentEl.createDiv();
+                wrap.style.marginBottom = "10px";
+                wrap.createEl("div", {
+                  text: st.label + " 专属随机台词池（每行一句，触发该状态时优先从中随机抽取；留空使用默认台词）"
+                }).style.fontSize = "12.5px";
+                const area = wrap.createEl("textarea");
+                area.style.width = "100%";
+                area.style.minHeight = "54px";
+                area.style.marginTop = "4px";
+                const existing = settings.customMascotDialogues[st.key];
+                area.value = Array.isArray(existing)
+                  ? existing.join("\n")
+                  : String(existing || "");
+                area.onchange = async () => {
+                  const lines = String(area.value || "")
+                    .split(/\r?\n/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  if (lines.length) {
+                    settings.customMascotDialogues[st.key] = lines;
+                  } else {
+                    delete settings.customMascotDialogues[st.key];
+                  }
+                  await this.saveAndRefreshDashboard();
+                };
+              });
+
+              const footer = contentEl.createDiv();
+              footer.style.display = "flex";
+              footer.style.justifyContent = "space-between";
+              footer.style.marginTop = "16px";
+
+              const resetBtn = footer.createEl("button", { text: "♻️ 一键恢复默认洛琪希配置" });
+              resetBtn.onclick = async () => {
+                settings.customMascotName = "";
+                settings.customMascotPortraits = {};
+                settings.customMascotDialogues = {};
+                await this.saveAndRefreshDashboard();
+                modal.onOpen();
+              };
+
+              const doneBtn = footer.createEl("button", { text: "完成并生效", cls: "mod-cta" });
+              doneBtn.onclick = () => modal.close();
+            };
+            modal.open();
+          });
+      });
+
+    new Setting(container)
       .setName("启用追番下载与单集 RSS 助手")
       .setDesc(
-        "在二维案头追番席、画廊卡片与索引表中显示「⬇ 下载/RSS」按钮，支持在 Obsidian 内直接选择发布源、核验每集唯一 RSS 并启动下载。"
+        "在二维案头编目台「追番」、画廊卡片与索引表中显示「⬇ 下载/RSS」按钮，支持在 Obsidian 内直接选择发布源、核验每集唯一 RSS 并启动下载。"
       )
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.enableDownloadAssistant !== false);
@@ -2031,6 +3234,12 @@ module.exports = function createSettingsTabClass({
 
           await this.plugin.saveSettings();
         });
+
+        this.bindPathInputAutoMigration(
+          text,
+          "dashboardPath",
+          () => this.plugin.settings.dashboardPath || this.plugin.getDefaultDashboardPath()
+        );
       });
 
     new Setting(container)
@@ -3244,20 +4453,11 @@ await this.saveAndSynchronizeNoteScores();
       new Notice(`已复制 QQ 交流群号：${QQ_GROUP_ID}`);
     };
 
-    const joinUrlBtn = btnRow.createEl("button", {
-      cls: "mod-cta",
-      text: "↗ 一键唤起 QQ 加群"
-    });
-    joinUrlBtn.onclick = () => {
-      window.open(QQ_GROUP_JOIN_URL);
-    };
-
     // 右侧：纯代码 SVG 矩阵渲染的 QQ 群二维码（对应 https://qm.qq.com/q/qBNe2OicsU，Version 3 29x29 EC-Q Mask-2）
     const qrCol = helpCard.createDiv({ cls: "bangumi-help-qr-col" });
     qrCol.style.display = "flex";
     qrCol.style.flexDirection = "column";
     qrCol.style.alignItems = "center";
-    qrCol.style.gap = "6px";
     qrCol.style.padding = "10px 12px";
     qrCol.style.borderRadius = "10px";
     qrCol.style.background = "#ffffff";
@@ -3265,14 +4465,6 @@ await this.saveAndSynchronizeNoteScores();
     qrCol.style.boxShadow = "0 4px 14px rgba(0,0,0,0.08)";
 
     this.renderPureCodeQqGroupQrSvg(qrCol);
-
-    const qrCap = qrCol.createDiv({
-      text: `手机 QQ 扫码加群 · ${QQ_GROUP_ID}`
-    });
-    qrCap.style.fontSize = "11px";
-    qrCap.style.fontWeight = "700";
-    qrCap.style.color = "#222222";
-    qrCap.style.letterSpacing = "0.02em";
   }
 
   /**
@@ -3438,12 +4630,22 @@ await this.plugin.runTemporarySeasonMode(
   addPathSetting(container, name, key, description) {
     new Setting(container).setName(name).setDesc(description).addText((text) => {
       text.setValue(
-        this.plugin.settings[key]
+        String(this.plugin.settings[key] || "")
       );
       text.onChange(async (value) => {
-        this.plugin.settings[key] = value.trim();
+        const cleanVal = this.normalizeVaultFolderPath(value);
+        this.plugin.settings[key] = cleanVal;
+        if (
+          key === "characterImageFolder" ||
+          key === "reviewImageFolder" ||
+          key === "illustrationGalleryFolder" ||
+          key === "gameImageFolder"
+        ) {
+          this.plugin.settings.imageFoldersCustomized = true;
+        }
         await this.plugin.saveSettings();
       });
+      this.bindPathInputAutoMigration(text, key, () => this.plugin.settings[key] || "");
     });
   }
 };
