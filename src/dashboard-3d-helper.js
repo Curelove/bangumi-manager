@@ -118,9 +118,9 @@ const DEFAULT_MOTION_SETTINGS = Object.freeze({
 });
 
 const SERIF_FONT_STACK =
-  '"Source Han Serif SC", "Source Han Serif CN", "Noto Serif CJK SC", "Songti SC", "SimSun", "FangSong", "Microsoft YaHei", serif';
+  '"Source Han Serif SC", "Source Han Serif CN", "Noto Serif SC", "Noto Serif CJK SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
 const SANS_FONT_STACK =
-  '"Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+  '"Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
 const MONO_FONT_STACK =
   '"JetBrains Mono", "Cascadia Mono", "Consolas", monospace';
 
@@ -836,23 +836,26 @@ class ScrubTitle {
   }
 }
 
-function makeCanvasTexture(width, height, draw) {
+function makeCanvasTexture(width, height, draw, renderScale = 1) {
   if (typeof document === "undefined") return null;
 
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = Math.round(width * renderScale);
+  canvas.height = Math.round(height * renderScale);
 
   const context = canvas.getContext("2d");
   if (!context) return null;
 
+  if (renderScale !== 1) {
+    context.scale(renderScale, renderScale);
+  }
   draw(context, width, height);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
-  texture.anisotropy = 8;
+  texture.anisotropy = 16;
   texture.generateMipmaps = true;
   texture.needsUpdate = true;
   return texture;
@@ -902,22 +905,53 @@ function wrapTokensToLines(context, tokens, maxWidth) {
   return lines;
 }
 
-function fitTitleLines(context, rawTitle, maxWidth, fontFamily = SERIF_FONT_STACK) {
+function fitTitleLines(
+  context,
+  rawTitle,
+  maxWidth,
+  fontFamily = SERIF_FONT_STACK,
+  options = {}
+) {
   const text = String(rawTitle || "未命名档案").trim() || "未命名档案";
   const tokens = tokenizeMixedTitle(text);
-  const candidateSizes = [52, 46, 40, 35, 31, 27];
+  const candidateSizes = options.candidateSizes || [52, 46, 40, 35, 31, 27];
+  const weight = options.fontWeight || 700;
+  const allowThreeLinesSize = options.threeLineSize || 0;
 
   for (const fontSize of candidateSizes) {
-    context.font = `700 ${fontSize}px ${fontFamily}`;
+    context.font = `${weight} ${fontSize}px ${fontFamily}`;
     const lines = wrapTokensToLines(context, tokens, maxWidth);
     if (lines.length <= 2) {
       return { fontSize, lines };
     }
   }
 
-  // 超长标题兜底：使用 26px 两行排版，第二行保留首部与区分性尾部（如 OVA / 续 / 完 / 第2季）
-  const minSize = 26;
-  context.font = `700 ${minSize}px ${fontFamily}`;
+  if (allowThreeLinesSize > 0) {
+    context.font = `${weight} ${allowThreeLinesSize}px ${fontFamily}`;
+    const threeLines = wrapTokensToLines(context, tokens, maxWidth);
+    if (threeLines.length <= 3) {
+      return { fontSize: allowThreeLinesSize, lines: threeLines };
+    }
+    const first = threeLines[0] || "";
+    const second = threeLines[1] || "";
+    const rest = threeLines.slice(2).join("");
+    const tail = rest.slice(-6);
+    let head = rest.slice(0, Math.max(4, rest.length - 6));
+    while (
+      head.length > 2 &&
+      context.measureText(`${head}…${tail}`).width > maxWidth
+    ) {
+      head = head.slice(0, -1);
+    }
+    return {
+      fontSize: allowThreeLinesSize,
+      lines: [first, second, `${head}…${tail}`]
+    };
+  }
+
+  // 超长标题兜底：两行排版，第二行保留首部与区分性尾部（如 OVA / 续 / 完 / 第2季）
+  const minSize = options.minSize || 26;
+  context.font = `${weight} ${minSize}px ${fontFamily}`;
   const allLines = wrapTokensToLines(context, tokens, maxWidth);
   const firstLine = allLines[0] || text.slice(0, 14);
   const remainingText = allLines.slice(1).join("");
@@ -938,36 +972,44 @@ function fitTitleLines(context, rawTitle, maxWidth, fontFamily = SERIF_FONT_STAC
 }
 
 function drawTitleTexture(item, slotType) {
-  return makeCanvasTexture(1024, 360, (context, width, height) => {
+  const isDivider = slotType === "divider";
+  // 严格按实体纸签几何宽高比（2.115 : 1.242 ≈ 1.703 / 隔板 1.89）1:1 绘制，彻底消除汉字横向挤压发虚
+  const texHeight = isDivider ? 540 : 600;
+
+  return makeCanvasTexture(1024, texHeight, (context, width, height) => {
     const accent = item.laneAccent || "#9b7247";
 
-    if (slotType === "divider") {
+    if (isDivider) {
       // 诚实空轨 / 章节隔板铭牌：高对比宣纸卡头，无白雾遮挡
       context.fillStyle = "#e6dccb";
       context.fillRect(0, 0, width, height);
 
       context.fillStyle = accent;
-      context.fillRect(0, 0, width, 20);
-      context.fillRect(32, 42, 14, height - 84);
+      context.fillRect(0, 0, width, 26);
+      context.fillRect(34, 58, 16, height - 116);
 
       context.strokeStyle = "rgba(20, 22, 18, 0.48)";
       context.lineWidth = 4;
-      context.strokeRect(16, 20, width - 32, height - 36);
+      context.strokeRect(18, 28, width - 36, height - 48);
 
       const badgeText = String(item.laneBadge || "ARCHIVE TRACK").toUpperCase();
       context.fillStyle = accent;
-      context.fillRect(64, 46, Math.min(420, badgeText.length * 22 + 36), 44);
+      context.fillRect(68, 66, Math.min(460, badgeText.length * 24 + 40), 54);
       context.fillStyle = "#fdfbf7";
-      context.font = `700 25px ${MONO_FONT_STACK}`;
-      context.fillText(badgeText, 80, 77);
+      context.font = `700 28px ${MONO_FONT_STACK}`;
+      context.fillText(badgeText, 86, 103);
 
       const mainLabel = String(item.dividerLabel || item.laneLabel || "档案分栏");
-      const fitted = fitTitleLines(context, mainLabel, width - 120, SERIF_FONT_STACK);
+      const fitted = fitTitleLines(context, mainLabel, width - 128, SERIF_FONT_STACK, {
+        candidateSizes: [68, 60, 52, 46, 40],
+        fontWeight: 800,
+        minSize: 38
+      });
       context.fillStyle = "#0f110e";
-      const dSize = Math.min(54, fitted.fontSize + 4);
-      context.font = `900 ${dSize}px ${SERIF_FONT_STACK}`;
+      const dSize = Math.min(68, fitted.fontSize);
+      context.font = `800 ${dSize}px ${SERIF_FONT_STACK}`;
       fitted.lines.forEach((line, idx) => {
-        context.fillText(line, 64, 166 + idx * 58);
+        context.fillText(line, 68, 228 + idx * 76);
       });
 
       const subNote = String(
@@ -977,74 +1019,99 @@ function drawTitleTexture(item, slotType) {
           : "CONTINUED ARCHIVE LOOP · 循环分栏界标")
       );
       context.fillStyle = "#2c2924";
-      context.font = `700 28px ${SANS_FONT_STACK}`;
-      context.fillText(subNote.slice(0, 34), 64, height - 48);
+      context.font = `700 32px ${SANS_FONT_STACK}`;
+      context.fillText(subNote.slice(0, 32), 68, height - 66);
       return;
     }
 
-    // 真实动画档案标题签（1024×360 高清纸签，支持两行自适应与策展徽章）
+    // 真实动画档案标题签（1024×600 等比高清和纸签，大字高对比清晰排版）
     context.fillStyle = "#f4f0e8";
     context.fillRect(0, 0, width, height);
 
     context.fillStyle = accent;
-    context.fillRect(0, 0, 12, height);
+    context.fillRect(0, 0, 16, height);
 
-    context.strokeStyle = "rgba(24, 26, 22, 0.25)";
+    context.strokeStyle = "rgba(24, 26, 22, 0.24)";
     context.lineWidth = 3;
     context.beginPath();
-    context.moveTo(0, 4);
-    context.lineTo(width, 4);
-    context.moveTo(0, height - 8);
-    context.lineTo(width, height - 8);
+    context.moveTo(0, 5);
+    context.lineTo(width, 5);
+    context.moveTo(0, height - 9);
+    context.lineTo(width, height - 9);
     context.stroke();
 
-    const rightReserve = item.curatedBadge ? 250 : 48;
+    const rightReserve = item.curatedBadge ? 258 : 44;
     const fitted = fitTitleLines(
       context,
       item.name || "未命名档案",
       width - 44 - rightReserve,
-      SERIF_FONT_STACK
+      SERIF_FONT_STACK,
+      {
+        candidateSizes: [72, 64, 56, 50, 46],
+        fontWeight: 800,
+        threeLineSize: 42,
+        minSize: 40
+      }
     );
 
     if (item.curatedBadge) {
-      const pillW = 216;
-      const pillH = 44;
-      const pillX = width - pillW - 28;
-      const pillY = 26;
+      const pillW = 224;
+      const pillH = 52;
+      const pillX = width - pillW - 26;
+      const pillY = 34;
       context.fillStyle = accent;
       context.fillRect(pillX, pillY, pillW, pillH);
       context.fillStyle = "#fdfbf7";
-      context.font = `700 22px ${SANS_FONT_STACK}`;
+      context.font = `700 24px ${SANS_FONT_STACK}`;
       context.fillText(
         `★ ${item.curatedScoreText || "高分"} · ${item.curatedBadge}`.slice(0, 14),
         pillX + 14,
-        pillY + 30
+        pillY + 35
       );
     }
 
-    context.fillStyle = "#141612";
-    context.font = `700 ${fitted.fontSize}px ${SERIF_FONT_STACK}`;
+    context.fillStyle = "#111310";
+    context.strokeStyle = "rgba(17, 19, 16, 0.22)";
+    context.lineJoin = "round";
+    context.lineWidth = 0.9;
+    context.font = `800 ${fitted.fontSize}px ${SERIF_FONT_STACK}`;
+
+    let lastTitleBaseline = 132;
     if (fitted.lines.length === 1) {
-      context.fillText(fitted.lines[0], 38, 92);
+      lastTitleBaseline = 136;
+      context.strokeText(fitted.lines[0], 42, lastTitleBaseline);
+      context.fillText(fitted.lines[0], 42, lastTitleBaseline);
+    } else if (fitted.lines.length === 2) {
+      const lineStep = Math.round(fitted.fontSize * 1.24);
+      const base0 = 108;
+      lastTitleBaseline = base0 + lineStep;
+      context.strokeText(fitted.lines[0], 42, base0);
+      context.fillText(fitted.lines[0], 42, base0);
+      context.strokeText(fitted.lines[1], 42, lastTitleBaseline);
+      context.fillText(fitted.lines[1], 42, lastTitleBaseline);
     } else {
-      const lineStep = Math.round(fitted.fontSize * 1.18);
-      context.fillText(fitted.lines[0], 38, 74);
-      context.fillText(fitted.lines[1], 38, 74 + lineStep);
+      const lineStep = Math.round(fitted.fontSize * 1.24);
+      fitted.lines.forEach((ln, idx) => {
+        const by = 92 + idx * lineStep;
+        lastTitleBaseline = by;
+        context.strokeText(ln, 42, by);
+        context.fillText(ln, 42, by);
+      });
     }
 
     const jpOrMeta = String(
       item.japaneseName || `${item.year || ""} ${item.season || ""}`.trim() || "ATELIER CEL ARCHIVE"
     );
-    const metaY = fitted.lines.length > 1 ? 222 : 168;
-    context.fillStyle = "#5c564e";
-    context.font = `500 27px ${SANS_FONT_STACK}`;
-    context.fillText(jpOrMeta.slice(0, 32), 38, metaY);
+    const metaY = Math.min(height - 156, lastTitleBaseline + (fitted.lines.length === 1 ? 88 : 74));
+    context.fillStyle = "#524c44";
+    context.font = `600 32px ${SANS_FONT_STACK}`;
+    context.fillText(jpOrMeta.slice(0, 29), 42, metaY);
 
-    context.strokeStyle = "rgba(24, 26, 22, 0.14)";
-    context.lineWidth = 2;
+    context.strokeStyle = "rgba(24, 26, 22, 0.16)";
+    context.lineWidth = 2.5;
     context.beginPath();
-    context.moveTo(38, height - 82);
-    context.lineTo(width - 32, height - 82);
+    context.moveTo(42, height - 114);
+    context.lineTo(width - 32, height - 114);
     context.stroke();
 
     const codeStr = "BGM-" + String(item.subjectId || "000").slice(-3).padStart(3, "0");
@@ -1053,9 +1120,9 @@ function drawTitleTexture(item, slotType) {
     const scoreStr = Number.isFinite(scoreVal) && scoreVal > 0 ? `★ ${scoreVal.toFixed(1)}` : "未评分";
 
     context.fillStyle = "#181a16";
-    context.font = `700 26px ${MONO_FONT_STACK}`;
-    context.fillText(`${codeStr}  ·  ${stateStr}  ·  ${scoreStr}`, 38, height - 34);
-  });
+    context.font = `700 33px ${MONO_FONT_STACK}`;
+    context.fillText(`${codeStr}  ·  ${stateStr}  ·  ${scoreStr}`, 42, height - 46);
+  }, 1.5);
 }
 
 function drawBackTexture(item) {
@@ -1331,7 +1398,7 @@ function drawTrackSignpostTexture(info = {}) {
       shortHint = `${shortHint.slice(0, -2)}…`;
     }
     context.fillText(shortHint, 46, 196);
-  });
+  }, 2);
 }
 
 function makeSignpostRenderKey(info = {}) {

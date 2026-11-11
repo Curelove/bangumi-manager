@@ -44,7 +44,7 @@ const HALF_ROWS = 8;
 const COLUMN_SPACING = 3.24;
 const CORRIDOR_COL_SPACING = 3.24;
 const CORRIDOR_ROW_SPACING = 1.24;
-const EASEL_COL_SPACING = 3.04;
+const EASEL_COL_SPACING = 3.38;
 const ROW_SPACING = 0.92;
 const INSPECTION_LIFT = 4.05;
 const ARRAY_CAMERA = new THREE.Vector3(36.0, 27.5, 79.0);
@@ -560,12 +560,9 @@ class Dashboard3DSpace {
     return base + dir * 0.28 * Math.exp(-Math.max(0, ad - 1) * 0.75);
   }
 
-  computeTargetEaselLaneX(lane, focusLane = this.focusLane) {
+  computeTargetEaselLaneX(lane) {
     const centerOffset = (this.laneCount - 1) / 2;
-    const base = (lane - centerOffset) * EASEL_COL_SPACING;
-    const d = lane - focusLane;
-    if (d === 0) return base;
-    return base + Math.sign(d) * 0.18;
+    return (lane - centerOffset) * EASEL_COL_SPACING;
   }
 
   computeTargetHighscoreLaneX(lane, focusLane = this.focusLane) {
@@ -587,7 +584,7 @@ class Dashboard3DSpace {
   getEaselRotationY(lane) {
     const centerOffset = (this.laneCount - 1) / 2;
     const norm = centerOffset > 0 ? (lane - centerOffset) / centerOffset : 0;
-    return clamp(-norm * 0.135, -0.18, 0.18);
+    return clamp(-norm * 0.085, -0.12, 0.12);
   }
 
   syncLaneSprings(resetValues = false) {
@@ -912,7 +909,7 @@ class Dashboard3DSpace {
     this.scene.fog = new THREE.Fog("#eae5e1", 72, 168);
 
     // 兼容开架回廊与折屏展架远摄景深范围，配合动态近裁剪面彻底消除薄层共面闪烁
-    this.camera = new THREE.PerspectiveCamera(4.6, width / height, 16, 225);
+    this.camera = new THREE.PerspectiveCamera(4.6, width / height, 16, 265);
     const startShot = this.getStatusCameraShot();
     this.camera.position.copy(startShot.position);
     this.camera.lookAt(startShot.aim);
@@ -1053,17 +1050,22 @@ class Dashboard3DSpace {
       const focusVal = clamp(this.getLaneFocusValue(lane), 0, 1);
       const x = this.getLaneXValue(lane);
       const corridorY = 2.66 + focusVal * 0.14;
-      const easelY = 2.68 + focusVal * 0.12;
+      const easelY = 2.74 + focusVal * 0.08;
       const y = THREE.MathUtils.lerp(corridorY, easelY, easelMix) + sp.hover.value;
       const z = THREE.MathUtils.lerp(0.14 + focusVal * 0.18, 0.86 + focusVal * 0.16, easelMix);
-      const baseScale = THREE.MathUtils.lerp(0.86, 0.90, easelMix) + focusVal * 0.06 + (isHovered ? 0.025 : 0);
+      const baseScale = THREE.MathUtils.lerp(0.86, 0.94, easelMix) + focusVal * 0.05 + (isHovered ? 0.025 : 0);
 
       sp.group.position.set(x, y, z);
       sp.group.scale.setScalar(baseScale);
       sp.group.rotation.y = THREE.MathUtils.lerp(0.24, this.getEaselRotationY(lane), easelMix);
       sp.group.rotation.x = THREE.MathUtils.lerp(-0.12, -0.04, easelMix);
 
-      const presence = (0.76 + focusVal * 0.24) * fade * detailDim;
+      const rawPresence = THREE.MathUtils.lerp(
+        0.78 + focusVal * 0.22,
+        0.96 + focusVal * 0.04,
+        easelMix
+      );
+      const presence = rawPresence * fade * detailDim;
       sp.fadeMats.forEach((m) => {
         const baseOp = m.userData.__spBaseOpacity ?? 1;
         m.opacity = clamp(baseOp * presence, 0, 1);
@@ -1242,8 +1244,8 @@ class Dashboard3DSpace {
 
     const easelFocusX = this.computeTargetEaselLaneX(this.focusLane, this.focusLane);
     const easelExtraPan =
-      Math.sign(easelFocusX) * Math.max(0, Math.abs(easelFocusX) - 4.7) * 0.78;
-    const easelPanFactor = THREE.MathUtils.lerp(0.22, 0.9, narrowMix);
+      Math.sign(easelFocusX) * Math.max(0, Math.abs(easelFocusX) - 5.25) * 0.78;
+    const easelPanFactor = THREE.MathUtils.lerp(0.14, 0.9, narrowMix);
     const easelPanX = easelFocusX * easelPanFactor + easelExtraPan * (1 - narrowMix * 0.65);
 
     const easelPos = new THREE.Vector3(
@@ -1303,27 +1305,28 @@ class Dashboard3DSpace {
     const corridorFarBlur = smooth(clamp((corridorDist - 1.35) / 3.8, 0, 1));
     const corridorPresence = 0.86 + laneFocus * 0.14;
 
+    // 折屏展架：适度放大约 25%（0.70–0.725），同屏主显前 2 排半，解除非选中列柔焦与半透明遮罩
     let easelY;
     let easelZ;
     if (rowDelta >= 0) {
-      easelY = 0.96 - rowDelta * 1.94 + liftVal * 0.14 + hoverVal * 0.55 + ripple * 0.28;
-      easelZ = 0.42 - rowDelta * 0.34 + laneFocus * 0.26;
+      easelY = 0.60 - rowDelta * 2.46 + liftVal * 0.14 + hoverVal * 0.42 + ripple * 0.22;
+      easelZ = 0.46 - rowDelta * 0.24 + laneFocus * 0.22;
     } else {
-      easelY = 0.96 - rowDelta * 1.05 + liftVal * 0.14;
-      easelZ = 0.42 + rowDelta * 0.92 + laneFocus * 0.26;
+      easelY = 0.60 - rowDelta * 1.25 + liftVal * 0.14;
+      easelZ = 0.46 + rowDelta * 0.85 + laneFocus * 0.22;
     }
-    const easelScale = (divider ? 0.50 : 0.56) + laneFocus * 0.025;
-    const easelTiltX = -0.075;
+    const easelScale = (divider ? 0.62 : 0.70) + laneFocus * 0.025;
+    const easelTiltX = -0.072;
     const easelRotY = this.getEaselRotationY(lane) + angleVal;
 
     let easelReveal = 0;
     if (!blank) {
-      const topVis = smooth(clamp((rowDelta + 0.62) / 0.52, 0, 1));
-      const bottomVis = smooth(clamp((2.95 - rowDelta) / 0.82, 0, 1));
-      easelReveal = topVis * bottomVis * (divider ? 0.76 : 1);
+      const topVis = smooth(clamp((rowDelta + 0.52) / 0.46, 0, 1));
+      const bottomVis = smooth(clamp((2.75 - rowDelta) / 0.65, 0, 1));
+      easelReveal = topVis * bottomVis;
     }
-    const easelFarBlur = clamp(Math.max(0, Math.abs(rowDelta - 0.8) - 1.35) * 0.32, 0, 0.45);
-    const easelPresence = 0.88 + laneFocus * 0.12;
+    const easelFarBlur = clamp(Math.max(0, rowDelta - 2.15) * 0.35, 0, 0.35);
+    const easelPresence = 1.0;
 
     return {
       x,
@@ -1409,24 +1412,28 @@ class Dashboard3DSpace {
         points.push(-halfWidth, -0.52, z, halfWidth, -0.52, z);
       }
 
+      // 折屏展架专属后景托线：严格置于所有卡片背后的背景层 (Z = -0.96)，绝不横穿任何封面
       const rackPoints = [];
+      const rackZ = -0.96;
       for (let lane = 0; lane < this.laneCount; lane += 1) {
         const rx = (lane - centerOffset) * EASEL_COL_SPACING;
-        const hw = 0.92;
-        rackPoints.push(rx - hw, -3.72, 0.02, rx - hw, 2.28, 0.02);
-        rackPoints.push(rx + hw, -3.72, 0.02, rx + hw, 2.28, 0.02);
-        rackPoints.push(rx - hw - 0.12, 0.02, 0.18, rx + hw + 0.12, 0.02, 0.18);
-        rackPoints.push(rx - hw - 0.12, -1.92, -0.14, rx + hw + 0.12, -1.92, -0.14);
-        rackPoints.push(rx - hw - 0.16, -3.72, -0.36, rx + hw + 0.16, -3.72, -0.36);
+        const hw = 0.90;
+        rackPoints.push(rx - hw, -4.65, rackZ, rx - hw, 2.24, rackZ);
+        rackPoints.push(rx + hw, -4.65, rackZ, rx + hw, 2.24, rackZ);
+        rackPoints.push(rx - hw - 0.14, -0.58, rackZ, rx + hw + 0.14, -0.58, rackZ);
+        rackPoints.push(rx - hw - 0.14, -3.04, rackZ, rx + hw + 0.14, -3.04, rackZ);
       }
       const rackGeo = new THREE.BufferGeometry();
       rackGeo.setAttribute("position", new THREE.Float32BufferAttribute(rackPoints, 3));
       const rackMat = new THREE.LineBasicMaterial({
         color: 0xb99b6b,
         transparent: true,
-        opacity: 0
+        opacity: 0,
+        depthTest: true,
+        depthWrite: false
       });
       this.easelRackLines = new THREE.LineSegments(rackGeo, rackMat);
+      this.easelRackLines.renderOrder = -2;
       this.archiveGroup.add(this.easelRackLines);
     }
 
@@ -1512,11 +1519,19 @@ class Dashboard3DSpace {
     const fade = this.lensFade?.value ?? 1;
     const easelMix = this.lensMode === "highscore" ? 0 : clamp(this.easelBlend?.value ?? 0, 0, 1);
     const baseOpacity = lines.userData.baseOpacity ?? (this.lensMode === "highscore" ? 0.36 : 0.22);
-    material.opacity = (baseOpacity + scrollEnergy * 0.06) * fade * (1 - easelMix * 0.72);
+
+    // 切向折屏展架时，回廊地面流动白虚线随镜头平滑下沉并淡出至完全消失，绝不横穿正面封面
+    const corridorLineFade =
+      this.lensMode === "highscore"
+        ? 1
+        : Math.pow(clamp(1 - easelMix * 1.48, 0, 1), 1.75);
+    lines.visible = corridorLineFade > 0.004 && fade > 0.01;
+    material.opacity = (baseOpacity + scrollEnergy * 0.06) * fade * corridorLineFade;
 
     if (this.easelRackLines?.material) {
-      this.easelRackLines.visible = easelMix > 0.01 && fade > 0.02;
-      this.easelRackLines.material.opacity = 0.26 * easelMix * fade;
+      const rackFade = smooth(clamp((easelMix - 0.18) / 0.82, 0, 1));
+      this.easelRackLines.visible = rackFade > 0.005 && fade > 0.02;
+      this.easelRackLines.material.opacity = 0.20 * rackFade * fade;
     }
 
     // 高分模式下同步高亮当前选中作品对应的评分展阶标尺铭牌
@@ -1534,8 +1549,9 @@ class Dashboard3DSpace {
       });
     }
 
-    // 让基准尺随档案阵列产生轻微的纸面视差
-    lines.position.z = Math.sin(activeRail.value * 0.16) * 0.065;
+    // 让基准尺随档案阵列产生轻微视差，并在折屏切换途中自然退向地平面后下方
+    lines.position.y = -easelMix * 1.85;
+    lines.position.z = Math.sin(activeRail.value * 0.16) * 0.065 - easelMix * 4.2;
   }
 
   applyQuality() {
@@ -1546,11 +1562,15 @@ class Dashboard3DSpace {
         window.innerWidth <= 768 &&
         Number(navigator?.maxTouchPoints || 0) > 0);
     if (mobileTouch) {
-      // 移动端高刷顺滑省电档：限制 DPR <= 1.5 并关闭重度实时阴影贴图，保障 60/120Hz 触控跟手不发热
-      this.renderer.setPixelRatio(this.settings.highQuality ? Math.min(1.5, dpr) : 1);
+      // 移动端高刷顺滑省电档：限制 DPR <= 1.65 并关闭重度实时阴影贴图，保障 60/120Hz 触控跟手不发热
+      this.renderer.setPixelRatio(this.settings.highQuality ? Math.min(1.65, dpr) : 1);
       this.renderer.shadowMap.enabled = false;
     } else {
-      this.renderer.setPixelRatio(this.settings.highQuality ? Math.min(1.75, dpr) : 1);
+      // 桌面端高画质档：启用 2.0x–2.5x 超采样抗锯齿（SSAA），显著提升缩略海报、导视牌与汉字笔画锐度
+      const desktopTargetDpr = this.settings.highQuality
+        ? Math.min(2.5, Math.max(dpr * 1.35, 2.0))
+        : Math.min(1.25, dpr);
+      this.renderer.setPixelRatio(desktopTargetDpr);
       this.renderer.shadowMap.enabled = Boolean(this.settings.highQuality);
     }
     this.resize();
@@ -1746,7 +1766,8 @@ class Dashboard3DSpace {
     }
 
     if (data.posterMaterial) {
-      const qualityBoost = clamp(0.94 + (card.quality?.value || 0) * 0.08, 0.94, 1.0);
+      const easelMix = this.lensMode === "highscore" ? 0 : clamp(this.easelBlend?.value ?? 0, 0, 1);
+      const qualityBoost = clamp(0.94 + easelMix * 0.045 + (card.quality?.value || 0) * 0.08, 0.94, 1.0);
       const brightness = qualityBoost * (0.74 + normalizedPresence * 0.26);
       data.posterMaterial.color.setScalar(brightness);
     }
@@ -2167,7 +2188,7 @@ class Dashboard3DSpace {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.magFilter = THREE.LinearFilter;
-      texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      texture.anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
       this.textureCache.set(url, texture);
       apply(texture);
     });
@@ -3114,7 +3135,7 @@ class Dashboard3DSpace {
       texture.colorSpace = THREE.SRGBColorSpace;
       texture.minFilter = THREE.LinearMipmapLinearFilter;
       texture.magFilter = THREE.LinearFilter;
-      texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      texture.anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
       this.textureCache.set(url, texture);
       apply(texture);
     });
@@ -5190,16 +5211,19 @@ class Dashboard3DSpace {
     const data = group.userData;
     if (!data) return;
 
-    // 赛璐珞清漆护膜保持极低透明度（0.05 -> 0），绝不遮挡海报或造成白雾发灰
+    const easelMix = this.lensMode === "highscore" ? 0 : clamp(this.easelBlend?.value ?? 0, 0, 1);
+
+    // 赛璐珞清漆护膜保持极低透明度，折屏正面光线下进一步收敛反光，杜绝海报泛白发灰
     if (data.cover?.material) {
-      const baseCoverOpacity = 0.05 * (1 - clamp(quality, 0, 1));
+      const baseCoverOpacity = 0.045 * (1 - clamp(quality, 0, 1)) * (1 - easelMix * 0.65);
       data.coverBaseOpacity = baseCoverOpacity;
       data.cover.material.opacity = baseCoverOpacity;
     }
 
-    // 阵列态保持 0.94 的清晰显色，详情态与高分山峰态提升至 1.0 完整明度
+    // 阵列态保持清晰显色，折屏正面陈列与详情态提升至通透明度
     if (data.poster?.material) {
-      data.poster.material.color.setScalar(clamp(0.94 + quality * 0.08, 0.94, 1.0));
+      const basePosterScalar = 0.94 + easelMix * 0.04;
+      data.poster.material.color.setScalar(clamp(basePosterScalar + quality * 0.08, 0.94, 1.0));
     }
 
     if (data.substrate?.material) {
@@ -5331,8 +5355,8 @@ class Dashboard3DSpace {
       this.scene.fog.far = THREE.MathUtils.lerp(92, 128, p);
     } else {
       const easelMix = clamp(this.easelBlend?.value ?? 0, 0, 1);
-      const baseNear = THREE.MathUtils.lerp(72, 104, easelMix);
-      const baseFar = THREE.MathUtils.lerp(148, 192, easelMix);
+      const baseNear = THREE.MathUtils.lerp(72, 142, easelMix);
+      const baseFar = THREE.MathUtils.lerp(148, 236, easelMix);
       this.scene.fog.near = THREE.MathUtils.lerp(baseNear, 58, p);
       this.scene.fog.far = THREE.MathUtils.lerp(baseFar, 134, p);
     }
@@ -5341,7 +5365,7 @@ class Dashboard3DSpace {
   hasMotion() {
     if (this.lensTransition) return true;
     if (this.lensFade && Math.abs(this.lensFade.velocity) > 0.001) return true;
-    if (!this.settings.reducedMotion && this.registrationLines) return true;
+    if (!this.settings.reducedMotion && this.registrationLines?.visible) return true;
     if (!this.hydrationComplete) return true;
     if (this.spaceState === "boot" || this.spaceState === "entering-detail" || this.spaceState === "leaving-detail") return true;
     if (this.noteSheetState === "extracting" || this.noteSheetState === "retracting") return true;
