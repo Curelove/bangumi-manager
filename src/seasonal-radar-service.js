@@ -28,50 +28,55 @@ const SEASON_SHARE_WEIGHTS = {
 };
 
 /**
- * 阿斯拉王立魔导书库 · 五大编年纪元定义
+ * 历年收藏书架 · 五大年代分段定义
  */
 const GRIMOIRE_ERAS = [
   {
     id: "era-current",
-    label: "当代连载",
-    subLabel: "2025–2026+",
-    fullTitle: "当代连载 · 星辉新卷 (2025–2026+)",
+    label: "近期新作",
+    subLabel: "2025至今",
+    tabTitle: "近期新作 · 2025至今",
+    fullTitle: "近期新作（2025至今）",
     color: "#3b6998",
     spineTone: "is-tone-sapphire",
     match: (y, isNum) => isNum && y >= 2025
   },
   {
     id: "era-recent",
-    label: "近世卷轴",
-    subLabel: "2021–2024",
-    fullTitle: "近世卷轴 · 魔导涌流 (2021–2024)",
+    label: "2021–2024",
+    subLabel: "",
+    tabTitle: "2021–2024",
+    fullTitle: "2021–2024 年",
     color: "#4c8b73",
     spineTone: "is-tone-emerald",
     match: (y, isNum) => isNum && y >= 2021 && y <= 2024
   },
   {
     id: "era-prime",
-    label: "盛世馆藏",
-    subLabel: "2016–2020",
-    fullTitle: "盛世馆藏 · 黄金秘仪 (2016–2020)",
+    label: "2016–2020",
+    subLabel: "",
+    tabTitle: "2016–2020",
+    fullTitle: "2016–2020 年",
     color: "#8f683d",
     spineTone: "is-tone-bronze",
     match: (y, isNum) => isNum && y >= 2016 && y <= 2020
   },
   {
     id: "era-golden",
-    label: "黄金魔导期",
-    subLabel: "2010–2015",
-    fullTitle: "黄金魔导期 · 王立典籍 (2010–2015)",
+    label: "2010–2015",
+    subLabel: "",
+    tabTitle: "2010–2015",
+    fullTitle: "2010–2015 年",
     color: "#a85644",
     spineTone: "is-tone-crimson",
     match: (y, isNum) => isNum && y >= 2010 && y <= 2015
   },
   {
     id: "era-ancient",
-    label: "远古秘典",
+    label: "早期经典",
     subLabel: "2009及以前",
-    fullTitle: "远古秘典 · 创世古卷 (2009及以前)",
+    tabTitle: "早期经典 · 2009及以前",
+    fullTitle: "早期经典（2009及以前）",
     color: "#6d5b8c",
     spineTone: "is-tone-amethyst",
     match: (y, isNum) => !isNum || y <= 2009
@@ -578,14 +583,14 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
   const totalCompletedCount = items.filter((it) => it.state === "已看").length;
   const vaultCompletionPct = totalVaultCount > 0 ? Math.round((totalCompletedCount / totalVaultCount) * 100) : 0;
 
-  // 1. 汇总全部年份与四大元素番季
+  // 1. 汇总全部年份与四个番季
   const yearMap = new Map();
   const globalSeasonCounts = {
-    "04": { code: "04", label: "春 · 翠风 (04月)", shortLabel: "春之龛", icon: "🌿", count: 0, watched: 0, color: "#4c8b73" },
-    "07": { code: "07", label: "夏 · 炽阳 (07月)", shortLabel: "夏之龛", icon: "☀️", count: 0, watched: 0, color: "#c87a3b" },
-    "10": { code: "10", label: "秋 · 金穗 (10月)", shortLabel: "秋之龛", icon: "🍁", count: 0, watched: 0, color: "#8f683d" },
-    "01": { code: "01", label: "冬 · 水镜 (01月)", shortLabel: "冬之龛", icon: "❄️", count: 0, watched: 0, color: "#3b6998" },
-    "other": { code: "other", label: "未标番季", shortLabel: "卷宗余编", icon: "📜", count: 0, watched: 0, color: "#8a8278" }
+    "01": { code: "01", label: "1月冬季番", shortLabel: "1月冬", icon: "冬", count: 0, watched: 0, color: "#3b6998" },
+    "04": { code: "04", label: "4月春季番", shortLabel: "4月春", icon: "春", count: 0, watched: 0, color: "#4c8b73" },
+    "07": { code: "07", label: "7月夏季番", shortLabel: "7月夏", icon: "夏", count: 0, watched: 0, color: "#c87a3b" },
+    "10": { code: "10", label: "10月秋季番", shortLabel: "10月秋", icon: "秋", count: 0, watched: 0, color: "#8f683d" },
+    "other": { code: "other", label: "未标注季度", shortLabel: "未标注", icon: "未标", count: 0, watched: 0, color: "#8a8278" }
   };
 
   for (const item of items) {
@@ -673,25 +678,25 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     uiState.selectedYear = bestDefault ? bestDefault.year : null;
   }
 
-  // ==================== 顶部魔导书库导览条 ====================
+  // ==================== 顶部年代归档导览条 ====================
   const topToolbar = container.createDiv("curator-year-v2-toolbar curator-grimoire-almanac-toolbar");
   const topLeft = topToolbar.createDiv("curator-year-v2-toolbar-left");
   topLeft.createSpan({
     cls: "curator-grimoire-corridor-kicker",
-    text: "✦ 阿斯拉王立魔导书库 · 纪元星轨展厅"
+    text: "年代书架与季度归档"
   });
   topLeft.createSpan({
     cls: "curator-year-v2-subtitle",
-    text: `所有收藏 ${totalVaultCount} 部动画 · 铭刻 ${numericYearsCount} 册纪元魔导书 · 已修毕 ${totalCompletedCount} 部（完结共鸣 ${vaultCompletionPct}%）`
+    text: `共收藏 ${totalVaultCount} 部动画 · 跨越 ${numericYearsCount} 个年份 · 已看 ${totalCompletedCount} 部（已看占比 ${vaultCompletionPct}%）`
   });
 
   const topRight = topToolbar.createDiv("curator-year-v2-toolbar-right");
 
   const orderBtn = topRight.createEl("button", {
     cls: "curator-dl-mini-btn curator-grimoire-order-btn",
-    text: uiState.spineSortOrder === "asc" ? "⇅ 编年演进 (旧→新)" : "⇅ 近世优先 (新→旧)"
+    text: uiState.spineSortOrder === "asc" ? "⇅ 年份从早到晚" : "⇅ 年份从近到远"
   });
-  orderBtn.title = "切换魔导书架陈列顺序（从远古至当代 / 从当代至远古）";
+  orderBtn.title = "切换书架年份排列顺序（从早到晚 / 从近到远）";
   orderBtn.onclick = (e) => {
     e.preventDefault();
     uiState.spineSortOrder = uiState.spineSortOrder === "asc" ? "desc" : "asc";
@@ -700,23 +705,23 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
 
   const radarToggleBtn = topRight.createEl("button", {
     cls: `curator-year-radar-toggle-btn ${uiState.radarOpen ? "is-active" : ""}`,
-    text: uiState.radarOpen ? "🔭 收起新番排期雷达 ▲" : "🔭 新番排期雷达 ▼"
+    text: uiState.radarOpen ? "收起新番排期 ▲" : "新番排期 ▼"
   });
-  radarToggleBtn.title = "打开新番排期雷达，查看当季与未来季度已确定开播的新番资讯，并根据您的馆藏偏好智能标记契合作品";
+  radarToggleBtn.title = "展开新番排期，查看当季与未来季度已定档的新番，并根据常看偏好标记契合作品";
   radarToggleBtn.onclick = (e) => {
     e.preventDefault();
     uiState.radarOpen = !uiState.radarOpen;
     renderYearSeasonAlmanacModule(plugin, container, items);
   };
 
-  // ==================== 新番排期资讯与喜好寻番雷达抽屉 ====================
+  // ==================== 新番排期抽屉 ====================
   if (uiState.radarOpen) {
     renderSeasonalDiscoveryRadarDrawer(plugin, container, items, uiState, () => {
       renderYearSeasonAlmanacModule(plugin, container, items);
     });
   }
 
-  // ==================== 纪元展区切换栏（五大魔导纪元 + 四季元素共鸣摘要） ====================
+  // ==================== 年代分段筛选栏 + 四季累计分布 ====================
   const eraHeaderBar = container.createDiv("curator-grimoire-era-bar");
   const eraTabsGroup = eraHeaderBar.createDiv("curator-grimoire-era-tabs");
 
@@ -733,7 +738,7 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
   const allEraBtn = eraTabsGroup.createEl("button", {
     cls: `curator-grimoire-era-tab ${uiState.activeEraFilter === "all" ? "is-active" : ""}`
   });
-  allEraBtn.createSpan({ cls: "curator-era-tab-title", text: "✦ 全纪元星轨回廊" });
+  allEraBtn.createSpan({ cls: "curator-era-tab-title", text: "全部年份" });
   allEraBtn.createSpan({ cls: "curator-era-tab-count curator-mono", text: `${totalVaultCount}部` });
   allEraBtn.onclick = (e) => {
     e.preventDefault();
@@ -752,7 +757,10 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     tabBtn.dataset.eraId = era.id;
     const dot = tabBtn.createSpan("curator-era-tab-dot");
     dot.style.backgroundColor = era.color;
-    tabBtn.createSpan({ cls: "curator-era-tab-title", text: `${era.label} · ${era.subLabel}` });
+    tabBtn.createSpan({
+      cls: "curator-era-tab-title",
+      text: era.tabTitle || (era.subLabel ? `${era.label} · ${era.subLabel}` : era.label)
+    });
     tabBtn.createSpan({ cls: "curator-era-tab-count curator-mono", text: `${bucket.works}部` });
     tabBtn.onclick = (e) => {
       e.preventDefault();
@@ -764,13 +772,13 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     };
   });
 
-  // 右侧：所有收藏四季元素总览铭牌
+  // 右侧：所有收藏四季累计分布
   const globalSeasonStrip = eraHeaderBar.createDiv("curator-grimoire-global-seasons");
-  ["04", "07", "10", "01"].forEach((sCode) => {
+  ["01", "04", "07", "10"].forEach((sCode) => {
     const info = globalSeasonCounts[sCode];
     const pct = totalVaultCount > 0 ? Math.round((info.count / totalVaultCount) * 100) : 0;
     const pill = globalSeasonStrip.createDiv("curator-global-season-pill");
-    pill.title = `${info.label}累计收录 ${info.count} 部（占所有收藏 ${pct}%，已看完结 ${info.watched} 部）`;
+    pill.title = `${info.label}累计收录 ${info.count} 部（占全部收藏 ${pct}%，已看 ${info.watched} 部）`;
     const dot = pill.createSpan("curator-global-season-dot");
     dot.style.backgroundColor = info.color;
     pill.createSpan({ cls: "curator-global-season-name", text: info.shortLabel });
@@ -848,12 +856,12 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
   const shelfHeader = spineStage.createDiv("curator-grimoire-shelf-header");
   shelfHeader.createSpan({
     cls: "curator-grimoire-shelf-title",
-    text: "📚 编年魔导书脊陈列架 · 点击任意年份魔导书展开下方「四季元素秘仪展龛」"
+    text: "历年收藏书架 · 点击任意年份书脊查看当年四季番剧"
   });
   const shelfLegend = shelfHeader.createDiv("curator-grimoire-shelf-legend");
   shelfLegend.innerHTML =
-    `<span class="curator-spine-leg-item"><i class="curator-spine-leg-orb"></i>水系辉光：当年完结率</span>` +
-    `<span class="curator-spine-leg-item"><i class="curator-spine-leg-gold"></i>金系辉光：当年收藏数</span>`;
+    `<span class="curator-spine-leg-item"><i class="curator-spine-leg-orb"></i>水色圆点：当年已看占比</span>` +
+    `<span class="curator-spine-leg-item"><i class="curator-spine-leg-gold"></i>金色光柱：当年收藏部数</span>`;
 
   // 显式纵轴 + 手绘虚线纪元分舱 + 横轴坐标标尺容器
   const shelfBody = spineStage.createDiv("curator-grimoire-shelf-body");
@@ -879,7 +887,7 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
   const xAxisBar = shelfScrollWrap.createDiv("curator-grimoire-x-axis");
   xAxisBar.createSpan({
     cls: "curator-grimoire-axis-x-title",
-    text: "横轴：开播年份（按纪元分舱陈列 · 点击书脊切换下方四季展龛）"
+    text: "横轴：开播年份（点击任意年份书脊切换下方季度列表）"
   });
 
   // ==================== 下半区展台容器引用（支持无闪烁丝滑切换） ====================
@@ -978,8 +986,8 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       spineBtn.style.setProperty("--spine-era-color", entry.eraColor);
       spineBtn.title =
         `${entry.year}${entry.isNumeric ? "年" : ""}（${entry.eraFullTitle}）\n` +
-        `· 当年收藏：${entry.count} 部（占所有收藏 ${sharePct}%）\n` +
-        `· 已看完结：${entry.completedCount} 部（完结率 ${entry.completionRate}%）` +
+        `· 当年收藏：${entry.count} 部（占全部收藏 ${sharePct}%）\n` +
+        `· 已看部数：${entry.completedCount} 部（已看占比 ${entry.completionRate}%）` +
         (entry.avgScore ? `\n· 当年均分：★ ${entry.avgScore}` : "");
 
       // 1. 书脊顶部悬浮水系魔力辉光球
@@ -1050,10 +1058,10 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     const covBannerText = !selEntry.isNumeric
       ? "待补充开播年份信息"
       : totInfo.isDynamic
-      ? `${selEntry.year}年目前已确定 ${yearTotal} 部 · 涉猎率 ${yearCovPct}%`
-      : `${selEntry.year}年全网共收录 ${yearTotal} 部 · 涉猎率 ${yearCovPct}%`;
+      ? `${selEntry.year}年目前已确定 ${yearTotal} 部 · 收录占比 ${yearCovPct}%`
+      : `${selEntry.year}年全网共收录 ${yearTotal} 部 · 收录占比 ${yearCovPct}%`;
 
-    // 1. 展厅顶栏：当前选中纪元魔导书卷头铭牌 + 前后翻卷导航
+    // 1. 展厅顶栏：当前选中年份摘要 + 前后切换导航
     const stageBanner = stageWrap.createDiv("curator-alcoves-banner");
     const bannerLeft = stageBanner.createDiv("curator-alcoves-banner-left");
     const tomeBadge = bannerLeft.createSpan({
@@ -1066,18 +1074,18 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     titleLine.createSpan({
       cls: "curator-alcoves-main-title",
       text: selEntry.isNumeric
-        ? `📖 《${selEntry.year} 纪元魔导典籍 · 四季元素秘仪展龛》`
-        : `📖 《${selEntry.year} 馆藏卷宗 · 四季元素秘仪展龛》`
+        ? `${selEntry.year} 年 · 四季番剧收录`
+        : `${selEntry.year} · 番剧收录`
     });
 
     const telemetryRow = bannerLeft.createDiv("curator-alcoves-telemetry-row curator-mono");
     telemetryRow.createSpan({
       cls: "curator-alcove-tele-pill is-gold",
-      text: `当年收藏 ${selEntry.count} 部（占所有收藏 ${yearSharePct}%）`
+      text: `当年收藏 ${selEntry.count} 部（占全部 ${yearSharePct}%）`
     });
     telemetryRow.createSpan({
       cls: "curator-alcove-tele-pill is-aqua",
-      text: `已看完结 ${selEntry.completedCount}/${selEntry.count} 部（完结率 ${selEntry.completionRate}%）`
+      text: `已看 ${selEntry.completedCount}/${selEntry.count} 部（${selEntry.completionRate}%）`
     });
     telemetryRow.createSpan({
       cls: "curator-alcove-tele-pill",
@@ -1088,7 +1096,7 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     const curIdx = visibleYearEntries.findIndex((e) => e.year === selEntry.year);
     const prevBtn = bannerRight.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: "◂ 上一卷"
+      text: "◂ 上一年"
     });
     prevBtn.disabled = curIdx <= 0;
     prevBtn.onclick = (e) => {
@@ -1100,7 +1108,7 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
 
     const nextBtn = bannerRight.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: "下一卷 ▸"
+      text: "下一年 ▸"
     });
     nextBtn.disabled = curIdx < 0 || curIdx >= visibleYearEntries.length - 1;
     nextBtn.onclick = (e) => {
@@ -1113,7 +1121,7 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
     if (selEntry.isNumeric) {
       const jumpRadarBtn = bannerRight.createEl("button", {
         cls: "curator-dl-mini-btn is-accent",
-        text: `🔭 新番排期雷达 (${selEntry.year})`
+        text: `查看 ${selEntry.year} 新番排期`
       });
       jumpRadarBtn.onclick = (e) => {
         e.preventDefault();
@@ -1123,40 +1131,40 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       };
     }
 
-    // 2. 四季元素秘仪展龛并列舞台（春 · 夏 · 秋 · 冬）
+    // 2. 四季番剧收录并列面板（按自然月序：1月冬 · 4月春 · 7月夏 · 10月秋）
     const alcovesGrid = stageWrap.createDiv("curator-alcoves-grid");
     const seasonDefs = [
       {
+        code: "01",
+        key: "winter",
+        title: "1 月 · 冬季番",
+        sub: "1–3 月开播",
+        elementTag: "冬季档",
+        accent: "#3b6998"
+      },
+      {
         code: "04",
         key: "spring",
-        title: "春之龛 · 翠风萌芽",
-        sub: "04月 春季番",
-        elementTag: "风木秘仪",
+        title: "4 月 · 春季番",
+        sub: "4–6 月开播",
+        elementTag: "春季档",
         accent: "#4c8b73"
       },
       {
         code: "07",
         key: "summer",
-        title: "夏之龛 · 炽阳星火",
-        sub: "07月 夏季番",
-        elementTag: "曜火秘仪",
+        title: "7 月 · 夏季番",
+        sub: "7–9 月开播",
+        elementTag: "夏季档",
         accent: "#c87a3b"
       },
       {
         code: "10",
         key: "autumn",
-        title: "秋之龛 · 金穗秘仪",
-        sub: "10月 秋季番",
-        elementTag: "金穗秘仪",
+        title: "10 月 · 秋季番",
+        sub: "10–12 月开播",
+        elementTag: "秋季档",
         accent: "#8f683d"
-      },
-      {
-        code: "01",
-        key: "winter",
-        title: "冬之龛 · 凛冬水镜",
-        sub: "01月 冬季番",
-        elementTag: "水镜秘仪",
-        accent: "#3b6998"
       }
     ];
 
@@ -1200,17 +1208,17 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       // 展龛四柱魔力槽（馆藏共鸣双横柱组：当年收藏 + 所有收藏；已看进度独立柱；当季涉猎独立柱）
       const resonanceBox = alcove.createDiv("curator-alcove-resonance");
 
-      // 组 1：馆藏共鸣（双横柱组：当年收藏 vs 所有收藏）
+      // 组 1：收藏占比（双横柱组：占当年 vs 占全部）
       const dualGroup = resonanceBox.createDiv("curator-alcove-resonance-group is-dual-group");
       dualGroup.createDiv({
         cls: "curator-alcove-group-header",
-        text: "馆藏共鸣"
+        text: "收藏占比"
       });
 
-      // 子横柱 1A：当年收藏
+      // 子横柱 1A：占当年
       const subRowYear = dualGroup.createDiv("curator-alcove-subbar-row");
       const labelRowYear = subRowYear.createDiv("curator-alcove-track-labelrow curator-mono");
-      labelRowYear.createSpan({ text: "当年收藏" });
+      labelRowYear.createSpan({ text: "占当年" });
       labelRowYear.createSpan({ text: `${sYearShareNum.toFixed(0)}%` });
       const barTrackYear = subRowYear.createDiv("curator-alcove-mana-track is-track-a is-year-share");
       const barFillYear = barTrackYear.createDiv("curator-alcove-mana-fill is-track-a is-year-share");
@@ -1218,10 +1226,10 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       barFillYear.style.width = animateTransition ? "0%" : targetWidthYear;
       barFillYear.dataset.targetWidth = targetWidthYear;
 
-      // 子横柱 1B：所有收藏
+      // 子横柱 1B：占全部
       const subRowVault = dualGroup.createDiv("curator-alcove-subbar-row");
       const labelRowVault = subRowVault.createDiv("curator-alcove-track-labelrow curator-mono");
-      labelRowVault.createSpan({ text: "所有收藏" });
+      labelRowVault.createSpan({ text: "占全部" });
       labelRowVault.createSpan({ text: `${sVaultShareNum.toFixed(1)}%` });
       const barTrackVault = subRowVault.createDiv("curator-alcove-mana-track is-track-vault");
       const barFillVault = barTrackVault.createDiv("curator-alcove-mana-fill is-track-vault");
@@ -1229,21 +1237,21 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       barFillVault.style.width = animateTransition ? "0%" : targetWidthVault;
       barFillVault.dataset.targetWidth = targetWidthVault;
 
-      // 组 2：已看进度（独立横柱，不再混排当季涉猎）
+      // 组 2：已看进度
       const trackGroupB = resonanceBox.createDiv("curator-alcove-track-group");
       const labelRowB = trackGroupB.createDiv("curator-alcove-track-labelrow curator-mono");
       labelRowB.createSpan({ text: `已看 ${sWatched}/${sCount} 部` });
-      labelRowB.createSpan({ text: `完结 ${sWatchedPctNum.toFixed(0)}%` });
+      labelRowB.createSpan({ text: `${sWatchedPctNum.toFixed(0)}%` });
       const barTrackB = trackGroupB.createDiv("curator-alcove-mana-track is-track-b");
       const barFillB = barTrackB.createDiv("curator-alcove-mana-fill is-track-b");
       const targetWidthB = `${sCount > 0 ? Math.max(8, sWatchedPctNum).toFixed(1) : 0}%`;
       barFillB.style.width = animateTransition ? "0%" : targetWidthB;
       barFillB.dataset.targetWidth = targetWidthB;
 
-      // 组 3：当季涉猎（独立成柱）
+      // 组 3：当季收录
       const trackGroupC = resonanceBox.createDiv("curator-alcove-track-group");
       const labelRowC = trackGroupC.createDiv("curator-alcove-track-labelrow curator-mono");
-      labelRowC.createSpan({ text: "当季涉猎" });
+      labelRowC.createSpan({ text: "当季收录" });
       labelRowC.createSpan({
         text: sTotal ? `${sCount} / 全网 ${sTotal} 部 (${sCovStr})` : `${sCount} 部 (全网基数待同步)`
       });
@@ -1253,18 +1261,18 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       barFillC.style.width = animateTransition ? "0%" : targetWidthC;
       barFillC.dataset.targetWidth = targetWidthC;
 
-      // 展龛内藏番剧微缩原画铭牌陈列区
+      // 季度番剧列表
       const plaquesWrap = alcove.createDiv("curator-alcove-plaques-list");
       if (sCount === 0) {
         const emptyBox = plaquesWrap.createDiv("curator-alcove-empty");
         emptyBox.createSpan({
           cls: "curator-alcove-empty-text",
-          text: "此番季展龛尚无馆藏铭牌"
+          text: "本季度暂无收藏番剧"
         });
         if (selEntry.isNumeric) {
           const exploreBtn = emptyBox.createEl("button", {
             cls: "curator-dl-mini-btn",
-            text: `🔭 寻访 ${selEntry.year}年${sd.code}月 新番`
+            text: `查看 ${selEntry.year}年${sd.code}月 新番`
           });
           exploreBtn.onclick = (ev) => {
             ev.preventDefault();
@@ -1339,13 +1347,13 @@ function renderYearSeasonAlmanacModule(plugin, container, items) {
       }
     });
 
-    // 3. 若该年份存在未标注具体番季的作品，在四龛下方陈列「未标番季卷宗托盘」
+    // 3. 若该年份存在未标注具体番季的作品，在下方陈列未标注季度列表
     const otherWorks = selEntry.seasons.other || [];
     if (otherWorks.length > 0) {
       const otherTray = stageWrap.createDiv("curator-alcoves-other-tray");
       otherTray.createSpan({
         cls: "curator-alcoves-other-label",
-        text: `📜 当年未标具体番季卷宗（${otherWorks.length} 部）：`
+        text: `当年未标注季度（${otherWorks.length} 部）：`
       });
       const otherList = otherTray.createDiv("curator-alcoves-other-list");
       otherWorks.forEach((wk) => {
@@ -1448,13 +1456,13 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
     });
   }
 
-  // 1. 顶栏双栏卡片：左侧主标题「🔭 新番排期雷达」+ 当前季度收录状态胶囊；右侧紧凑偏好画像徽章组
+  // 1. 顶栏双栏卡片：左侧主标题「📅 新番排期」+ 当前季度收录状态胶囊；右侧紧凑常看偏好徽章组
   const headRow = drawer.createDiv("curator-radar-header");
   const headTitleCol = headRow.createDiv("curator-radar-title-col");
   const titleMainLine = headTitleCol.createDiv("curator-radar-title-mainline");
   titleMainLine.createSpan({
     cls: "curator-radar-main-title",
-    text: "🔭 新番排期雷达"
+    text: "新番排期"
   });
   const archivePill = titleMainLine.createSpan({
     cls: "curator-radar-archive-pill curator-mono",
@@ -1464,7 +1472,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
   const headTasteCol = headRow.createDiv("curator-radar-taste-col");
   headTasteCol.createSpan({
     cls: "curator-radar-taste-label",
-    text: "✦ 馆藏偏好画像"
+    text: "✦ 常看偏好"
   });
   const tasteChipsWrap = headTasteCol.createDiv("curator-radar-taste-chips");
   if (tasteProfile.topTags.length > 0 || tasteProfile.topStudios.length > 0) {
@@ -1477,13 +1485,13 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
     tasteProfile.topStudios.slice(0, 3).forEach((s) => {
       tasteChipsWrap.createSpan({
         cls: "curator-radar-taste-chip is-studio",
-        text: `🏛️ ${s.name}`
+        text: s.name
       });
     });
   } else {
     tasteChipsWrap.createSpan({
       cls: "curator-radar-taste-empty",
-      text: "导入动画或打标签后自动生成偏好画像"
+      text: "导入动画或添加标签后自动汇总常看偏好"
     });
   }
 
@@ -1558,8 +1566,8 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
     // 3. 统一底色边框的筛选工具条（.curator-radar-toolbar）
     const statusStrip = bodyHost.createDiv("curator-radar-status-strip curator-radar-toolbar");
     const statusText = isDyn
-      ? `📅 ${uiState.radarYear}年${uiState.radarSeasonMonth}月排期 · 目前已确定动画 ${confirmedTotal} 部（展示热度前 ${subjects.length} 部）`
-      : `📅 ${uiState.radarYear}年${uiState.radarSeasonMonth}月档案 · 全网共收录动画 ${confirmedTotal} 部（展示代表作前 ${subjects.length} 部）`;
+      ? `${uiState.radarYear}年${uiState.radarSeasonMonth}月排期 · 目前已确定动画 ${confirmedTotal} 部（展示热度前 ${subjects.length} 部）`
+      : `${uiState.radarYear}年${uiState.radarSeasonMonth}月档案 · 全网共收录动画 ${confirmedTotal} 部（展示代表作前 ${subjects.length} 部）`;
 
     statusStrip.createSpan({ cls: "curator-radar-status-text", text: statusText });
 
@@ -1567,7 +1575,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
 
     const matchFilterBtn = controlsRight.createEl("button", {
       cls: `curator-dl-mini-btn ${uiState.radarOnlyMatched ? "is-active-filter" : ""}`,
-      text: uiState.radarOnlyMatched ? "✦ 仅看契合偏好 (已开启)" : "✦ 仅看契合偏好"
+      text: uiState.radarOnlyMatched ? "✦ 只看契合偏好 (已开启)" : "✦ 只看契合偏好"
     });
     matchFilterBtn.onclick = (e) => {
       e.preventDefault();
@@ -1580,7 +1588,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
       cls: `curator-dl-mini-btn is-batch-cover-btn ${uncachedWithRemote.length === 0 ? "is-all-cached" : "is-accent"}`,
       text:
         uncachedWithRemote.length > 0
-          ? `📥 下载本季封面到本地 (${uncachedWithRemote.length})`
+          ? `下载本季封面到本地 (${uncachedWithRemote.length})`
           : "✓ 本季封面已缓存至本地"
     });
     batchCoverBtn.title =
@@ -1614,7 +1622,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
           }
           done += 1;
           if (batchCoverBtn.isConnected) {
-            batchCoverBtn.textContent = `📥 正在缓存 (${done}/${pending.length})…`;
+            batchCoverBtn.textContent = `正在缓存 (${done}/${pending.length})…`;
           }
         }
       };
@@ -1641,7 +1649,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
 
     const refreshBtn = controlsRight.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: "🔄 刷新最新定档"
+      text: "刷新最新定档"
     });
     refreshBtn.onclick = async (e) => {
       e.preventDefault();
@@ -1723,7 +1731,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
         titleRow.title = `${sub.name}\n原名：${sub.originalName}`;
 
         const metaRow = infoCol.createDiv("curator-radar-card-meta curator-mono");
-        metaRow.createSpan({ text: `📅 ${sub.date || "待定"}` });
+        metaRow.createSpan({ text: sub.date || "待定" });
         if (sub.score) {
           metaRow.createSpan({ cls: "is-score", text: `★ ${sub.score.toFixed(1)}` });
         } else {
@@ -1759,7 +1767,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
         } else {
           const importBtn = actionRow.createEl("button", {
             cls: "curator-dl-mini-btn is-accent",
-            text: "+ 一键导入为想看"
+            text: "+ 加入想看"
           });
           importBtn.onclick = async (ev) => {
             ev.preventDefault();
@@ -1819,7 +1827,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
         if (!hasLocal && sub.cover) {
           const cacheSingleBtn = actionRow.createEl("button", {
             cls: "curator-dl-mini-btn is-cache-single-btn",
-            text: "📥 缓存封面"
+            text: "缓存封面"
           });
           cacheSingleBtn.title = "将该番剧封面下载至本地附件目录";
           cacheSingleBtn.onclick = async (ev) => {
@@ -1832,7 +1840,7 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
               renderSubjectsGrid(record);
             } catch (err) {
               cacheSingleBtn.disabled = false;
-              cacheSingleBtn.textContent = "📥 缓存封面";
+              cacheSingleBtn.textContent = "缓存封面";
               if (Notice) new Notice(`封面下载失败：${err.message}`);
             }
           };

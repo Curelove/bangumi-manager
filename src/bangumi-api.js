@@ -2,19 +2,133 @@ const { requestUrl } = require("obsidian");
 
 var HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91 Safari/537.36",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/html;q=0.8",
   "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
 };
-async function requestHtml(url) {
-  const response = await requestUrl({
+var BGM_API_HEADERS = {
+  "User-Agent": "Curelove/bangumi-manager (https://github.com/Curelove/bangumi-manager)",
+  "Accept": "application/json"
+};
+
+async function requestWithLogicalTimeout(reqOptions, timeoutMs = 6500) {
+  let timer = null;
+  const p = requestUrl(reqOptions);
+  p.catch(() => {});
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("REQUEST_TIMEOUT_" + timeoutMs)), timeoutMs);
+  });
+  try {
+    return await Promise.race([p, timeoutPromise]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+async function requestHtmlRaw(url, timeoutMs = 6500) {
+  const response = await requestWithLogicalTimeout({
     url,
     method: "GET",
     cache: "no-cache",
     headers: HEADERS
-  });
+  }, timeoutMs);
+  return (response && response.text) || "";
+}
 
-  return response.text || "";
+async function requestHtml(url) {
+  try {
+    const html = await requestHtmlRaw(url, 6500);
+    if (html) return html;
+  } catch (err) {
+    if (String(url || "").startsWith("https://bgm.tv/")) {
+      const mirrorUrl = "https://bangumi.tv/" + String(url).slice("https://bgm.tv/".length);
+      try {
+        const mirrorHtml = await requestHtmlRaw(mirrorUrl, 6500);
+        if (mirrorHtml) return mirrorHtml;
+      } catch (_) {}
+    }
+    throw err;
+  }
+  return "";
+}
+
+async function fetchBgmV0SubjectJson(subjectId, timeoutMs = 6000) {
+  const id = String(subjectId || "").trim();
+  if (!/^\d+$/.test(id)) return null;
+  try {
+    const resp = await requestWithLogicalTimeout({
+      url: "https://api.bgm.tv/v0/subjects/" + encodeURIComponent(id),
+      method: "GET",
+      headers: BGM_API_HEADERS,
+      throw: false
+    }, timeoutMs);
+    if (resp && resp.status >= 200 && resp.status < 300) {
+      const data = resp.json || (resp.text ? JSON.parse(resp.text) : null);
+      if (data && typeof data === "object" && data.id) {
+        return data;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+function calculatePreciseRatingFromCounts(countsObj, declaredTotal) {
+  if (!countsObj || typeof countsObj !== "object") return null;
+  let weightedTotal = 0;
+  let calcVotes = 0;
+  for (let s = 1; s <= 10; s += 1) {
+    const c = Number(countsObj[s] ?? countsObj[String(s)] ?? 0);
+    if (Number.isFinite(c) && c > 0) {
+      weightedTotal += s * c;
+      calcVotes += c;
+    }
+  }
+  const totalVotes = Number.isFinite(Number(declaredTotal)) && Number(declaredTotal) > 0
+    ? Number(declaredTotal)
+    : calcVotes;
+  if (!Number.isFinite(totalVotes) || totalVotes <= 1 || weightedTotal <= 0) {
+    return null;
+  }
+  return weightedTotal / totalVotes;
+}
+
+function readInfoboxValueFromV0(infobox, candidateKeys, fallback = "\u672A\u77E5") {
+  if (!Array.isArray(infobox)) return fallback;
+  for (const key of candidateKeys) {
+    const entry = infobox.find((item) => item && cleanText(item.key) === key);
+    if (!entry || entry.value == null) continue;
+    if (Array.isArray(entry.value)) {
+      const joined = entry.value
+        .map((v) => (v && typeof v === "object" ? cleanText(v.v || v.k || "") : cleanText(v)))
+        .filter(Boolean)
+        .join(" / ");
+      if (joined) return joined;
+    } else {
+      const text = cleanText(entry.value);
+      if (text) return text;
+    }
+  }
+  return fallback;
+}
+
+function detectAdaptationFromTagsAndInfobox(tagNames, infobox) {
+  const list = Array.isArray(tagNames) ? tagNames.map((x) => String(x || "")) : [];
+  const rules = [
+    ["\u5C0F\u8BF4\u6539\u7F16", ["\u8F7B\u5C0F\u8BF4\u6539", "\u8F7B\u6539", "\u5C0F\u8BF4\u6539", "\u5C0F\u8BF4\u6539\u7F16"]],
+    ["\u6F2B\u753B\u6539\u7F16", ["\u6F2B\u753B\u6539", "\u6F2B\u753B\u6539\u7F16"]],
+    ["\u6E38\u620F\u6539\u7F16", ["\u6E38\u620F\u6539", "\u6E38\u620F\u6539\u7F16"]],
+    ["\u539F\u521B\u52A8\u753B", ["\u539F\u521B"]]
+  ];
+  for (const [cat, words] of rules) {
+    if (words.some((w) => list.some((t) => t.includes(w)))) return cat;
+  }
+  const rawOrigin = readInfoboxValueFromV0(infobox, ["\u539F\u4F5C", "\u539F\u6848"], "");
+  if (rawOrigin) {
+    if (rawOrigin.includes("\u6F2B\u753B")) return "\u6F2B\u753B\u6539\u7F16";
+    if (rawOrigin.includes("\u5C0F\u8BF4") || rawOrigin.includes("\u30CE\u30D9\u30EB")) return "\u5C0F\u8BF4\u6539\u7F16";
+    if (rawOrigin.includes("\u6E38\u620F") || rawOrigin.includes("\u30B2\u30FC\u30E0")) return "\u6E38\u620F\u6539\u7F16";
+  }
+  return "\u5176\u5B83";
 }
 function parseHtml(html) {
   return new DOMParser().parseFromString(
@@ -39,9 +153,78 @@ function getNetabaUrl(url) {
   return subjectId ? "https://netaba.re/subject/" + subjectId : "";
 }
 async function searchBangumi(keyword) {
-  const searchUrl = "https://bgm.tv/subject_search/" + encodeURIComponent(
-    String(keyword || "").trim()
-  ) + "?cat=2";
+  const cleanKw = String(keyword || "").trim();
+  if (!cleanKw) return [];
+
+  // Tier 1: Official Bangumi v0 Search API (fast, cookie-free, immune to chii_searchDateLine redirect on Desktop & Mobile)
+  try {
+    const resp = await requestWithLogicalTimeout({
+      url: "https://api.bgm.tv/v0/search/subjects?limit=15",
+      method: "POST",
+      headers: Object.assign({}, BGM_API_HEADERS, {
+        "Content-Type": "application/json"
+      }),
+      body: JSON.stringify({
+        keyword: cleanKw,
+        filter: { type: [2] }
+      }),
+      throw: false
+    }, 6000);
+    if (resp && resp.status >= 200 && resp.status < 300) {
+      const json = resp.json || (resp.text ? JSON.parse(resp.text) : null);
+      const listData = Array.isArray(json && json.data) ? json.data : [];
+      if (listData.length > 0) {
+        return listData
+          .filter((item) => item && item.id)
+          .map((item) => {
+            const cn = cleanText(item.name_cn || "");
+            const jp = cleanText(item.name || "");
+            const title = cn || jp || ("Subject " + item.id);
+            const descParts = [];
+            if (cn && jp && cn !== jp) descParts.push(jp);
+            if (item.date) descParts.push(cleanText(item.date) + " 开播");
+            if (item.rating && Number.isFinite(Number(item.rating.score)) && Number(item.rating.score) > 0) {
+              descParts.push("BGM " + Number(item.rating.score).toFixed(1));
+            }
+            return {
+              title,
+              description: descParts.join(" / "),
+              url: "https://bgm.tv/subject/" + item.id
+            };
+          });
+      }
+    }
+  } catch (_) {}
+
+  // Tier 2: Bangumi legacy JSON search API
+  try {
+    const legacyResp = await requestWithLogicalTimeout({
+      url: "https://api.bgm.tv/search/subject/" + encodeURIComponent(cleanKw) + "?type=2&responseGroup=small",
+      method: "GET",
+      headers: BGM_API_HEADERS,
+      throw: false
+    }, 5500);
+    if (legacyResp && legacyResp.status >= 200 && legacyResp.status < 300) {
+      const legacyJson = legacyResp.json || (legacyResp.text ? JSON.parse(legacyResp.text) : null);
+      const legacyList = Array.isArray(legacyJson && legacyJson.list) ? legacyJson.list : [];
+      if (legacyList.length > 0) {
+        return legacyList
+          .filter((item) => item && item.id)
+          .map((item) => {
+            const cn = cleanText(item.name_cn || "");
+            const jp = cleanText(item.name || "");
+            return {
+              title: cn || jp || ("Subject " + item.id),
+              description: [cn && jp && cn !== jp ? jp : "", item.air_date ? cleanText(item.air_date) + " 开播" : ""].filter(Boolean).join(" / "),
+              url: "https://bgm.tv/subject/" + item.id
+            };
+          });
+      }
+    }
+  } catch (_) {}
+
+  // Tier 3: HTML search fallback (bgm.tv -> bangumi.tv)
+  const searchUrl = "https://bgm.tv/subject_search/" + encodeURIComponent(cleanKw) + "?cat=2";
   const html = await requestHtml(searchUrl);
   if (!html) {
     return [];
@@ -95,12 +278,86 @@ function extractField(text, patterns, defaultValue = "\u672A\u77E5") {
   }
   return defaultValue;
 }
+function extractRawSubjectTagsFromDoc(doc) {
+  const rawTags = [];
+  if (!doc) return rawTags;
+  const subtitles = doc.querySelectorAll("h2.subtitle");
+  let tagSection = null;
+  for (const h2 of subtitles) {
+    if (String(h2.textContent || "").includes("标注为")) {
+      tagSection = h2;
+      break;
+    }
+  }
+  if (!tagSection) {
+    tagSection = doc.querySelector(".subject_tag_section");
+  }
+  const container =
+    tagSection && tagSection.classList && tagSection.classList.contains("subject_tag_section")
+      ? tagSection
+      : (tagSection ? tagSection.nextElementSibling : doc.querySelector(".subject_tag_section"));
+  if (!container) return rawTags;
+  for (const tag of container.querySelectorAll("a.l.meta, a.l")) {
+    const span = tag.querySelector("span");
+    const small = tag.querySelector("small");
+    const name = cleanText(span ? span.textContent : tag.textContent);
+    const count = small ? Number(String(small.textContent || "").replace(/[^\d]/g, "")) || 0 : 0;
+    if (name) {
+      rawTags.push({ name, count });
+    }
+  }
+  return rawTags;
+}
+
+const IGNORED_SUBJECT_TAG_RE = /^(?:TV|TVA|OVA|OAD|WEB|ONA|MOVIE|SP|剧场版|动画|日本|日本动画|日漫|国产|国漫|欧美|美国|bangumi|已看|在看|想看|抛弃|搁置|补番|待看|弃番|未看|打卡|未确定)$/i;
+const DATE_LIKE_TAG_RE = /^(?:\d{2,4}年?(?:[-./年]?\d{1,2}月?(?:新番)?)?|\d{1,2}月(?:新番)?|\d{4}[Qq]\d|20\d{2}s?)$/i;
+
+function cleanSubjectGenreTags(rawEntries, maxCount = 10) {
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) return [];
+  const normalizedList = rawEntries.map((entry) => {
+    if (typeof entry === "string") {
+      return { name: entry, count: 10 };
+    }
+    return {
+      name: String((entry && entry.name) || ""),
+      count: Number(entry && entry.count) || 0
+    };
+  });
+  const topCount = normalizedList.reduce((m, item) => (item.count > m ? item.count : m), 0);
+  const minCountThreshold = topCount >= 50 ? 5 : topCount >= 20 ? 3 : 0;
+
+  const result = [];
+  const seenLower = new Set(["bangumi"]);
+  for (const item of normalizedList) {
+    if (minCountThreshold > 0 && item.count > 0 && item.count < minCountThreshold && result.length >= 4) {
+      continue;
+    }
+    let cleaned = cleanText(item.name)
+      .replace(/^[#\s]+/, "")
+      .replace(/["'`\[\]{}()<>\\|,;:!?/]+/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (!cleaned || cleaned.length > 20) continue;
+    if (/^\d+$/.test(cleaned)) continue;
+    if (DATE_LIKE_TAG_RE.test(cleaned)) continue;
+    if (IGNORED_SUBJECT_TAG_RE.test(cleaned)) continue;
+    const lower = cleaned.toLowerCase();
+    if (seenLower.has(lower)) continue;
+    seenLower.add(lower);
+    result.push(cleaned);
+    if (result.length >= maxCount) break;
+  }
+  return result;
+}
+
+function extractSubjectGenreTagsFromDoc(doc, maxCount = 10) {
+  return cleanSubjectGenreTags(extractRawSubjectTagsFromDoc(doc), maxCount);
+}
+
 function detectAdaptationType(doc) {
-  const allTags = [];
-  const tagSection = doc.querySelector(
-    "h2.subtitle"
-  );
-  if (tagSection && tagSection.textContent.includes(
+  const allTags = extractRawSubjectTagsFromDoc(doc).map((item) => item.name);
+  const tagSection = null;
+  if (false && String(tagSection || "").includes(
     "\u6807\u6CE8\u4E3A"
   )) {
     const container = tagSection.nextElementSibling;
@@ -249,117 +506,130 @@ function calculatePreciseRating(doc) {
   return weightedTotal / totalVotes;
 }
 async function getAnimeDetail(url) {
-  const html = await requestHtml(url);
-  if (!html) {
+  const subjectId = getSubjectId(url);
+  const [htmlOutcome, v0Data] = await Promise.all([
+    requestHtml(url).catch(() => ""),
+    fetchBgmV0SubjectJson(subjectId, 6000)
+  ]);
+
+  const html = htmlOutcome || "";
+  let htmlInfo = null;
+  if (html) {
+    const doc = parseHtml(html);
+    const header = doc.querySelector("#headerSubject");
+    if (!header || header.getAttribute("typeof") === "v:Movie") {
+      const keywords = doc.querySelector("meta[name='keywords']");
+      const keywordText = keywords ? keywords.getAttribute("content") || "" : "";
+      const keywordParts = keywordText.split(",");
+      const cn = cleanFileName(keywordParts[0] || "");
+      const jp = cleanFileName(keywordParts[1] || "");
+      const type = cleanText(doc.querySelector("small.grey")?.textContent);
+      const rating = cleanText(doc.querySelector("span[property='v:average']")?.textContent) || "\u672A\u77E5";
+      let poster = doc.querySelector("div[align='center'] > a")?.href || "";
+      poster = String(poster).replace("app://", "http://").trim();
+      if (!poster.startsWith("http")) poster = "";
+      const infobox = [...doc.querySelectorAll("#infobox > li")].map((item) => item.innerText).join("\n");
+      const episode = extractField(infobox, [/话数:\s*(\d+)/, /话数：\s*(\d+)/], "0");
+      const director = extractField(infobox, [/导演:\s*([^\n]+)/, /导演：\s*([^\n]+)/]);
+      const maker = extractField(infobox, [/动画制作:\s*([^\n]+)/, /动画制作：\s*([^\n]+)/]);
+      const music = extractField(infobox, [/音乐:\s*([^\n]+)/, /音乐：\s*([^\n]+)/]);
+      let datePattern;
+      if (type === "OVA") {
+        datePattern = [/发售日:\s*([^\n]+)/, /发售日：\s*([^\n]+)/];
+      } else if (type === "\u5267\u573A\u7248") {
+        datePattern = [/上映年度:\s*([^\n]+)/, /上映年度：\s*([^\n]+)/];
+      } else {
+        datePattern = [/放送开始:\s*([^\n]+)/, /放送开始：\s*([^\n]+)/];
+      }
+      const date = extractField(infobox, datePattern);
+      htmlInfo = {
+        cn,
+        jp,
+        type,
+        rating,
+        preciseRating: calculatePreciseRating(doc),
+        poster,
+        episode,
+        director,
+        maker,
+        music,
+        date,
+        catego: detectAdaptationType(doc),
+        tags: extractSubjectGenreTagsFromDoc(doc, 10)
+      };
+    }
+  }
+
+  if (!htmlInfo && !v0Data) {
     return null;
   }
-  const doc = parseHtml(html);
-  const header = doc.querySelector(
-    "#headerSubject"
-  );
-  if (header && header.getAttribute("typeof") !== "v:Movie") {
-    return null;
+
+  const v0Cn = v0Data ? cleanFileName(v0Data.name_cn || readInfoboxValueFromV0(v0Data.infobox, ["\u4E2D\u6587\u540D"], "")) : "";
+  const v0Jp = v0Data ? cleanFileName(v0Data.name || "") : "";
+  const v0Type = v0Data ? cleanText(v0Data.platform || "") : "";
+  const v0Score = v0Data && v0Data.rating && Number.isFinite(Number(v0Data.rating.score)) && Number(v0Data.rating.score) > 0
+    ? String(v0Data.rating.score)
+    : "\u672A\u77E5";
+  const v0Precise = v0Data && v0Data.rating
+    ? calculatePreciseRatingFromCounts(v0Data.rating.count, v0Data.rating.total)
+    : null;
+  const v0PosterLarge = v0Data && v0Data.images ? String(v0Data.images.large || v0Data.images.common || v0Data.images.medium || "").trim() : "";
+  const v0PosterCommon = v0Data && v0Data.images ? String(v0Data.images.common || v0Data.images.medium || "").trim() : "";
+  const v0Eps = v0Data ? String(Number(v0Data.eps || v0Data.total_episodes || 0) || readInfoboxValueFromV0(v0Data.infobox, ["\u8BDD\u6570"], "0").replace(/[^\d]/g, "") || "0") : "0";
+  const v0Director = v0Data ? readInfoboxValueFromV0(v0Data.infobox, ["\u5BFC\u6F14", "\u603B\u5BFC\u6F14"]) : "\u672A\u77E5";
+  const v0Maker = v0Data ? readInfoboxValueFromV0(v0Data.infobox, ["\u52A8\u753B\u5236\u4F5C", "\u88FD\u4F5C", "\u5236\u4F5C"]) : "\u672A\u77E5";
+  const v0Music = v0Data ? readInfoboxValueFromV0(v0Data.infobox, ["\u97F3\u4E50", "\u97F3\u4E50\u5236\u4F5C"]) : "\u672A\u77E5";
+  const v0Date = v0Data
+    ? (cleanText(v0Data.date || "") || readInfoboxValueFromV0(v0Data.infobox, ["\u653E\u9001\u5F00\u59CB", "\u53D1\u552E\u65E5", "\u4E0A\u6620\u5E74\u5EA6"]))
+    : "\u672A\u77E5";
+
+  const v0RawTags = [];
+  if (v0Data && Array.isArray(v0Data.tags)) {
+    for (const t of v0Data.tags) {
+      if (t && t.name) v0RawTags.push({ name: t.name, count: Number(t.count) || 0 });
+    }
   }
-  const keywords = doc.querySelector(
-    "meta[name='keywords']"
-  );
-  const keywordText = keywords ? keywords.getAttribute("content") || "" : "";
-  const keywordParts = keywordText.split(",");
-  const cn = cleanFileName(
-    keywordParts[0] || ""
-  );
-  const jp = cleanFileName(
-    keywordParts[1] || ""
-  );
-  const type = cleanText(
-    doc.querySelector(
-      "small.grey"
-    )?.textContent
-  );
-  const rating = cleanText(
-    doc.querySelector(
-      "span[property='v:average']"
-    )?.textContent
-  ) || "\u672A\u77E5";
-  let poster = doc.querySelector(
-    "div[align='center'] > a"
-  )?.href || "";
-  poster = String(poster).replace("app://", "http://").trim();
-  if (!poster.startsWith("http")) {
-    poster = "";
+  if (v0Data && Array.isArray(v0Data.meta_tags)) {
+    for (const mt of v0Data.meta_tags) {
+      if (mt) v0RawTags.push({ name: String(mt), count: 50 });
+    }
   }
-  const infobox = [...doc.querySelectorAll(
-    "#infobox > li"
-  )].map(
-    (item) => item.innerText
-  ).join("\n");
-  const episode = extractField(
-    infobox,
-    [
-      /话数:\s*(\d+)/,
-      /话数：\s*(\d+)/
-    ],
-    "0"
-  );
-  const director = extractField(
-    infobox,
-    [
-      /导演:\s*([^\n]+)/,
-      /导演：\s*([^\n]+)/
-    ]
-  );
-  const maker = extractField(
-    infobox,
-    [
-      /动画制作:\s*([^\n]+)/,
-      /动画制作：\s*([^\n]+)/
-    ]
-  );
-  const music = extractField(
-    infobox,
-    [
-      /音乐:\s*([^\n]+)/,
-      /音乐：\s*([^\n]+)/
-    ]
-  );
-  let datePattern;
-  if (type === "OVA") {
-    datePattern = [
-      /发售日:\s*([^\n]+)/,
-      /发售日：\s*([^\n]+)/
-    ];
-  } else if (type === "\u5267\u573A\u7248") {
-    datePattern = [
-      /上映年度:\s*([^\n]+)/,
-      /上映年度：\s*([^\n]+)/
-    ];
-  } else {
-    datePattern = [
-      /放送开始:\s*([^\n]+)/,
-      /放送开始：\s*([^\n]+)/
-    ];
-  }
-  const date = extractField(
-    infobox,
-    datePattern
-  );
+  const v0Tags = cleanSubjectGenreTags(v0RawTags, 10);
+  const v0Catego = v0Data
+    ? detectAdaptationFromTagsAndInfobox(v0RawTags.map((x) => x.name), v0Data.infobox)
+    : "\u5176\u5B83";
+
+  const pickValid = (primary, secondary, def = "\u672A\u77E5") => {
+    if (primary && primary !== "\u672A\u77E5" && primary !== "0") return primary;
+    if (secondary && secondary !== "\u672A\u77E5" && secondary !== "0") return secondary;
+    return primary || secondary || def;
+  };
+
+  const finalCn = (htmlInfo && htmlInfo.cn) || v0Cn || (htmlInfo && htmlInfo.jp) || v0Jp || "\u672A\u77E5\u4F5C\u54C1";
+  const finalJp = (htmlInfo && htmlInfo.jp) || v0Jp || "\u672A\u77E5";
+  const finalPoster = v0PosterLarge || (htmlInfo && htmlInfo.poster) || "";
+  const finalPosterFallback = (htmlInfo && htmlInfo.poster && htmlInfo.poster !== finalPoster)
+    ? htmlInfo.poster
+    : v0PosterCommon;
 
   return {
     url,
-    subjectId: getSubjectId(url),
-    CN: cn || jp || "\u672A\u77E5\u4F5C\u54C1",
-    JP: jp || "\u672A\u77E5",
-    fileName: cn || jp || "\u672A\u77E5\u4F5C\u54C1",
-    type,
-    rating,
-    preciseRating: calculatePreciseRating(doc),
-    Poster: poster,
-    episode,
-    director,
-    AnimeMake: maker,
-    music,
-    date,
-    catego: detectAdaptationType(doc),
+    subjectId,
+    CN: finalCn,
+    JP: finalJp,
+    fileName: finalCn,
+    type: (htmlInfo && htmlInfo.type) || v0Type,
+    rating: pickValid(htmlInfo && htmlInfo.rating, v0Score, "\u672A\u77E5"),
+    preciseRating: (htmlInfo && htmlInfo.preciseRating != null) ? htmlInfo.preciseRating : v0Precise,
+    Poster: finalPoster,
+    PosterFallback: finalPosterFallback,
+    episode: pickValid(htmlInfo && htmlInfo.episode, v0Eps, "0"),
+    director: pickValid(htmlInfo && htmlInfo.director, v0Director, "\u672A\u77E5"),
+    AnimeMake: pickValid(htmlInfo && htmlInfo.maker, v0Maker, "\u672A\u77E5"),
+    music: pickValid(htmlInfo && htmlInfo.music, v0Music, "\u672A\u77E5"),
+    date: pickValid(htmlInfo && htmlInfo.date, v0Date, "\u672A\u77E5"),
+    catego: (htmlInfo && htmlInfo.catego && htmlInfo.catego !== "\u5176\u5B83") ? htmlInfo.catego : v0Catego,
+    tags: (htmlInfo && Array.isArray(htmlInfo.tags) && htmlInfo.tags.length > 0) ? htmlInfo.tags : v0Tags,
     netaba: getNetabaUrl(url)
   };
 }
@@ -649,6 +919,11 @@ async function getPublicRatingForSubject(subjectId) {
     return null;
   }
 
+  const v0 = await fetchBgmV0SubjectJson(id, 5500);
+  if (v0 && v0.rating && Number.isFinite(Number(v0.rating.score)) && Number(v0.rating.score) > 0) {
+    return Number(v0.rating.score);
+  }
+
   const html = await requestHtml(
     "https://bgm.tv/subject/" + id
   );
@@ -727,6 +1002,12 @@ async function getPreciseRatingForSubject(subjectId) {
 
   if (!/^\d+$/.test(id)) {
     return null;
+  }
+
+  const v0 = await fetchBgmV0SubjectJson(id, 5500);
+  if (v0 && v0.rating) {
+    const precise = calculatePreciseRatingFromCounts(v0.rating.count, v0.rating.total);
+    if (precise !== null) return precise;
   }
 
   const html = await requestHtml(
@@ -1157,6 +1438,115 @@ async function getScoreDetailsForSubjects(
     stats
   };
 }
+async function getSubjectTags(subjectId) {
+  const cleanId = String(subjectId || "").trim();
+  if (!cleanId) {
+    return { tags: [], date: "" };
+  }
+  try {
+    const resp = await requestUrl({
+      url: "https://api.bgm.tv/v0/subjects/" + encodeURIComponent(cleanId),
+      method: "GET",
+      headers: {
+        "User-Agent": "Curelove/bangumi-manager (https://github.com/Curelove/bangumi-manager)",
+        "Accept": "application/json"
+      },
+      throw: false
+    });
+    if (resp && resp.status >= 200 && resp.status < 300) {
+      const data = resp.json || (resp.text ? JSON.parse(resp.text) : null);
+      if (data && typeof data === "object") {
+        const rawList = [];
+        if (Array.isArray(data.tags)) {
+          for (const t of data.tags) {
+            if (t && t.name) {
+              rawList.push({ name: t.name, count: Number(t.count) || 0 });
+            }
+          }
+        }
+        if (Array.isArray(data.meta_tags)) {
+          for (const mt of data.meta_tags) {
+            if (mt) {
+              rawList.push({ name: String(mt), count: 50 });
+            }
+          }
+        }
+        const cleaned = cleanSubjectGenreTags(rawList, 10);
+        if (cleaned.length > 0 || data.date) {
+          return {
+            tags: cleaned,
+            date: String(data.date || "").trim()
+          };
+        }
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const html = await requestHtml("https://bgm.tv/subject/" + encodeURIComponent(cleanId));
+    if (html) {
+      const doc = parseHtml(html);
+      const cleaned = extractSubjectGenreTagsFromDoc(doc, 10);
+      const infobox = [...doc.querySelectorAll("#infobox > li")].map((item) => item.innerText).join("\n");
+      const date = extractField(
+        infobox,
+        [/放送开始:\s*([^\n]+)/, /放送开始：\s*([^\n]+)/, /发售日:\s*([^\n]+)/, /上映年度:\s*([^\n]+)/],
+        ""
+      );
+      return { tags: cleaned, date };
+    }
+  } catch (_) {}
+
+  return { tags: [], date: "" };
+}
+
+async function getSubjectTagsBatch(subjectIds, options = {}) {
+  const uniqueIds = Array.from(
+    new Set(
+      (Array.isArray(subjectIds) ? subjectIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+    )
+  );
+  const concurrency = Math.max(1, Math.min(6, Number(options.concurrency) || 4));
+  const delayMs = Math.max(0, Number(options.delayMs) || 140);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : () => {};
+  const shouldCancel = typeof options.shouldCancel === "function" ? options.shouldCancel : () => false;
+
+  const results = new Map();
+  let nextIndex = 0;
+  let completed = 0;
+
+  async function worker() {
+    while (true) {
+      if (shouldCancel()) return;
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= uniqueIds.length) return;
+      const sid = uniqueIds[idx];
+      const res = await getSubjectTags(sid);
+      results.set(sid, res);
+      completed += 1;
+      onProgress({
+        subjectId: sid,
+        result: res,
+        completed,
+        total: uniqueIds.length
+      });
+      if (delayMs > 0 && nextIndex < uniqueIds.length) {
+        await delay(delayMs);
+      }
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, uniqueIds.length); i += 1) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
 module.exports = {
   requestHtml,
   parseHtml,
@@ -1172,5 +1562,9 @@ module.exports = {
   getSubjectId,
   getNetabaUrl,
   cleanText,
-  cleanFileName
+  cleanFileName,
+  cleanSubjectGenreTags,
+  extractSubjectGenreTagsFromDoc,
+  getSubjectTags,
+  getSubjectTagsBatch
 };

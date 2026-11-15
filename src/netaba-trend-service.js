@@ -91,7 +91,7 @@ async function requestNetabaApi(url) {
         url,
         method: "GET",
         headers: {
-          "User-Agent": "ObsidianBangumiManager/0.6.0 (https://github.com/Curelove/bangumi-manager)"
+          "User-Agent": "ObsidianBangumiManager/0.8.0 (https://github.com/Curelove/bangumi-manager)"
         }
       });
       if (resp.status === 200) {
@@ -877,14 +877,14 @@ function createNetabaTrendModalClass({ Modal, Notice }) {
       const leftLinks = footer.createDiv();
       if (this.item.subjectId) {
         const netabaLink = leftLinks.createEl("a", {
-          text: "🌐 打开 Netaba 页面",
+          text: "打开 Netaba 页面 ↗",
           href: `https://netaba.re/subject/${this.item.subjectId}`
         });
         netabaLink.style.marginRight = "14px";
         netabaLink.style.fontSize = "12px";
 
         const bgmLink = leftLinks.createEl("a", {
-          text: "📺 打开 Bangumi 原站",
+          text: "打开 Bangumi 原站 ↗",
           href: `https://bgm.tv/subject/${this.item.subjectId}`
         });
         bgmLink.style.fontSize = "12px";

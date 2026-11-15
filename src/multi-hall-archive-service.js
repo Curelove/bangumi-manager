@@ -2,6 +2,9 @@ const { requestUrl, Notice, Modal, Menu } = require("obsidian");
 const { openLocalPathSafely, inspectLocalFolder } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const reviewStudioService = require("./review-studio-service.js");
+const v07Core = require("./v07-core.js");
+const { paperSlipSwap } = require("./v08-motion-and-lens.js");
+const { renderGallerySanctuary } = require("./v08-gallery-sanctuary.js");
 const {
   tryRequireNode,
   isMobileEnv,
@@ -35,6 +38,33 @@ function getVaultBasePath(plugin) {
     }
   } catch (e) {}
   return "";
+}
+
+/**
+ * 解析音声典藏默认目录（向后兼容已有仓库的「附件/台词音声库」，新仓库默认使用「附件/音声典藏」）
+ */
+function resolveDefaultVoiceArchiveFolder(plugin) {
+  const configured = String(plugin?.settings?.voiceArchiveFolder || "").trim();
+  if (configured && configured !== "附件/台词音声库") return configured;
+  try {
+    if (plugin?.app?.vault?.getAbstractFileByPath?.("附件/台词音声库")) {
+      return "附件/台词音声库";
+    }
+    if (isDesktopNodeAvailable()) {
+      const vb = getVaultBasePath(plugin);
+      if (vb && fs.existsSync(path.join(vb, "附件", "台词音声库"))) {
+        return "附件/台词音声库";
+      }
+    }
+  } catch (_) {}
+  if (
+    configured === "附件/台词音声库" &&
+    Array.isArray(plugin?.settings?.voiceCollection) &&
+    plugin.settings.voiceCollection.some((v) => String(v?.audioPath || "").includes("台词音声库"))
+  ) {
+    return "附件/台词音声库";
+  }
+  return "附件/音声典藏";
 }
 
 /**
@@ -497,25 +527,112 @@ function getNativeFilePath(file) {
 }
 
 /**
- * 自动探测本机可用的 FFmpeg 可执行文件路径
+ * 自动探测本机可用的 FFmpeg 可执行文件路径（支持自定义路径、WinGet/Scoop/Choco/C:\ffmpeg 解压目录、macOS Homebrew 与 Linux）
  */
 function resolveFfmpegExecutable(plugin) {
   if (!isDesktopNodeAvailable()) return "";
   const custom = String(plugin?.settings?.ffmpegCustomPath || "").trim();
   if (custom && fs.existsSync(custom)) return custom;
 
-  const localAppData = (typeof process !== "undefined" && process.env && process.env.LOCALAPPDATA) || "";
-  const candidates = [
-    "C:\\ffmpeg\\ffmpeg-2025-03-31-git-35c091f4b7-essentials_build\\ffmpeg-2025-03-31-git-35c091f4b7-essentials_build\\bin\\ffmpeg.exe",
-    "C:\\ffmpeg\\bin\\ffmpeg.exe",
-    path.join(
-      localAppData,
-      "Microsoft\\WinGet\\Packages\\yt-dlp.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-N-127043-g5a54fcf75e-win64-gpl\\bin\\ffmpeg.exe"
-    ),
-    path.join(localAppData, "Microsoft\\WinGet\\Links\\ffmpeg.exe")
-  ];
-  for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
+  if (
+    plugin &&
+    plugin._resolvedFfmpegCustom === custom &&
+    plugin._resolvedFfmpegBin &&
+    (plugin._resolvedFfmpegBin === "ffmpeg" || fs.existsSync(plugin._resolvedFfmpegBin))
+  ) {
+    return plugin._resolvedFfmpegBin;
+  }
+
+  const isWin = typeof process !== "undefined" && process.platform === "win32";
+  const env = (typeof process !== "undefined" && process.env) || {};
+  const localAppData = env.LOCALAPPDATA || "";
+  const userProfile = env.USERPROFILE || env.HOME || "";
+  const programData = env.ProgramData || "C:\\ProgramData";
+
+  const directCandidates = isWin
+    ? [
+        localAppData ? path.join(localAppData, "Microsoft\\WinGet\\Links\\ffmpeg.exe") : "",
+        userProfile ? path.join(userProfile, "scoop\\shims\\ffmpeg.exe") : "",
+        userProfile ? path.join(userProfile, "scoop\\apps\\ffmpeg\\current\\bin\\ffmpeg.exe") : "",
+        path.join(programData, "chocolatey\\bin\\ffmpeg.exe"),
+        "C:\\ffmpeg\\bin\\ffmpeg.exe",
+        "D:\\ffmpeg\\bin\\ffmpeg.exe"
+      ]
+    : [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+        "/snap/bin/ffmpeg"
+      ];
+
+  for (const c of directCandidates) {
+    if (c && fs.existsSync(c)) {
+      if (plugin) {
+        plugin._resolvedFfmpegCustom = custom;
+        plugin._resolvedFfmpegBin = c;
+      }
+      return c;
+    }
+  }
+
+  if (isWin) {
+    const findBinUnder = (rootDir, maxDepth = 2) => {
+      if (!rootDir || !fs.existsSync(rootDir)) return "";
+      const walk = (dir, depth) => {
+        const directBin = path.join(dir, "bin", "ffmpeg.exe");
+        if (fs.existsSync(directBin)) return directBin;
+        const flatExe = path.join(dir, "ffmpeg.exe");
+        if (depth > 0 && fs.existsSync(flatExe)) return flatExe;
+        if (depth >= maxDepth) return "";
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const ent of entries) {
+            if (!ent.isDirectory()) continue;
+            const hit = walk(path.join(dir, ent.name), depth + 1);
+            if (hit) return hit;
+          }
+        } catch (_) {}
+        return "";
+      };
+      return walk(rootDir, 0);
+    };
+
+    if (localAppData) {
+      const wingetPkgRoot = path.join(localAppData, "Microsoft", "WinGet", "Packages");
+      if (fs.existsSync(wingetPkgRoot)) {
+        try {
+          const pkgs = fs.readdirSync(wingetPkgRoot, { withFileTypes: true });
+          for (const pkg of pkgs) {
+            if (pkg.isDirectory() && /ffmpeg/i.test(pkg.name)) {
+              const hit = findBinUnder(path.join(wingetPkgRoot, pkg.name), 2);
+              if (hit) {
+                if (plugin) {
+                  plugin._resolvedFfmpegCustom = custom;
+                  plugin._resolvedFfmpegBin = hit;
+                }
+                return hit;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    for (const unpackRoot of ["C:\\ffmpeg", "D:\\ffmpeg"]) {
+      const hit = findBinUnder(unpackRoot, 2);
+      if (hit) {
+        if (plugin) {
+          plugin._resolvedFfmpegCustom = custom;
+          plugin._resolvedFfmpegBin = hit;
+        }
+        return hit;
+      }
+    }
+  }
+
+  if (plugin) {
+    plugin._resolvedFfmpegCustom = custom;
+    plugin._resolvedFfmpegBin = "ffmpeg";
   }
   return "ffmpeg";
 }
@@ -575,7 +692,9 @@ function bindMagicWandLongPress(cardEl, onTrigger, options = {}) {
     if (ev.button !== 0) return;
     if (
       ev.target &&
-      ev.target.closest("button, input, select, textarea, a, .is-interactive, .curator-char-top-remove-btn")
+      ev.target.closest(
+        "button, input, select, textarea, a, audio, .is-interactive, .curator-char-top-remove-btn, .curator-game-top-remove-btn, .curator-game-status-badge"
+      )
     ) {
       return;
     }
@@ -618,10 +737,13 @@ function bindMagicWandLongPress(cardEl, onTrigger, options = {}) {
 }
 
 /**
- * 打开「🪄 洛琪希魔杖 · 同源星轨关联谱」模态框
- * 支持从任意番剧、角色、制作公司、画册插画、台词音声或游戏出发，穿透检索全馆关联条目
+ * 打开跨馆关联收藏模态框
+ * 支持从任意番剧、角色、制作公司、画册插画、音声典藏或游戏出发，汇总全馆关联条目
  */
 function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callbacks = {}) {
+  if (typeof roxyMascotService.recordWandRelationUsed === "function") {
+    roxyMascotService.recordWandRelationUsed(plugin);
+  }
   const modal = new Modal(plugin.app);
   modal.onOpen = () => {
     const { contentEl } = modal;
@@ -637,24 +759,24 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
 
     const head = contentEl.createDiv("curator-wand-head");
     const badgeRow = head.createDiv("curator-wand-kicker-row");
-    badgeRow.createSpan({ cls: "curator-wand-kicker", text: "🪄 洛琪希魔杖 · 同源关联检索" });
+    badgeRow.createSpan({ cls: "curator-wand-kicker", text: "跨馆关联检索" });
     const typeLabelMap = {
-      anime: "🎬 动画卷宗",
-      character: "👑 角色档案",
-      studio: "🏢 动画制作社",
-      illustration: "🖼️ 典藏画册",
-      voice: "🎙️ 台词音声",
-      game: "🎮 本地游戏"
+      anime: "番剧",
+      character: "角色",
+      studio: "制作公司",
+      illustration: "画册典藏",
+      voice: "音声典藏",
+      game: "游戏典藏"
     };
     badgeRow.createSpan({ cls: "curator-wand-type-pill", text: typeLabelMap[seedType] || "馆藏条目" });
 
     head.createEl("h2", {
       cls: "curator-wand-title",
-      text: `「${seedTitle}」的全馆关联星轨`
+      text: `「${seedTitle}」的相关收藏`
     });
     head.createDiv({
       cls: "curator-wand-sub",
-      text: "已为您跨馆检索同系列续作、同一制作公司、登场角色、同声优 (CV)、典藏画册、台词音声与关联游戏"
+      text: "自动汇总同系列续作、同一制作公司、登场角色、同声优 (CV)、画册典藏、音声典藏与关联游戏"
     });
 
     const allAnime = Array.isArray(vaultAnimeItems) ? vaultAnimeItems : [];
@@ -777,7 +899,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     if (typeof callbacks.onFilterCatalog === "function") {
       const filterTitleBtn = quickFilterBar.createEl("button", {
         cls: "curator-btn is-primary",
-        text: `🔍 在编目总览中检索「${seedTitle.slice(0, 12)}」`
+        text: `在全部番剧中检索「${seedTitle.slice(0, 12)}」`
       });
       filterTitleBtn.onclick = () => {
         modal.close();
@@ -786,7 +908,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
       if (studioTokens.length > 0) {
         const filterStudioBtn = quickFilterBar.createEl("button", {
           cls: "curator-btn",
-          text: `🏢 筛选制作社：${studioTokens[0]}`
+          text: `筛选制作公司：${studioTokens[0]}`
         });
         filterStudioBtn.onclick = () => {
           modal.close();
@@ -803,7 +925,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
       });
       empty.createDiv({
         cls: "curator-wand-empty-sub",
-        text: "随着您收录更多同系列番剧、登场角色、画册插画、截取台词音声或本地游戏，洛琪希魔杖将自动把它们串联成同源星轨。"
+        text: "随着您收录更多同系列番剧、登场角色、画册图片、音声片段或本地游戏，系统会自动将相关收藏串联在一起。"
       });
       return;
     }
@@ -819,7 +941,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     };
 
     renderSection(
-      "🎬 同系列 / 关联动画卷宗",
+      "同系列与关联番剧",
       `${relatedSeriesAnime.length} 部`,
       relatedSeriesAnime,
       (grid, ani) => {
@@ -841,7 +963,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     );
 
     renderSection(
-      "👑 关联登场角色 / 同声优角色",
+      "关联登场角色 / 同声优角色",
       `${relatedCharacters.length} 位`,
       relatedCharacters,
       (grid, ch) => {
@@ -861,7 +983,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     );
 
     renderSection(
-      "🖼️ 关联典藏画册",
+      "关联画册典藏",
       `${relatedIllusts.length} 幅`,
       relatedIllusts,
       (grid, ill) => {
@@ -881,12 +1003,12 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     );
 
     renderSection(
-      "🎙️ 关联台词音声",
+      "关联音声典藏",
       `${relatedVoices.length} 条`,
       relatedVoices,
       (grid, vc) => {
         const chip = grid.createDiv("curator-wand-item-card");
-        chip.createDiv({ cls: "curator-wand-item-main", text: `“${vc.quoteText || "台词片段"}”` });
+        chip.createDiv({ cls: "curator-wand-item-main", text: `“${vc.quoteText || "音声片段"}”` });
         chip.createDiv({
           cls: "curator-wand-item-meta",
           text: [vc.characterName, vc.animeTitle, vc.episode ? `EP${vc.episode}` : ""].filter(Boolean).join(" · ")
@@ -901,7 +1023,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     );
 
     renderSection(
-      "🎮 关联本地游戏",
+      "关联游戏典藏",
       `${relatedGames.length} 部`,
       relatedGames,
       (grid, gm) => {
@@ -921,7 +1043,7 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     );
 
     renderSection(
-      `🏢 同制作公司（${studioTokens.join(" / ")}）其他馆藏`,
+      `同制作公司（${studioTokens.join(" / ")}）其他番剧`,
       `${relatedStudioAnime.length} 部`,
       relatedStudioAnime.slice(0, 16),
       (grid, ani) => {
@@ -945,10 +1067,10 @@ function openMagicWandRelationModal(plugin, seed, vaultAnimeItems = [], callback
     roxyMascotService.emitRoxyEvent(plugin, {
       type: "wand:relation",
       state: "surprised",
-      category: "星轨关联",
+      category: "关联检索",
       priority: roxyMascotService.PRIORITY.NORMAL,
       dedupeKey: `wand:${seedTitle}`,
-      message: `我已经用魔杖为您把「${seedTitle}」相关的 ${totalFound} 项馆藏线索串联起来了，点击任意卡片就能直接跳转过去哦。`
+      message: `已经为您把「${seedTitle}」相关的 ${totalFound} 项馆藏整理好了，点击任意卡片就能直接跳转过去哦。`
     });
   };
   modal.open();
@@ -1631,6 +1753,8 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
   const bangumiResults = [];
   const seenPixivIds = new Set();
   const expandedKeywordsSet = new Set([q]);
+  let pixivAttemptCount = 0;
+  let pixivSuccessCount = 0;
 
   // 1. 从内置多语种词典与本地馆藏角色库即时解析日文原名/作品原名
   const qClean = q.replace(/\s+/g, "");
@@ -1686,6 +1810,7 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
 
   const fetchPixivByKeyword = async (kw) => {
     if (!kw || ageMode === "safe_strict") return;
+    pixivAttemptCount += 1;
     try {
       const ep = ["https://api.lolicon.app", "se" + "tu", "v2"].join("/");
       const aiParam = excludeAI ? "&excludeAI=true" : "";
@@ -1697,6 +1822,7 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
       ]);
       const data = res?.json?.data;
       if (Array.isArray(data)) {
+        pixivSuccessCount += 1;
         for (const item of data) {
           if (excludeAI && Number(item.aiType) === 2) continue;
           const rawUrl = item?.urls?.regular || item?.urls?.original || item?.urls?.small || "";
@@ -1741,6 +1867,7 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
 
   const fetchPixivAjaxByKeyword = async (kw, sMode = "s_tag") => {
     if (!kw) return;
+    pixivAttemptCount += 1;
     try {
       const aiParam = excludeAI ? "&ai_type=1" : "";
       const pixivMode = ageMode === "r18" ? "r18" : ageMode === "all" ? "all" : "safe";
@@ -1759,6 +1886,7 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
       ]);
       const data = res?.json?.body?.illustManga?.data;
       if (Array.isArray(data)) {
+        pixivSuccessCount += 1;
         for (const item of data) {
           if (!item || !item.id || !item.url || item.isAdContainer) continue;
           if (excludeAI && Number(item.aiType) === 2) continue;
@@ -1924,7 +2052,8 @@ async function searchOnlineIllustrations(keyword, searchOptions = {}) {
   return {
     pixivResults,
     bangumiResults,
-    expandedKeywords: Array.from(expandedKeywordsSet)
+    expandedKeywords: Array.from(expandedKeywordsSet),
+    pixivNetworkBlocked: pixivAttemptCount > 0 && pixivSuccessCount === 0 && pixivResults.length === 0
   };
 }
 
@@ -2088,12 +2217,20 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     const { contentEl } = modal;
     contentEl.empty();
     contentEl.addClass("curator-illust-lightbox-modal");
+    contentEl.addClass("bm8-darkroom-modal");
+
+    let zoomScale = 1;
+    let panX = 0;
+    let panY = 0;
+    let isPanning = false;
+    let panStartX = 0;
+    let panStartY = 0;
 
     const src = resolveLocalOrVaultImageUrl(plugin, cur.localPath || cur.imageUrl, cur._cacheBust || "");
     const top = contentEl.createDiv("curator-illust-lb-head");
     const titleWrap = top.createDiv("curator-illust-lb-titlewrap");
     const h3Row = titleWrap.createDiv("curator-illust-lb-h3row");
-    h3Row.createEl("h3", { text: cur.title || "典藏插画" });
+    h3Row.createEl("h3", { text: cur.title || "典藏画作" });
     if (galleryList.length > 1) {
       h3Row.createSpan({
         cls: "curator-illust-lb-counter curator-mono",
@@ -2104,11 +2241,11 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     const metaSpan = titleWrap.createDiv({ cls: "curator-illust-lb-meta" });
     const updateMetaText = (natW = 0, natH = 0) => {
       const parts = [
-        cur.characterName ? `👑 角色：${cur.characterName}` : "",
-        cur.animeTitle ? `🎬 作品：《${cur.animeTitle}》` : "",
-        natW > 0 && natH > 0 ? `📐 ${natW}×${natH}` : "",
-        cur.fileSizeBytes > 0 ? `📦 ${formatByteSize(cur.fileSizeBytes, true)}` : "",
-        cur.localPath ? `📁 本地路径：${cur.localPath}` : ""
+        cur.characterName ? `角色：${cur.characterName}` : "",
+        cur.animeTitle ? `作品：《${cur.animeTitle}》` : "",
+        natW > 0 && natH > 0 ? `${natW}×${natH}` : "",
+        cur.fileSizeBytes > 0 ? `${formatByteSize(cur.fileSizeBytes, true)}` : "",
+        cur.localPath ? `本地：${cur.localPath}` : ""
       ].filter(Boolean);
       metaSpan.textContent = parts.join(" · ");
     };
@@ -2119,12 +2256,29 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     editDrawer.style.display = "none";
 
     const imgStage = contentEl.createDiv("curator-illust-lb-stage");
+    let imgEl = null;
+    let zoomReadoutEl = null;
+
+    const applyTransform = () => {
+      if (!imgEl) return;
+      if (zoomScale <= 1.01) {
+        zoomScale = 1;
+        panX = 0;
+        panY = 0;
+      }
+      imgStage.classList.toggle("is-zoomed", zoomScale > 1.01);
+      imgEl.style.transform = `translate3d(${panX.toFixed(1)}px, ${panY.toFixed(1)}px, 0) scale(${zoomScale.toFixed(3)})`;
+      if (zoomReadoutEl) {
+        zoomReadoutEl.textContent = `${Math.round(zoomScale * 100)}%`;
+      }
+    };
+
     if (galleryList.length > 1) {
       const prevBtn = imgStage.createEl("button", {
         cls: "curator-illust-lb-nav is-prev",
-        text: "‹",
-        attr: { title: "上一幅 (←)" }
+        attr: { type: "button", title: "上一幅 (←)", "aria-label": "上一幅" }
       });
+      prevBtn.appendChild(v07Core.icon("chevronLeft", 18));
       prevBtn.onclick = (ev) => {
         ev.stopPropagation();
         currentIndex = (currentIndex - 1 + galleryList.length) % galleryList.length;
@@ -2133,29 +2287,175 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     }
 
     if (src) {
-      const img = imgStage.createEl("img", {
+      imgEl = imgStage.createEl("img", {
         cls: "curator-illust-lb-img",
-        attr: { src, alt: cur.title || "" }
+        attr: { src, alt: cur.title || "", draggable: "false" }
       });
-      img.style.maxHeight = "70vh";
-      img.style.maxWidth = "100%";
-      img.style.objectFit = "contain";
-      img.style.borderRadius = "8px";
       const onNatLoaded = () => {
-        if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-          updateMetaText(img.naturalWidth, img.naturalHeight);
+        if (imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
+          updateMetaText(imgEl.naturalWidth, imgEl.naturalHeight);
         }
       };
-      if (img.complete && img.naturalWidth > 0) onNatLoaded();
-      else img.onload = onNatLoaded;
+      if (imgEl.complete && imgEl.naturalWidth > 0) onNatLoaded();
+      else imgEl.onload = onNatLoaded;
+
+      imgStage.addEventListener(
+        "wheel",
+        (ev) => {
+          ev.preventDefault();
+          const delta = ev.deltaY < 0 ? 0.22 : -0.22;
+          zoomScale = Math.max(1, Math.min(4, zoomScale + delta));
+          applyTransform();
+        },
+        { passive: false }
+      );
+
+      imgStage.addEventListener("dblclick", (ev) => {
+        if (ev.target && ev.target.closest("button")) return;
+        ev.preventDefault();
+        zoomScale = zoomScale > 1.05 ? 1 : 2.1;
+        if (zoomScale === 1) {
+          panX = 0;
+          panY = 0;
+        }
+        applyTransform();
+      });
+
+      imgStage.addEventListener("pointerdown", (ev) => {
+        if (zoomScale <= 1.01 || (ev.target && ev.target.closest("button"))) return;
+        isPanning = true;
+        panStartX = ev.clientX - panX;
+        panStartY = ev.clientY - panY;
+        imgStage.classList.add("is-panning");
+        try {
+          imgStage.setPointerCapture(ev.pointerId);
+        } catch (_) {}
+      });
+      imgStage.addEventListener("pointermove", (ev) => {
+        if (!isPanning) return;
+        panX = ev.clientX - panStartX;
+        panY = ev.clientY - panStartY;
+        applyTransform();
+      });
+      const stopPan = () => {
+        if (!isPanning) return;
+        isPanning = false;
+        imgStage.classList.remove("is-panning");
+      };
+      imgStage.addEventListener("pointerup", stopPan);
+      imgStage.addEventListener("pointercancel", stopPan);
+
+      let pinchStartDist = 0;
+      let pinchStartZoom = 1;
+      let swipeStartX = 0;
+      let swipeStartY = 0;
+      let swipeTracking = false;
+      const getTouchDist = (tList) => {
+        if (!tList || tList.length < 2) return 0;
+        const dx = tList[0].clientX - tList[1].clientX;
+        const dy = tList[0].clientY - tList[1].clientY;
+        return Math.hypot(dx, dy);
+      };
+      imgStage.addEventListener(
+        "touchstart",
+        (ev) => {
+          if (ev.touches.length === 2) {
+            swipeTracking = false;
+            isPanning = false;
+            pinchStartDist = getTouchDist(ev.touches);
+            pinchStartZoom = zoomScale;
+          } else if (ev.touches.length === 1 && zoomScale <= 1.02 && galleryList.length > 1) {
+            if (ev.target && ev.target.closest("button")) return;
+            swipeTracking = true;
+            swipeStartX = ev.touches[0].clientX;
+            swipeStartY = ev.touches[0].clientY;
+          }
+        },
+        { passive: true }
+      );
+      imgStage.addEventListener(
+        "touchmove",
+        (ev) => {
+          if (ev.touches.length === 2 && pinchStartDist > 12) {
+            ev.preventDefault();
+            const d = getTouchDist(ev.touches);
+            if (d > 8) {
+              zoomScale = Math.max(1, Math.min(4, pinchStartZoom * (d / pinchStartDist)));
+              applyTransform();
+            }
+          }
+        },
+        { passive: false }
+      );
+      imgStage.addEventListener(
+        "touchend",
+        (ev) => {
+          if (ev.touches.length < 2) pinchStartDist = 0;
+          if (swipeTracking && ev.changedTouches && ev.changedTouches.length > 0 && zoomScale <= 1.02) {
+            swipeTracking = false;
+            const dx = ev.changedTouches[0].clientX - swipeStartX;
+            const dy = ev.changedTouches[0].clientY - swipeStartY;
+            if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.4 && galleryList.length > 1) {
+              currentIndex =
+                dx < 0
+                  ? (currentIndex + 1) % galleryList.length
+                  : (currentIndex - 1 + galleryList.length) % galleryList.length;
+              renderModalContent();
+            }
+          }
+        },
+        { passive: true }
+      );
+
+      const zoomPill = imgStage.createDiv("bm8-lb-zoom-pill");
+      const zOutBtn = zoomPill.createEl("button", {
+        cls: "bm8-lb-zoom-btn",
+        attr: { type: "button", title: "缩小画幅" }
+      });
+      zOutBtn.appendChild(v07Core.icon("zoomOut", 13));
+      zOutBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        zoomScale = Math.max(1, zoomScale - 0.35);
+        applyTransform();
+      };
+
+      zoomReadoutEl = zoomPill.createSpan({
+        cls: "bm8-lb-zoom-readout curator-mono",
+        text: "100%"
+      });
+      zoomReadoutEl.title = "滚轮可无级缩放，双击画面切换 200% 细节检视";
+
+      const zInBtn = zoomPill.createEl("button", {
+        cls: "bm8-lb-zoom-btn",
+        attr: { type: "button", title: "放大检视笔触细节" }
+      });
+      zInBtn.appendChild(v07Core.icon("zoomIn", 13));
+      zInBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        zoomScale = Math.min(4, zoomScale + 0.35);
+        applyTransform();
+      };
+
+      const zResetBtn = zoomPill.createEl("button", {
+        cls: "bm8-lb-zoom-btn",
+        text: "重置",
+        attr: { type: "button", title: "恢复适应屏幕 (100%)" }
+      });
+      zResetBtn.onclick = (ev) => {
+        ev.stopPropagation();
+        zoomScale = 1;
+        panX = 0;
+        panY = 0;
+        applyTransform();
+      };
     }
 
     if (galleryList.length > 1) {
       const nextBtn = imgStage.createEl("button", {
         cls: "curator-illust-lb-nav is-next",
-        text: "›",
-        attr: { title: "下一幅 (→)" }
+        attr: { type: "button", title: "下一幅 (→)", "aria-label": "下一幅" }
       });
+      nextBtn.appendChild(v07Core.icon("chevronRight", 18));
       nextBtn.onclick = (ev) => {
         ev.stopPropagation();
         currentIndex = (currentIndex + 1) % galleryList.length;
@@ -2164,10 +2464,10 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     }
 
     const actions = contentEl.createDiv("curator-illust-lb-actions");
-    if (cur.localPath) {
+    if (isDesktopNodeAvailable() && cur.localPath) {
       const openDirBtn = actions.createEl("button", {
         cls: "curator-btn",
-        text: "📂 在资源管理器中定位文件"
+        text: "在资源管理器中定位文件"
       });
       openDirBtn.onclick = async () => {
         await revealLocalFileInExplorer(plugin, cur.localPath);
@@ -2177,7 +2477,7 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
     if (cur.sourceType !== "character") {
       const editBtn = actions.createEl("button", {
         cls: "curator-btn",
-        text: "✏️ 编辑信息"
+        text: "编辑信息"
       });
       editBtn.onclick = () => {
         const showing = editDrawer.style.display !== "none";
@@ -2209,7 +2509,7 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
         aIn.style.maxWidth = "160px";
         const saveEditBtn = editDrawer.createEl("button", {
           cls: "curator-btn is-primary",
-          text: "✓ 保存"
+          text: "保存"
         });
         saveEditBtn.onclick = async () => {
           cur.title = tIn.value.trim() || cur.title;
@@ -2239,7 +2539,7 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
             plugin.settings.illustrationCollection.unshift(promoted);
           }
           await plugin.saveSettings();
-          if (Notice) new Notice("✨ 已保存画作典藏信息");
+          if (Notice) new Notice("已保存画作典藏信息");
           if (typeof onRefresh === "function") onRefresh();
           renderModalContent();
         };
@@ -2249,7 +2549,7 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
       let cancelConfirmBtn = null;
       const delBtn = actions.createEl("button", {
         cls: "curator-btn curator-illust-danger-btn",
-        text: cur.localPath ? "🗑️ 删除该幅画作" : "🗑️ 移除该幅画作"
+        text: cur.localPath ? "删除该幅画作" : "移除该幅画作"
       });
       delBtn.title = cur.localPath
         ? "将该幅本地画册图片移入系统回收站，并同步清除画册典藏记录"
@@ -2260,8 +2560,8 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
           confirmPending = true;
           delBtn.addClass("is-confirming");
           delBtn.textContent = cur.localPath
-            ? "⚠️ 确认删除图片（移入回收站）"
-            : "⚠️ 确认移除记录";
+            ? "确认删除图片（移入回收站）"
+            : "确认移除记录";
           cancelConfirmBtn = actions.createEl("button", {
             cls: "curator-btn",
             text: "取消"
@@ -2269,7 +2569,7 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
           cancelConfirmBtn.onclick = () => {
             confirmPending = false;
             delBtn.removeClass("is-confirming");
-            delBtn.textContent = cur.localPath ? "🗑️ 删除该幅画作" : "🗑️ 移除该幅画作";
+            delBtn.textContent = cur.localPath ? "删除该幅画作" : "移除该幅画作";
             if (cancelConfirmBtn) {
               cancelConfirmBtn.remove();
               cancelConfirmBtn = null;
@@ -2284,8 +2584,8 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
         if (Notice) {
           new Notice(
             res.deletedFile
-              ? `🗑️ 已删除画作《${cur.title || "未命名"}》（本地图片已移入系统回收站）`
-              : `🗑️ 已移除画作记录《${cur.title || "未命名"}》`
+              ? `已删除画作《${cur.title || "未命名"}》（本地图片已移入系统回收站）`
+              : `已移除画作记录《${cur.title || "未命名"}》`
           );
         }
         modal.close();
@@ -2332,6 +2632,12 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     clearTimeout(container._illustWatchDebounce);
     container._illustWatchDebounce = null;
   }
+  if (typeof container._bmgsStageCleanup === "function") {
+    try {
+      container._bmgsStageCleanup();
+    } catch (_) {}
+    container._bmgsStageCleanup = null;
+  }
 
   container.empty();
   container.addClass("curator-illust-workspace");
@@ -2339,6 +2645,11 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
   if (!plugin.__illustGalleryState) {
     plugin.__illustGalleryState = {
       searchQuery: "",
+      viewMode: ["salon", "book", "wall"].includes(plugin.settings?.illustViewMode)
+        ? plugin.settings.illustViewMode
+        : "salon",
+      wallIndex: 0,
+      bookPage: 0,
       rowHeight: Number(plugin.settings?.illustRowHeight) || 240,
       captionMode: plugin.settings?.illustCaptionMode === "always" ? "always" : "hover",
       showOnlineDrawer: false,
@@ -2381,9 +2692,8 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
   // 顶栏
   const header = container.createDiv("curator-char-header");
   const titleSide = header.createDiv("curator-char-header-left");
-  titleSide.createDiv({ cls: "curator-char-kicker", text: "ILLUSTRATION & ARTBOOK GALLERY" });
   const hRow = titleSide.createDiv("curator-char-title-row");
-  hRow.createEl("h2", { cls: "curator-char-title", text: "🖼️ 画册典藏" });
+  hRow.createEl("h2", { cls: "curator-char-title", text: "画册典藏" });
   const countBadgeEl = hRow.createSpan({
     cls: "curator-char-count-badge curator-mono",
     text: `共收录 ${initialIllusts.length} 幅画作`
@@ -2401,25 +2711,27 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     renderMasonryStage();
   };
 
-  // 本地保存目录快速打开按钮
-  const openFolderBtn = actionSide.createEl("button", {
-    cls: "curator-btn",
-    text: "📂 本地画册目录"
-  });
-  openFolderBtn.title = `当前保存目录：${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}（点击打开目录）`;
-  openFolderBtn.onclick = async () => {
-    const { absDir } = ensureDirectoryAbsolute(
-      plugin,
-      plugin.settings.illustrationGalleryFolder,
-      "附件/画册典藏"
-    );
-    await openLocalPathSafely(absDir);
-  };
+  // 本地保存目录快速打开按钮（轻量次级入口，仅桌面端）
+  if (isDesktopNodeAvailable()) {
+    const openFolderBtn = actionSide.createEl("button", {
+      cls: "curator-btn"
+    });
+    v07Core.setBtnIconLabel(openFolderBtn, "folder", "本地目录", 14);
+    openFolderBtn.title = `在系统资源管理器中打开画册本地目录：${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}`;
+    openFolderBtn.onclick = async () => {
+      const { absDir } = ensureDirectoryAbsolute(
+        plugin,
+        plugin.settings.illustrationGalleryFolder,
+        "附件/画册典藏"
+      );
+      await openLocalPathSafely(absDir);
+    };
+  }
 
   const importLocalBtn = actionSide.createEl("button", {
-    cls: "curator-btn",
-    text: "📁 导入本地图片"
+    cls: "curator-btn"
   });
+  v07Core.setBtnIconLabel(importLocalBtn, "plus", "导入图片", 14);
   importLocalBtn.onclick = () => {
     const fileInput = document.createElement("input");
     fileInput.type = "file";
@@ -2455,19 +2767,24 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
         }
       }
       if (importedCount > 0) {
-        if (Notice) new Notice(`✨ 已将 ${importedCount} 幅图片导入「${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}」并归档！`);
+        if (Notice) new Notice(`已将 ${importedCount} 幅图片导入「${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}」并归档`);
         renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems, options);
       } else if (Notice) {
-        new Notice("⚠️ 未能读取所选图片文件，请重试。");
+        new Notice("未能读取所选图片文件，请重试。");
       }
     };
     fileInput.click();
   };
 
   const onlineSearchBtn = actionSide.createEl("button", {
-    cls: `curator-btn ${uiState.showOnlineDrawer ? "is-active" : "is-primary"}`,
-    text: uiState.showOnlineDrawer ? "▴ 收起在线搜图台" : "🔍 在线搜图与一键保存"
+    cls: `curator-btn ${uiState.showOnlineDrawer ? "is-active" : "is-primary"}`
   });
+  v07Core.setBtnIconLabel(
+    onlineSearchBtn,
+    "search",
+    uiState.showOnlineDrawer ? "收起搜图" : "在线搜图",
+    14
+  );
   onlineSearchBtn.onclick = () => {
     uiState.showOnlineDrawer = !uiState.showOnlineDrawer;
     renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems, options);
@@ -2477,7 +2794,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
   if (uiState.showOnlineDrawer) {
     const drawer = container.createDiv("curator-char-add-drawer");
     const pathBar = drawer.createDiv("curator-illust-path-config-row");
-    pathBar.createSpan({ text: "💾 画册本地保存路径（修改后自动迁移已有画册文件）：" });
+    pathBar.createSpan({ text: "画册本地保存路径（修改后自动迁移已有画册文件）：" });
     const pathInput = pathBar.createEl("input", {
       type: "text",
       cls: "curator-input",
@@ -2525,9 +2842,9 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     });
     modeSelect.title = "选择 Pixiv 搜索匹配范围（默认自动将中文角色名扩展为日文原名进行模糊检索，不局限于中文内容）";
     [
-      { val: "fuzzy", label: "🌐 跨语种模糊扩展 (推荐)" },
-      { val: "broad", label: "📝 标题+简介+标签宽泛模糊" },
-      { val: "tag", label: "🏷️ 标签部分匹配 (s_tag)" }
+      { val: "fuzzy", label: "跨语种模糊扩展 (推荐)" },
+      { val: "broad", label: "标题+简介+标签宽泛模糊" },
+      { val: "tag", label: "标签部分匹配 (s_tag)" }
     ].forEach((m) => {
       const opt = modeSelect.createEl("option", { value: m.val, text: m.label });
       if (uiState.searchMode === m.val) opt.selected = true;
@@ -2547,10 +2864,10 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     });
     ageSelect.title = "对齐 Pixiv 年龄分级筛选：默认仅展示全年龄内容（自动过滤 R-18），也可按需切换严选模式或包含 R-18";
     const ageModeOptions = [
-      { val: "safe", label: "🛡️ 全年龄 (排除 R-18)" },
-      { val: "safe_strict", label: "🌱 全年龄·严选 (排除敏感)" },
-      { val: "all", label: "🌐 全部年龄 (含 R-18)" },
-      { val: "r18", label: "🔞 仅 R-18" }
+      { val: "safe", label: "全年龄 (排除 R-18)" },
+      { val: "safe_strict", label: "全年龄·严选 (排除敏感)" },
+      { val: "all", label: "全部年龄 (含 R-18)" },
+      { val: "r18", label: "仅 R-18" }
     ];
     ageModeOptions.forEach((ag) => {
       const opt = ageSelect.createEl("option", { value: ag.val, text: ag.label });
@@ -2560,7 +2877,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     // 排除 AI 生成作品开关按钮
     const excludeAiBtn = sBar.createEl("button", {
       cls: `curator-btn curator-illust-ai-toggle ${uiState.excludeAI ? "is-active" : ""}`,
-      text: uiState.excludeAI ? "🚫 已排除 AI 作品" : "🤖 包含 AI 作品"
+      text: uiState.excludeAI ? "已排除 AI 作品" : "包含 AI 作品"
     });
     excludeAiBtn.title = "如同 Pixiv 搜索选项一样过滤掉 AI 生成插画（ai_type=1 & 标签过滤）";
     excludeAiBtn.onclick = async (e) => {
@@ -2568,7 +2885,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       uiState.excludeAI = !uiState.excludeAI;
       plugin.settings.illustExcludeAI = uiState.excludeAI;
       excludeAiBtn.classList.toggle("is-active", uiState.excludeAI);
-      excludeAiBtn.textContent = uiState.excludeAI ? "🚫 已排除 AI 作品" : "🤖 包含 AI 作品";
+      excludeAiBtn.textContent = uiState.excludeAI ? "已排除 AI 作品" : "包含 AI 作品";
       await plugin.saveSettings();
       if (kwInput.value.trim() || uiState.onlineKeyword) {
         triggerOnlineSearch();
@@ -2577,7 +2894,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
 
     const doSearchBtn = sBar.createEl("button", {
       cls: "curator-btn is-primary",
-      text: "🔍 在线检索插画"
+      text: "在线检索插画"
     });
 
     ageSelect.onchange = async () => {
@@ -2595,15 +2912,15 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     const sizeConfigBar = drawer.createDiv("curator-illust-size-config-bar");
     sizeConfigBar.createSpan({
       cls: "curator-illust-size-config-label",
-      text: "📐 默认下载尺寸（均为无裁切完整画幅，可根据网速按需切换）："
+      text: "默认下载尺寸（均为无裁切完整画幅，可根据网速按需切换）："
     });
     const sizeSelect = sizeConfigBar.createEl("select", {
       cls: "curator-sort-select curator-illust-size-select"
     });
     [
-      { val: "small", label: "⚡ 轻量全图 (540P · 极速省流 · 约 40~160 KB)" },
-      { val: "regular", label: "🌟 高清全图 (1200P · 速度与画质均衡 · 约 200~900 KB · 推荐)" },
-      { val: "original", label: "💎 原图无损 (Original · 原始完整分辨率 PNG/JPG · 约 1.2~12 MB)" }
+      { val: "small", label: "轻量全图 (540P · 极速省流 · 约 40~160 KB)" },
+      { val: "regular", label: "高清全图 (1200P · 速度与画质均衡 · 约 200~900 KB · 推荐)" },
+      { val: "original", label: "原图无损 (Original · 原始完整分辨率 PNG/JPG · 约 1.2~12 MB)" }
     ].forEach((sz) => {
       const opt = sizeSelect.createEl("option", { value: sz.val, text: sz.label });
       if (uiState.downloadSizeTier === sz.val) opt.selected = true;
@@ -2643,14 +2960,14 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       const bgmList = Array.isArray(uiState.bangumiResults) ? uiState.bangumiResults : [];
 
       if (Array.isArray(uiState.expandedKeywords) && uiState.expandedKeywords.length > 0) {
-        expandedKwBadge.textContent = `🌐 跨语种检索词：${uiState.expandedKeywords.join(" / ")} · ${ageLabelMap[uiState.ageMode] || "全年龄"}${uiState.excludeAI ? " · 已排除AI" : ""}`;
+        expandedKwBadge.textContent = `跨语种检索词：${uiState.expandedKeywords.join(" / ")} · ${ageLabelMap[uiState.ageMode] || "全年龄"}${uiState.excludeAI ? " · 已排除AI" : ""}`;
       } else {
         expandedKwBadge.textContent = "";
       }
 
       const pixivTabBtn = tabSwitchBar.createEl("button", {
         cls: `curator-btn ${uiState.onlineTab === "pixiv" ? "is-primary" : ""}`,
-        text: `🎨 Pixiv 插画面板 (${pixivList.length})`
+        text: `Pixiv 插画面板 (${pixivList.length})`
       });
       pixivTabBtn.onclick = (e) => {
         e.preventDefault();
@@ -2660,7 +2977,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
 
       const bgmTabBtn = tabSwitchBar.createEl("button", {
         cls: `curator-btn ${uiState.onlineTab === "bangumi" ? "is-primary" : ""}`,
-        text: `👑 Bangumi 角色立绘面板 (${bgmList.length})`
+        text: `Bangumi 角色立绘面板 (${bgmList.length})`
       });
       bgmTabBtn.onclick = (e) => {
         e.preventDefault();
@@ -2680,7 +2997,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       if (uiState.onlineLoading) {
         resultsBox.createDiv({
           cls: "curator-rs-empty",
-          text: "⏳ 正在跨语种模糊检索 Pixiv 无裁切插画库与 Bangumi 角色立绘..."
+          text: "正在跨语种模糊检索 Pixiv 无裁切插画库与 Bangumi 角色立绘..."
         });
         return;
       }
@@ -2689,10 +3006,12 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       if (!activeList || activeList.length === 0) {
         const otherCount = uiState.onlineTab === "pixiv" ? bgmList.length : pixivList.length;
         const emptyHint = !uiState.onlineKeyword
-          ? "输入关键词点击「🔍 在线检索插画」，自动跨语种匹配中日文角色标签并展示完整无裁切画作。"
-          : uiState.onlineTab === "pixiv"
-            ? `未在当前年龄分级（${ageLabelMap[uiState.ageMode] || "全年龄"}）下检出「${uiState.onlineKeyword}」相关插画（可切换年龄分级、尝试简短角色名${otherCount > 0 ? `，或切换查看 ${otherCount} 张 Bangumi 角色立绘` : ""}）。`
-            : `未在 Bangumi 角色立绘面板检出「${uiState.onlineKeyword}」相关角色立绘。`;
+          ? "输入关键词点击「在线检索插画」，自动跨语种匹配中日文角色标签并展示完整无裁切画作。"
+          : uiState.onlineTab === "pixiv" && uiState.pixivNetworkBlocked
+            ? `当前网络直连 Pixiv / 同人图库接口超时，建议开启网络加速后重试${otherCount > 0 ? `，或先切换至上方「Bangumi 角色立绘面板 (${otherCount})」挑选收录` : "，也可直接点击右上角「导入图片」添加本地画作"}。`
+            : uiState.onlineTab === "pixiv"
+              ? `未在当前年龄分级（${ageLabelMap[uiState.ageMode] || "全年龄"}）下检出「${uiState.onlineKeyword}」相关插画（可切换年龄分级、尝试简短角色名${otherCount > 0 ? `，或切换查看 ${otherCount} 张 Bangumi 角色立绘` : ""}）。`
+              : `未在 Bangumi 角色立绘面板检出「${uiState.onlineKeyword}」相关角色立绘。`;
         resultsBox.createDiv({
           cls: "curator-rs-empty",
           text: emptyHint
@@ -2807,9 +3126,9 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
           const curExact = Boolean(item.tierSizeExact?.[curTier]);
           dimBadge.textContent = `原图 ${item.width}×${item.height}`;
           if (curTier === "original") {
-            byteBadge.textContent = `📦 完整原图大小：${formatByteSize(origBytes, origExact)} (${curDim.width}×${curDim.height})`;
+            byteBadge.textContent = `完整原图大小：${formatByteSize(origBytes, origExact)} (${curDim.width}×${curDim.height})`;
           } else {
-            byteBadge.textContent = `📦 当前档位：${formatByteSize(curBytes, curExact)} · 完整原图：${formatByteSize(origBytes, origExact)}`;
+            byteBadge.textContent = `当前档位：${formatByteSize(curBytes, curExact)} · 完整原图：${formatByteSize(origBytes, origExact)}`;
           }
 
           if (triggerNetworkProbe && card.isConnected) {
@@ -2837,7 +3156,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
         const alreadyInGallery = item.sourceLabel && savedSourceLabels.has(item.sourceLabel);
         const saveBtn = info.createEl("button", {
           cls: `curator-btn ${alreadyInGallery ? "" : "is-primary"} curator-illust-save-btn`,
-          text: alreadyInGallery ? "✓ 已在画册中（点击可另存）" : "💾 保存到本地画册"
+          text: alreadyInGallery ? "已在画册中（点击可另存）" : "保存到本地画册"
         });
         saveBtn.onclick = async () => {
           const chosenTier = item._selectedTier || uiState.downloadSizeTier || "regular";
@@ -2863,10 +3182,10 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
             savedSourceLabels.add(item.sourceLabel);
             saveBtn.disabled = false;
             saveBtn.removeClass("is-primary");
-            saveBtn.textContent = `✓ 已入库 (${formatByteSize(savedRec.fileSizeBytes, true)})`;
+            saveBtn.textContent = `已入库 (${formatByteSize(savedRec.fileSizeBytes, true)})`;
             if (Notice) {
               new Notice(
-                `✨ 已将《${item.title}》(${tierLabels[chosenTier]} · ${formatByteSize(savedRec.fileSizeBytes, true)}) 保存至「${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}」！`
+                `已将《${item.title}》(${tierLabels[chosenTier]} · ${formatByteSize(savedRec.fileSizeBytes, true)}) 保存至「${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}」`
               );
             }
             renderMasonryStage();
@@ -2890,16 +3209,18 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       uiState.onlineLoading = true;
       renderSourceTabsAndGrid();
       try {
-        const { pixivResults, bangumiResults, expandedKeywords } = await searchOnlineIllustrations(kw, {
-          excludeAI: uiState.excludeAI,
-          ageMode: uiState.ageMode,
-          searchMode: uiState.searchMode,
-          plugin
-        });
+        const { pixivResults, bangumiResults, expandedKeywords, pixivNetworkBlocked } =
+          await searchOnlineIllustrations(kw, {
+            excludeAI: uiState.excludeAI,
+            ageMode: uiState.ageMode,
+            searchMode: uiState.searchMode,
+            plugin
+          });
         if (reqId !== searchReqSeq) return; // 丢弃过期的并发旧请求响应，防止覆盖最新筛选结果
         uiState.pixivResults = pixivResults || [];
         uiState.bangumiResults = bangumiResults || [];
         uiState.expandedKeywords = expandedKeywords || [kw];
+        uiState.pixivNetworkBlocked = Boolean(pixivNetworkBlocked);
       } finally {
         if (reqId === searchReqSeq) {
           uiState.onlineLoading = false;
@@ -2919,65 +3240,56 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
     renderSourceTabsAndGrid();
   }
 
-  // 控制栏（行高密度 + 铭牌显示）
-  const wallBar = container.createDiv("curator-photowall-toolbar");
-  wallBar.createDiv({
-    cls: "curator-photowall-hint",
-    text: "🖼️ Aves 自适应完整画报墙 · 按原图真实宽高比零空边拼贴，开合侧边栏实时自适应，单击鉴赏，长按魔杖关联"
-  });
-  const ctrlRight = wallBar.createDiv("curator-photowall-ctrls");
-  const densityButtons = [];
-  [
-    { h: 185, label: "📏 紧凑" },
-    { h: 240, label: "🖼️ 标准" },
-    { h: 310, label: "✨ 舒展" }
-  ].forEach((preset) => {
-    const b = ctrlRight.createEl("button", {
-      cls: `curator-dl-mini-btn ${uiState.rowHeight === preset.h ? "is-active" : ""}`,
-      text: preset.label
-    });
-    b.onclick = async () => {
-      uiState.rowHeight = preset.h;
-      plugin.settings.illustRowHeight = preset.h;
-      densityButtons.forEach((entry) => {
-        entry.btn.classList.toggle("is-active", entry.h === preset.h);
-      });
-      renderMasonryStage();
-      await plugin.saveSettings();
-    };
-    densityButtons.push({ h: preset.h, btn: b });
-  });
-
-  const capToggleBtn = ctrlRight.createEl("button", {
-    cls: `curator-dl-mini-btn ${uiState.captionMode === "always" ? "is-active" : ""}`,
-    text: uiState.captionMode === "hover" ? "🏷️ 铭牌：悬停浮现" : "📌 铭牌：常驻显示"
-  });
-  capToggleBtn.onclick = async () => {
-    uiState.captionMode = uiState.captionMode === "hover" ? "always" : "hover";
-    plugin.settings.illustCaptionMode = uiState.captionMode;
-    capToggleBtn.classList.toggle("is-active", uiState.captionMode === "always");
-    capToggleBtn.textContent =
-      uiState.captionMode === "hover" ? "🏷️ 铭牌：悬停浮现" : "📌 铭牌：常驻显示";
-    const gridEl = stageHost.querySelector(".curator-char-photowall-grid");
-    if (gridEl) {
-      gridEl.classList.toggle("is-hover-plaque", uiState.captionMode === "hover");
-      gridEl.classList.toggle("is-always-plaque", uiState.captionMode === "always");
-    } else {
-      renderMasonryStage();
-    }
-    await plugin.saveSettings();
-  };
+  if (!uiState.activeFolio) uiState.activeFolio = "all";
+  if (!["salon", "book", "wall"].includes(uiState.viewMode)) {
+    uiState.viewMode = ["salon", "book", "wall"].includes(plugin.settings?.illustViewMode)
+      ? plugin.settings.illustViewMode
+      : "salon";
+  }
 
   const stageHost = container.createDiv("curator-illust-stage-host");
 
-  const renderMasonryStage = () => {
-    if (stageHost._avesResizeObserver) {
-      try {
-        stageHost._avesResizeObserver.disconnect();
-      } catch (_) {}
-      stageHost._avesResizeObserver = null;
+  const buildFoliosFromList = (items) => {
+    const folios = [{ key: "all", label: "全部画作", count: items.length }];
+    const animeMap = new Map();
+    const charMap = new Map();
+    let looseCount = 0;
+
+    for (const it of items) {
+      const ani = String(it.animeTitle || "").trim();
+      const ch = String(it.characterName || "").trim();
+      if (ani) animeMap.set(ani, (animeMap.get(ani) || 0) + 1);
+      if (ch) charMap.set(ch, (charMap.get(ch) || 0) + 1);
+      if (!ani && !ch) looseCount += 1;
     }
-    stageHost.empty();
+
+    Array.from(animeMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .forEach(([ani, cnt]) => {
+        folios.push({ key: `anime::${ani}`, label: `《${ani}》`, count: cnt });
+      });
+
+    Array.from(charMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .forEach(([ch, cnt]) => {
+        folios.push({ key: `char::${ch}`, label: ch, count: cnt });
+      });
+
+    if (looseCount > 0 && folios.length > 1) {
+      folios.push({ key: "loose", label: "未归档散页", count: looseCount });
+    }
+    return folios;
+  };
+
+  const renderMasonryStage = () => {
+    if (typeof container._bmgsStageCleanup === "function") {
+      try {
+        container._bmgsStageCleanup();
+      } catch (_) {}
+      container._bmgsStageCleanup = null;
+    }
 
     const allLatest = collectAllGalleryIllustrations(plugin);
     if (countBadgeEl && countBadgeEl.isConnected) {
@@ -2987,217 +3299,71 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
       document
         .querySelectorAll('[data-stat-role="workspace-gallery-badge"]')
         .forEach((el) => {
-          el.textContent = `画作 ${allLatest.length} 幅`;
+          el.textContent = String(allLatest.length);
         });
     }
 
-    const curList = allLatest.filter((it) => {
-      const q = String(uiState.searchQuery || "").trim().toLowerCase();
-      if (!q) return true;
-      const hay = [it.title, it.characterName, it.animeTitle, ...(it.tags || [])]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
+    const q = String(uiState.searchQuery || "").trim().toLowerCase();
+    const searchFiltered = q
+      ? allLatest.filter((it) => {
+          const hay = [it.title, it.characterName, it.animeTitle, ...(it.tags || [])]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          return hay.includes(q);
+        })
+      : allLatest;
 
-    if (curList.length === 0) {
-      stageHost.createDiv({
-        cls: "curator-rs-empty",
-        text: "当前画册暂无匹配图片 · 可点击右上角「🔍 在线搜图与一键保存」或「📁 导入本地图片」充实画册。"
-      });
-      return;
+    const folios = buildFoliosFromList(searchFiltered);
+    if (!folios.some((f) => f.key === uiState.activeFolio)) {
+      uiState.activeFolio = "all";
     }
 
-    const masonry = stageHost.createDiv(
-      `curator-char-photowall-grid is-aves-justified ${uiState.captionMode === "hover" ? "is-hover-plaque" : "is-always-plaque"}`
-    );
-    const rowH = Number(uiState.rowHeight) || 240;
-    const tilesMeta = [];
-    let pendingImgLayoutRaf = 0;
+    const motionTier =
+      plugin.settings?.v07Motion === false
+        ? "off"
+        : ["full", "lite", "off"].includes(plugin.settings?.v07MotionTier)
+        ? plugin.settings.v07MotionTier
+        : "full";
 
-    const runAvesRelayout = () => {
-      layoutAvesJustifiedGrid(masonry, tilesMeta, {
-        targetRowHeight: Number(uiState.rowHeight) || rowH,
-        gap: 8
-      });
-    };
-
-    const scheduleImgLoadRelayout = () => {
-      if (pendingImgLayoutRaf) return;
-      pendingImgLayoutRaf = requestAnimationFrame(() => {
-        pendingImgLayoutRaf = 0;
-        if (masonry.isConnected) runAvesRelayout();
-      });
-    };
-
-    curList.forEach((ill, idx) => {
-      const tile = masonry.createDiv("curator-char-photowall-tile");
-      tile.style.setProperty("--stagger-idx", String(idx));
-
-      const imgWrap = tile.createDiv("curator-char-photowall-imgwrap");
-      const src = resolveLocalOrVaultImageUrl(plugin, ill.localPath || ill.imageUrl, ill._cacheBust || "");
-      let imgEl = null;
-
-      if (src) {
-        imgEl = imgWrap.createEl("img", {
-          cls: "curator-char-photowall-img",
-          attr: { src, alt: ill.title || "" }
-        });
-        imgEl.loading = idx < 12 ? "eager" : "lazy";
-        const updateFromNatural = () => {
-          if (imgEl.naturalWidth > 0 && imgEl.naturalHeight > 0) {
-            const nextAspect = imgEl.naturalWidth / imgEl.naturalHeight;
-            const prevAspect = Number(ill._naturalAspect) || 0;
-            ill._naturalAspect = nextAspect;
-            if (ill._aspectCacheKey && plugin.__diskIllustAspectCache) {
-              plugin.__diskIllustAspectCache.set(ill._aspectCacheKey, nextAspect);
-            }
-            if (Math.abs(nextAspect - prevAspect) > 0.004) {
-              scheduleImgLoadRelayout();
-            }
-          }
-        };
-        imgEl.onerror = () => {
-          // 1. 桌面端：若本地文件刚刚被外部移除，触发对账刷新
-          if (isDesktopNodeAvailable() && ill.localPath) {
-            const absCheck = resolveLocalFileAbsolutePath(plugin, ill.localPath);
-            if (absCheck && !fs.existsSync(absCheck)) {
-              setTimeout(() => {
-                if (stageHost.isConnected) renderMasonryStage();
-              }, 60);
-              return;
-            }
-          }
-          // 2. 移动端 / 选择性同步尚未拉取本地原图时：优先回退在线预览图，绝不误删记录
-          if (
-            ill.imageUrl &&
-            /^https?:\/\//i.test(String(ill.imageUrl)) &&
-            imgEl.dataset.triedOnlineFallback !== "1"
-          ) {
-            imgEl.dataset.triedOnlineFallback = "1";
-            imgEl.src = ill.imageUrl;
-            return;
-          }
-          imgEl.style.display = "none";
-          if (!imgWrap.querySelector(".curator-illust-broken-fallback")) {
-            imgWrap.createDiv({
-              cls: "curator-illust-broken-fallback",
-              text: ill.localPath ? "☁️ 原图未同步至本机" : "🖼️ 图片暂不可用"
-            });
-          }
-        };
-        if (imgEl.complete && imgEl.naturalWidth > 0) {
-          ill._naturalAspect = imgEl.naturalWidth / imgEl.naturalHeight;
-          if (ill._aspectCacheKey && plugin.__diskIllustAspectCache) {
-            plugin.__diskIllustAspectCache.set(ill._aspectCacheKey, ill._naturalAspect);
-          }
-        } else {
-          imgEl.onload = updateFromNatural;
+    const handle = renderGallerySanctuary(stageHost, {
+      filteredItems: searchFiltered,
+      folios,
+      state: uiState,
+      motionTier,
+      resolveImgSrc: (ill) =>
+        resolveLocalOrVaultImageUrl(plugin, ill.localPath || ill.imageUrl, ill._cacheBust || ""),
+      onNaturalAspect: (ill, aspect) => {
+        if (ill._aspectCacheKey && plugin.__diskIllustAspectCache) {
+          plugin.__diskIllustAspectCache.set(ill._aspectCacheKey, aspect);
         }
-      }
-
-      tilesMeta.push({
-        el: tile,
-        imgEl,
-        getAspect: () => Number(ill._naturalAspect) || 0.72
-      });
-
-      const topBar = tile.createDiv("curator-char-photowall-topbar");
-      topBar.createSpan({
-        cls: "curator-char-photowall-score curator-mono",
-        text: ill.localPath ? "💾 本地" : "☁️ 云端"
-      });
-
-      const topActions = topBar.createDiv("curator-illust-tile-topactions");
-      const wandBtn = topActions.createEl("button", {
-        cls: "curator-char-photowall-cropbtn",
-        text: "🪄"
-      });
-      wandBtn.title = "打开洛琪希魔杖同源关联谱";
-      wandBtn.onclick = (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        openMagicWandRelationModal(
-          plugin,
-          {
-            type: "illustration",
-            id: ill.id,
-            title: ill.characterName || ill.title,
-            animeTitle: ill.animeTitle
-          },
-          vaultAnimeItems,
-          options.wandCallbacks
-        );
-      };
-
-      let quickDelArmed = false;
-      let quickDelTimer = null;
-      const quickDelBtn = topActions.createEl("button", {
-        cls: "curator-char-photowall-cropbtn is-danger-hover",
-        text: "🗑️"
-      });
-      quickDelBtn.title = "删除该幅画作（再次点击确认移入回收站）";
-      quickDelBtn.onclick = async (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (!quickDelArmed) {
-          quickDelArmed = true;
-          quickDelBtn.addClass("is-armed");
-          quickDelBtn.textContent = "确认删?";
-          if (quickDelTimer) clearTimeout(quickDelTimer);
-          quickDelTimer = setTimeout(() => {
-            quickDelArmed = false;
-            if (quickDelBtn.isConnected) {
-              quickDelBtn.removeClass("is-armed");
-              quickDelBtn.textContent = "🗑️";
-            }
-          }, 3000);
-          return;
+      },
+      onBrokenLocalFile: (ill) => {
+        if (isDesktopNodeAvailable() && ill.localPath) {
+          const absCheck = resolveLocalFileAbsolutePath(plugin, ill.localPath);
+          if (absCheck && !fs.existsSync(absCheck)) {
+            setTimeout(() => {
+              if (stageHost.isConnected) renderMasonryStage();
+            }, 60);
+            return true;
+          }
         }
-        if (quickDelTimer) clearTimeout(quickDelTimer);
-        quickDelBtn.disabled = true;
-        quickDelBtn.textContent = "...";
-        const res = await deleteGalleryIllustration(plugin, ill);
-        if (Notice) {
-          new Notice(
-            res.deletedFile
-              ? `🗑️ 已删除画作《${ill.title || "未命名"}》（本地图片已移入系统回收站）`
-              : `🗑️ 已移除画作记录《${ill.title || "未命名"}》`
-          );
-        }
-        renderMasonryStage();
-      };
-
-      const plaque = tile.createDiv("curator-char-photowall-plaque");
-      const titleLine = plaque.createDiv("curator-char-photowall-titleline");
-      titleLine.createSpan({
-        cls: "curator-char-photowall-name",
-        text: ill.title || ill.characterName || "未命名画作"
-      });
-      if (ill.characterName || ill.animeTitle) {
-        plaque.createDiv({
-          cls: "curator-char-photowall-moes",
-          text: [ill.characterName, ill.animeTitle].filter(Boolean).join(" · ")
-        });
-      }
-
-      tile.onclick = () => {
+        return false;
+      },
+      onOpenLightbox: (ill, curList, idx) => {
         openIllustrationLightboxModal(plugin, ill, renderMasonryStage, {
           list: curList,
           index: idx
         });
-      };
-
-      tile.addEventListener("contextmenu", (ev) => {
+      },
+      onContextMenu: (ev, ill, curList, idx) => {
         try {
           if (typeof Menu === "function") {
-            ev.preventDefault();
             ev.stopPropagation();
             const menu = new Menu();
             menu.addItem((mi) =>
               mi
-                .setTitle("🔍 放大鉴赏与编辑信息")
+                .setTitle("放大鉴赏与编辑信息")
                 .onClick(() =>
                   openIllustrationLightboxModal(plugin, ill, renderMasonryStage, {
                     list: curList,
@@ -3208,12 +3374,12 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
             if (ill.localPath && isDesktopNodeAvailable()) {
               menu.addItem((mi) =>
                 mi
-                  .setTitle("📂 在资源管理器中定位文件")
+                  .setTitle("在资源管理器中定位文件")
                   .onClick(() => revealLocalFileInExplorer(plugin, ill.localPath))
               );
             }
             menu.addItem((mi) =>
-              mi.setTitle("🪄 魔杖同源星轨关联").onClick(() =>
+              mi.setTitle("查看关联收藏").onClick(() =>
                 openMagicWandRelationModal(
                   plugin,
                   {
@@ -3230,14 +3396,14 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
             menu.addSeparator();
             menu.addItem((mi) =>
               mi
-                .setTitle(ill.localPath ? "🗑️ 删除该幅画作（本地图片移入回收站）" : "🗑️ 移除该幅画作")
+                .setTitle(ill.localPath ? "删除该幅画作（本地图片移入回收站）" : "移除该幅画作")
                 .onClick(async () => {
                   const res = await deleteGalleryIllustration(plugin, ill);
                   if (Notice) {
                     new Notice(
                       res.deletedFile
-                        ? `🗑️ 已删除画作《${ill.title || "未命名"}》（本地图片已移入系统回收站）`
-                        : `🗑️ 已移除画作记录《${ill.title || "未命名"}》`
+                        ? `已删除画作《${ill.title || "未命名"}》（本地图片已移入系统回收站）`
+                        : `已移除画作记录《${ill.title || "未命名"}》`
                     );
                   }
                   renderMasonryStage();
@@ -3246,25 +3412,62 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
             menu.showAtMouseEvent(ev);
           }
         } catch (_) {}
-      });
-
-      bindMagicWandLongPress(tile, () => {
-        openMagicWandRelationModal(
-          plugin,
-          {
-            type: "illustration",
-            id: ill.id,
-            title: ill.characterName || ill.title,
-            animeTitle: ill.animeTitle
-          },
-          vaultAnimeItems,
-          options.wandCallbacks
-        );
-      });
+      },
+      onBindPiece: (node, ill) => {
+        bindMagicWandLongPress(node, () => {
+          openMagicWandRelationModal(
+            plugin,
+            {
+              type: "illustration",
+              id: ill.id,
+              title: ill.characterName || ill.title,
+              animeTitle: ill.animeTitle
+            },
+            vaultAnimeItems,
+            options.wandCallbacks
+          );
+        });
+      },
+      onDeleteItem: async (ill) => {
+        const res = await deleteGalleryIllustration(plugin, ill);
+        if (Notice) {
+          new Notice(
+            res.deletedFile
+              ? `已删除画作《${ill.title || "未命名"}》（本地图片已移入系统回收站）`
+              : `已移除画作记录《${ill.title || "未命名"}》`
+          );
+        }
+        renderMasonryStage();
+      },
+      onImportClick: () => importLocalBtn.click(),
+      onOnlineSearchClick: () => {
+        if (!uiState.showOnlineDrawer) onlineSearchBtn.click();
+      },
+      onStateChange: async (patch) => {
+        let dirty = false;
+        if (patch.viewMode && plugin.settings.illustViewMode !== patch.viewMode) {
+          plugin.settings.illustViewMode = patch.viewMode;
+          dirty = true;
+        }
+        if (patch.captionMode && plugin.settings.illustCaptionMode !== patch.captionMode) {
+          plugin.settings.illustCaptionMode = patch.captionMode;
+          dirty = true;
+        }
+        if (patch.rowHeight && plugin.settings.illustRowHeight !== patch.rowHeight) {
+          plugin.settings.illustRowHeight = patch.rowHeight;
+          dirty = true;
+        }
+        if (dirty) {
+          try {
+            await plugin.saveSettings();
+          } catch (_) {}
+        }
+      }
     });
 
-    runAvesRelayout();
-    attachAvesResizeObserver(stageHost, masonry, runAvesRelayout);
+    if (handle && typeof handle.destroy === "function") {
+      container._bmgsStageCleanup = handle.destroy;
+    }
   };
 
   // 注册全局活跃画册刷新钩子 + 本地画册目录实时监听（用户在资源管理器中手动增删改图片自动同步刷新）
@@ -3275,11 +3478,23 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
   };
 
   const bindLiveDirectoryWatcher = () => {
-    if (typeof plugin._activeIllustWatcherCleanup === "function") {
+    if (!(plugin._illustWatcherMap instanceof Map)) {
+      plugin._illustWatcherMap = new Map();
+    }
+    const existingCleanup = plugin._illustWatcherMap.get(container);
+    if (typeof existingCleanup === "function") {
       try {
-        plugin._activeIllustWatcherCleanup();
+        existingCleanup();
       } catch (_) {}
-      plugin._activeIllustWatcherCleanup = null;
+      plugin._illustWatcherMap.delete(container);
+    }
+    for (const [hostEl, fn] of Array.from(plugin._illustWatcherMap.entries())) {
+      if (!hostEl || !hostEl.isConnected) {
+        try {
+          if (typeof fn === "function") fn();
+        } catch (_) {}
+        plugin._illustWatcherMap.delete(hostEl);
+      }
     }
     if (container._illustDirWatcher) {
       try {
@@ -3301,6 +3516,9 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
               watcher.close();
             } catch (_) {}
             container._illustDirWatcher = null;
+            if (plugin._illustWatcherMap instanceof Map) {
+              plugin._illustWatcherMap.delete(container);
+            }
             return;
           }
           if (filename) {
@@ -3317,7 +3535,7 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
         });
         watcher.on("error", () => {});
         container._illustDirWatcher = watcher;
-        plugin._activeIllustWatcherCleanup = () => {
+        const cleanupWatcher = () => {
           if (container._illustWatchDebounce) {
             clearTimeout(container._illustWatchDebounce);
             container._illustWatchDebounce = null;
@@ -3329,6 +3547,8 @@ function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems =
             container._illustDirWatcher = null;
           }
         };
+        plugin._illustWatcherMap.set(container, cleanupWatcher);
+        plugin._activeIllustWatcherCleanup = cleanupWatcher;
       }
     } catch (_) {}
   };
@@ -3535,9 +3755,10 @@ async function probeVideoSubtitleTracks(plugin, videoFilePath) {
     proc.stderr.on("data", (chunk) => {
       stderrStr += chunk.toString("utf8");
     });
-    proc.on("error", () => {
+    proc.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ tracks: [], preferredSubIndex: 0 });
+      const missing = Boolean(err && (err.code === "ENOENT" || /ENOENT/i.test(String(err.message))));
+      resolve({ tracks: [], preferredSubIndex: 0, missingFfmpeg: missing });
     });
     proc.on("close", () => {
       clearTimeout(timer);
@@ -3656,7 +3877,20 @@ async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubInde
   }
 
   // 2. 探测内嵌字幕轨道并默认优选简体中文轨
-  const { tracks, preferredSubIndex } = await probeVideoSubtitleTracks(plugin, videoFilePath);
+  const { tracks, preferredSubIndex, missingFfmpeg } = await probeVideoSubtitleTracks(
+    plugin,
+    videoFilePath
+  );
+  if (missingFfmpeg) {
+    return {
+      cues: [],
+      sourceLabel:
+        "未检测到 FFmpeg 工具（可在「插件设置 → 音声典藏」配置路径，或点击右侧手动导入外置 .ass/.srt 字幕）",
+      tracks: [],
+      selectedSubIndex: 0,
+      missingFfmpeg: true
+    };
+  }
   if (!Array.isArray(tracks) || tracks.length === 0) {
     return {
       cues: [],
@@ -3742,10 +3976,11 @@ async function sliceAudioFromVideoWithFfmpeg(plugin, options) {
   const actualEnd = Math.max(actualStart + 0.4, Number(endSec) + Math.max(0, Number(padAfterSec) || 0));
   const duration = Number((actualEnd - actualStart).toFixed(2));
 
+  const defaultVoiceFolder = resolveDefaultVoiceArchiveFolder(plugin);
   const { absDir, vaultBase } = ensureDirectoryAbsolute(
     plugin,
-    plugin.settings?.voiceArchiveFolder,
-    "附件/台词音声库"
+    defaultVoiceFolder,
+    defaultVoiceFolder
   );
   const safePrefix = String(characterName || animeTitle || "voice")
     .replace(/[\\/:*?"<>|]/g, "_")
@@ -3775,7 +4010,17 @@ async function sliceAudioFromVideoWithFfmpeg(plugin, options) {
     proc.stderr.on("data", (d) => {
       errLog += d.toString();
     });
-    proc.on("error", (err) => reject(err));
+    proc.on("error", (err) => {
+      if (err && (err.code === "ENOENT" || /ENOENT/i.test(String(err.message)))) {
+        reject(
+          new Error(
+            "未检测到可用的 FFmpeg 工具，请先安装 FFmpeg 或在「插件设置 → 音声典藏」中指定 ffmpeg 路径"
+          )
+        );
+      } else {
+        reject(err);
+      }
+    });
     proc.on("close", (code) => {
       if (code === 0 && fs.existsSync(absOut)) {
         resolve(absOut);
@@ -3792,7 +4037,7 @@ async function sliceAudioFromVideoWithFfmpeg(plugin, options) {
 
   const record = {
     id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    quoteText: String(quoteText || "").trim() || "经典台词音声",
+    quoteText: String(quoteText || "").trim() || "经典台词",
     characterName: String(characterName || "").trim(),
     animeTitle: String(animeTitle || "").trim(),
     episode: String(episode || "").trim(),
@@ -3821,7 +4066,7 @@ function resolveVoiceAudioDiskState(plugin, rawAudioPath) {
   if (!relOrAbs) {
     return { exists: false, absPath: "", playUrl: "", missingFile: false };
   }
-  if (/^https?:\/\//i.test(relOrAbs)) {
+  if (/^(?:https?:\/\/|data:audio\/|blob:)/i.test(relOrAbs)) {
     return { exists: true, absPath: relOrAbs, playUrl: relOrAbs, missingFile: false };
   }
   const cleanRel = !path.isAbsolute(relOrAbs)
@@ -3859,288 +4104,263 @@ function resolveVoiceAudioDiskState(plugin, rawAudioPath) {
 }
 
 /**
- * 优先抽取带可播放音频的 ACG 名台词并持久保存到用户自定义音声路径（默认 附件/台词音声库）
- * 顺序：
- *  1) 在线 ACG 语音接口（下载音频字节流并落盘保存）
- *  2) 本地馆藏番剧视频 + 字幕智能抽选经典台词并 FFmpeg 切片原声落盘
- *  3) 若因网络/环境问题或本地无带字幕视频而无法获取音频，降级抽取纯文字台词并明确提示原因
+ * 判断候选目录是否位于当前配置的本地动画根目录之内（跨平台大小写安全）
+ */
+function isPathInsideAnimeRoot(rootDir, candidatePath) {
+  const rawRoot = String(rootDir || "").trim();
+  const rawCand = String(candidatePath || "").trim();
+  if (!rawRoot || !rawCand) return false;
+  const isWin = typeof process !== "undefined" && process.platform === "win32";
+  const norm = (p) => {
+    const resolved = path.resolve(p).replace(/[\\/]+$/, "");
+    return isWin ? resolved.toLowerCase() : resolved;
+  };
+  const r = norm(rawRoot);
+  const c = norm(rawCand);
+  if (!r || !c) return false;
+  const sep = isWin ? "\\" : path.sep || "/";
+  return c === r || c.startsWith(r + sep) || c.startsWith(r + "/");
+}
+
+/**
+ * 抽取 ACG 名台词并保存至音声典藏：
+ *  1) 桌面端且当前有效本地番剧目录（严格受 localAnimeRoot 约束）存在带软字幕剧集视频时，自动抽选台词并调用 FFmpeg 切出原声 MP3 落盘；
+ *  2) 若尚未配置本地番剧目录、目录下暂无视频或处于移动端时，零等待即时拉取 Hitokoto 经典动漫名言卡片（离线自动回退内置经典名台词库）。
  */
 async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSelectedVideo = "") {
   const existingQuotes = new Set(
     (plugin.settings?.voiceCollection || []).map((v) => String(v.quoteText || "").trim())
   );
-  const diagReasons = [];
+  const localRoot = String(plugin.settings?.localAnimeRoot || "").trim();
+  let missingFfmpegDetected = false;
 
-  // 阶段 1：尝试在线带原声的二次元语音台词接口并下载音频持久保存到本地
-  const onlineVoiceEndpoints = [
-    {
-      name: "VVHan ACG 原声台词接口",
-      url: "https://api.vvhan.com/api/acg/voice?type=json",
-      parse: (json) => ({
-        quoteText: json?.data?.content || json?.content || json?.text || "",
-        audioUrl: json?.data?.url || json?.mp3 || json?.url || json?.audio || "",
-        characterName: json?.data?.author || json?.author || json?.name || "",
-        animeTitle: json?.data?.source || json?.source || json?.from || "ACG 原声典藏"
-      })
-    },
-    {
-      name: "Lolimi 二次元语音接口",
-      url: "https://api.lolimi.cn/API/yy/api.php?type=json",
-      parse: (json) => ({
-        quoteText: json?.text || json?.content || json?.msg || "",
-        audioUrl: json?.url || json?.mp3 || json?.audio || "",
-        characterName: json?.author || json?.name || "",
-        animeTitle: json?.source || json?.from || "ACG 原声典藏"
-      })
-    }
-  ];
-
-  for (const ep of onlineVoiceEndpoints) {
+  // 阶段 1（仅桌面端）：从当前作用域内的本地已下载番剧视频 + 字幕轨中抽选经典台词并调用 FFmpeg 切出原声 MP3
+  if (isDesktopNodeAvailable()) {
     try {
-      const res = await Promise.race([
-        requestUrl({ url: ep.url, method: "GET" }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 2500))
-      ]);
-      let parsed = null;
-      try {
-        parsed = ep.parse(res?.json || JSON.parse(res?.text || "{}"));
-      } catch (e) {}
-      if (parsed && parsed.audioUrl && /^https?:\/\//i.test(parsed.audioUrl)) {
-        const audioRes = await Promise.race([
-          requestUrl({ url: parsed.audioUrl, method: "GET" }),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 4500))
-        ]);
-        if (audioRes?.arrayBuffer && audioRes.arrayBuffer.byteLength > 1024) {
-          const { absDir, vaultBase } = ensureDirectoryAbsolute(
-            plugin,
-            plugin.settings?.voiceArchiveFolder,
-            "附件/台词音声库"
-          );
-          const extMatch = String(parsed.audioUrl).match(/\.(mp3|wav|ogg|m4a)(?:$|\?)/i);
-          const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : ".mp3";
-          const fileName = `acg_voice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}${ext}`;
-          const audioBin = toNodeBufferOrUint8(audioRes.arrayBuffer);
-          let storedPath = "";
-          if (isDesktopNodeAvailable() && absDir) {
-            const absOut = path.join(absDir, fileName);
-            fs.writeFileSync(absOut, audioBin);
-            storedPath = absOut;
-            if (vaultBase && absOut.toLowerCase().startsWith(vaultBase.toLowerCase())) {
-              storedPath = path.relative(vaultBase, absOut).replace(/\\/g, "/");
-            }
-          } else {
-            const relVoiceFolder = normalizeVaultRelPath(plugin.settings?.voiceArchiveFolder || "附件/台词音声库") || "附件/台词音声库";
-            storedPath = `${relVoiceFolder}/${fileName}`;
-            await writeVaultBinaryFile(plugin.app, storedPath, audioBin);
-          }
+      const candidateVideos = [];
+      const seenVideoPaths = new Set();
+      const pushCandidateVideo = (videoPath, animeTitle, episode) => {
+        if (!videoPath || seenVideoPaths.has(videoPath)) return;
+        if (localRoot && !isPathInsideAnimeRoot(localRoot, videoPath)) return;
+        seenVideoPaths.add(videoPath);
+        const ext = path.extname(videoPath).toLowerCase();
+        let hasExtSub = false;
+        try {
+          const dir = path.dirname(videoPath);
+          const base = path.basename(videoPath, ext).toLowerCase();
+          hasExtSub = fs
+            .readdirSync(dir)
+            .some((f) => /\.(ass|ssa|srt|vtt)$/i.test(f) && f.toLowerCase().includes(base.slice(0, 8)));
+        } catch (_) {}
+        const priorityScore = (hasExtSub ? 20 : 0) + (ext === ".mkv" ? 10 : 0) + Math.random();
+        candidateVideos.push({
+          videoPath,
+          animeTitle,
+          episode,
+          priorityScore
+        });
+      };
 
-          const record = {
-            id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            quoteText: String(parsed.quoteText || "经典二次元原声台词").trim(),
-            characterName: String(parsed.characterName || "").trim(),
-            animeTitle: String(parsed.animeTitle || "ACG 原声").trim(),
-            episode: "",
-            timestamp: "",
-            durationSec: 0,
-            audioPath: storedPath,
-            createdAt: new Date().toISOString()
-          };
-          if (!Array.isArray(plugin.settings.voiceCollection)) {
-            plugin.settings.voiceCollection = [];
-          }
-          plugin.settings.voiceCollection.unshift(record);
-          await plugin.saveSettings();
-          return {
-            record,
-            hasAudio: true,
-            sourceType: "online-audio",
-            message: `🎙️ 已抽取带原声名台词并保存音频至「${storedPath}」：“${record.quoteText}”`
-          };
-        }
+      if (
+        currentSelectedVideo &&
+        fs.existsSync(currentSelectedVideo) &&
+        (!localRoot || isPathInsideAnimeRoot(localRoot, currentSelectedVideo))
+      ) {
+        pushCandidateVideo(
+          currentSelectedVideo,
+          path.basename(path.dirname(currentSelectedVideo)),
+          ""
+        );
       }
-      diagReasons.push(`${ep.name}未返回有效音频流`);
-    } catch (err) {
-      diagReasons.push(`${ep.name}连接超时或受网络环境限制`);
-    }
-  }
 
-  // 阶段 2：从本地已下载番剧视频 + 字幕轨中自动抽选经典角色台词并调用 FFmpeg 切出原声 MP3 持久保存
-  try {
-    const candidateVideos = [];
-    const seenVideoPaths = new Set();
-    const pushCandidateVideo = (videoPath, animeTitle, episode) => {
-      if (!videoPath || seenVideoPaths.has(videoPath)) return;
-      seenVideoPaths.add(videoPath);
-      const ext = path.extname(videoPath).toLowerCase();
-      let hasExtSub = false;
-      try {
-        const dir = path.dirname(videoPath);
-        const base = path.basename(videoPath, ext).toLowerCase();
-        hasExtSub = fs
-          .readdirSync(dir)
-          .some((f) => /\.(ass|ssa|srt|vtt)$/i.test(f) && f.toLowerCase().includes(base.slice(0, 8)));
-      } catch (e) {}
-      const priorityScore = (hasExtSub ? 20 : 0) + (ext === ".mkv" ? 10 : 0) + Math.random();
-      candidateVideos.push({
-        videoPath,
-        animeTitle,
-        episode,
-        priorityScore
-      });
-    };
-
-    if (currentSelectedVideo && fs.existsSync(currentSelectedVideo)) {
-      pushCandidateVideo(
-        currentSelectedVideo,
-        path.basename(path.dirname(currentSelectedVideo)),
-        ""
-      );
-    }
-
-    const folderPool = [];
-    const seenFolders = new Set();
-    for (const it of vaultAnimeItems || []) {
-      if (it && it.downloadPath && it.downloadPath !== "无" && fs.existsSync(it.downloadPath)) {
+      const folderPool = [];
+      const seenFolders = new Set();
+      for (const it of vaultAnimeItems || []) {
+        if (!it || it.isSamplePreviewItem) continue;
+        if (!it.downloadPath || it.downloadPath === "无" || !fs.existsSync(it.downloadPath)) continue;
+        // 若用户显式设置了本地动画根目录，严格只允许抽取位于该根目录之下的番剧，杜绝旧测试目录或迁移前路径串台
+        if (localRoot && !isPathInsideAnimeRoot(localRoot, it.downloadPath)) continue;
         const norm = path.resolve(it.downloadPath);
-        if (!seenFolders.has(norm)) {
-          seenFolders.add(norm);
+        const key = typeof process !== "undefined" && process.platform === "win32" ? norm.toLowerCase() : norm;
+        if (!seenFolders.has(key)) {
+          seenFolders.add(key);
           folderPool.push({ dirPath: norm, title: it.name || path.basename(norm) });
         }
       }
-    }
-    const localRoot = String(plugin.settings?.localAnimeRoot || "").trim();
-    if (localRoot && fs.existsSync(localRoot)) {
-      const scanSubDirs = (dir, depth) => {
-        if (depth > 3) return;
-        try {
-          const subEntries = fs.readdirSync(dir, { withFileTypes: true });
-          let hasVidHere = false;
-          for (const dirent of subEntries) {
-            if (dirent.isFile() && /\.(mkv|mp4|webm|avi|mov)$/i.test(dirent.name)) {
-              hasVidHere = true;
-            } else if (dirent.isDirectory()) {
-              scanSubDirs(path.join(dir, dirent.name), depth + 1);
-            }
-          }
-          if (hasVidHere) {
-            const norm = path.resolve(dir);
-            if (!seenFolders.has(norm)) {
-              seenFolders.add(norm);
-              folderPool.push({ dirPath: norm, title: path.basename(norm) });
-            }
-          }
-        } catch (e) {}
-      };
-      scanSubDirs(localRoot, 0);
-    }
 
-    const shuffledFolders = [...folderPool].sort(() => Math.random() - 0.5);
-    for (const folderItem of shuffledFolders) {
-      const folderInfo = inspectLocalFolder(folderItem.dirPath);
-      if (folderInfo && Array.isArray(folderInfo.videoFiles) && folderInfo.videoFiles.length > 0) {
-        const preferredVids = [...folderInfo.videoFiles].sort((a, b) => {
-          const aMkv = /\.mkv$/i.test(a.name) ? 1 : 0;
-          const bMkv = /\.mkv$/i.test(b.name) ? 1 : 0;
-          if (aMkv !== bMkv) return bMkv - aMkv;
-          return Math.random() - 0.5;
-        });
-        for (const vf of preferredVids.slice(0, 2)) {
-          pushCandidateVideo(
-            path.join(folderItem.dirPath, vf.name),
-            folderItem.title,
-            vf.episode !== null ? String(vf.episode) : "1"
-          );
+      if (localRoot && fs.existsSync(localRoot) && folderPool.length < 8) {
+        const nativeFs = tryRequireNode("fs");
+        const readdirAsync =
+          nativeFs?.promises && typeof nativeFs.promises.readdir === "function"
+            ? (d) => nativeFs.promises.readdir(d, { withFileTypes: true })
+            : async (d) => fs.readdirSync(d, { withFileTypes: true });
+
+        let visitedDirs = 0;
+        const skipDirNames = new Set([
+          ".git",
+          ".obsidian",
+          "node_modules",
+          "$recycle.bin",
+          "system volume information"
+        ]);
+        const scanSubDirsAsync = async (dir, depth) => {
+          if (depth > 3 || visitedDirs >= 40 || folderPool.length >= 8) return;
+          visitedDirs += 1;
+          try {
+            const subEntries = await readdirAsync(dir);
+            let hasVidHere = false;
+            const childDirs = [];
+            for (const dirent of subEntries) {
+              if (dirent.isFile() && /\.(mkv|mp4|webm|avi|mov)$/i.test(dirent.name)) {
+                hasVidHere = true;
+              } else if (dirent.isDirectory()) {
+                const lower = String(dirent.name || "").toLowerCase();
+                if (!lower.startsWith(".") && !skipDirNames.has(lower)) {
+                  childDirs.push(path.join(dir, dirent.name));
+                }
+              }
+            }
+            if (hasVidHere) {
+              const norm = path.resolve(dir);
+              const key =
+                typeof process !== "undefined" && process.platform === "win32" ? norm.toLowerCase() : norm;
+              if (!seenFolders.has(key)) {
+                seenFolders.add(key);
+                folderPool.push({ dirPath: norm, title: path.basename(norm) });
+              }
+            }
+            for (const sub of childDirs) {
+              if (visitedDirs >= 40 || folderPool.length >= 8) break;
+              await scanSubDirsAsync(sub, depth + 1);
+            }
+          } catch (_) {}
+        };
+        await scanSubDirsAsync(localRoot, 0);
+      }
+
+      const shuffledFolders = [...folderPool].sort(() => Math.random() - 0.5);
+      for (const folderItem of shuffledFolders.slice(0, 10)) {
+        const folderInfo = inspectLocalFolder(folderItem.dirPath);
+        if (folderInfo && Array.isArray(folderInfo.videoFiles) && folderInfo.videoFiles.length > 0) {
+          const preferredVids = [...folderInfo.videoFiles].sort((a, b) => {
+            const aMkv = /\.mkv$/i.test(a.name) ? 1 : 0;
+            const bMkv = /\.mkv$/i.test(b.name) ? 1 : 0;
+            if (aMkv !== bMkv) return bMkv - aMkv;
+            return Math.random() - 0.5;
+          });
+          for (const vf of preferredVids.slice(0, 2)) {
+            pushCandidateVideo(
+              path.join(folderItem.dirPath, vf.name),
+              folderItem.title,
+              vf.episode !== null ? String(vf.episode) : "1"
+            );
+          }
         }
       }
-    }
 
-    // 优先检测带外置字幕或内嵌软字幕概率最高的 .mkv 番剧视频
-    candidateVideos.sort((a, b) => b.priorityScore - a.priorityScore);
+      candidateVideos.sort((a, b) => b.priorityScore - a.priorityScore);
 
-    for (const cand of candidateVideos.slice(0, 6)) {
-      const subRes = await loadSubtitlesForVideoFile(plugin, cand.videoPath);
-      const validCues = (subRes.cues || []).filter((c) => {
-        const tx = String(c.text || "").trim();
-        const dur = Number(c.endSec) - Number(c.startSec);
-        if (tx.length < 6 || tx.length > 48) return false;
-        if (dur < 1.0 || dur > 14.0) return false;
-        if (existingQuotes.has(tx)) return false;
-        return true;
-      });
-      if (validCues.length > 0) {
-        // 优先挑选带角色说话人标记或带感叹/问句张力的经典台词
-        const expressiveCues = validCues.filter(
-          (c) => c.speaker || /[！!？?…—。]/.test(c.text)
-        );
-        const pool = expressiveCues.length > 0 ? expressiveCues : validCues;
-        const chosenCue = pool[Math.floor(Math.random() * pool.length)];
-        const record = await sliceAudioFromVideoWithFfmpeg(plugin, {
-          videoFilePath: cand.videoPath,
-          startSec: chosenCue.startSec,
-          endSec: chosenCue.endSec,
-          padBeforeSec: plugin.settings.voiceArchivePadBeforeSec ?? 0.25,
-          padAfterSec: plugin.settings.voiceArchivePadAfterSec ?? 0.35,
-          quoteText: chosenCue.text,
-          characterName: chosenCue.speaker || "",
-          animeTitle: cand.animeTitle,
-          episode: cand.episode
+      for (const cand of candidateVideos.slice(0, 6)) {
+        const subRes = await loadSubtitlesForVideoFile(plugin, cand.videoPath);
+        if (subRes?.missingFfmpeg) {
+          missingFfmpegDetected = true;
+        }
+        const validCues = (subRes.cues || []).filter((c) => {
+          const tx = String(c.text || "").trim();
+          const dur = Number(c.endSec) - Number(c.startSec);
+          if (tx.length < 6 || tx.length > 48) return false;
+          if (dur < 1.0 || dur > 14.0) return false;
+          if (existingQuotes.has(tx)) return false;
+          return true;
         });
+        if (validCues.length > 0) {
+          const expressiveCues = validCues.filter(
+            (c) => c.speaker || /[！!？?…—。]/.test(c.text)
+          );
+          const pool = expressiveCues.length > 0 ? expressiveCues : validCues;
+          const chosenCue = pool[Math.floor(Math.random() * pool.length)];
+          const record = await sliceAudioFromVideoWithFfmpeg(plugin, {
+            videoFilePath: cand.videoPath,
+            startSec: chosenCue.startSec,
+            endSec: chosenCue.endSec,
+            padBeforeSec: plugin.settings.voiceArchivePadBeforeSec ?? 0.25,
+            padAfterSec: plugin.settings.voiceArchivePadAfterSec ?? 0.35,
+            quoteText: chosenCue.text,
+            characterName: chosenCue.speaker || "",
+            animeTitle: cand.animeTitle,
+            episode: cand.episode
+          });
+          return {
+            record,
+            hasAudio: true,
+            sourceType: "local-sliced-audio",
+            message: `已从本地番剧《${cand.animeTitle}》抽取原声台词并保存至「${record.audioPath}」：“${record.quoteText}”`
+          };
+        }
+      }
+    } catch (sliceErr) {
+      if (/FFmpeg|ENOENT/i.test(String(sliceErr?.message || ""))) {
+        missingFfmpegDetected = true;
+      }
+    }
+  }
+
+  // 阶段 2：无可用本地带字幕剧集视频（或移动端）时，即时抽取 Hitokoto 经典动漫名言卡片
+  const cardTipText = missingFfmpegDetected
+    ? "经典动漫名言 · 安装并配置 FFmpeg 后可从本地剧集切出原片语音"
+    : isDesktopNodeAvailable()
+      ? "经典动漫名言 · 绑定本地番剧目录后可通过「截取剧集音声」切出原片语音"
+      : "经典动漫名言 · 可点击下方绑定音频文件";
+  const noticeSuffix = missingFfmpegDetected
+    ? "（检测到本机尚未安装 FFmpeg，配置后可从本地剧集切出原片语音）"
+    : isDesktopNodeAvailable()
+      ? "（绑定含剧集视频的本地番剧目录后可自动抽取原片语音）"
+      : "";
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await Promise.race([
+        requestUrl({
+          url: "https://v1.hitokoto.cn/?c=a",
+          method: "GET",
+          headers: { Accept: "application/json" }
+        }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3500))
+      ]);
+      const data = res?.json || (res?.text ? JSON.parse(res.text) : null);
+      const quote = String(data?.hitokoto || "").trim();
+      if (quote && (attempt === 1 || !existingQuotes.has(quote))) {
+        const record = {
+          id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          quoteText: quote,
+          characterName: String(data.from_who || "").trim(),
+          animeTitle: String(data.from || "").trim(),
+          episode: "",
+          timestamp: "",
+          durationSec: 0,
+          audioPath: "",
+          audioFallbackReason: cardTipText,
+          createdAt: new Date().toISOString()
+        };
+        if (!Array.isArray(plugin.settings.voiceCollection)) {
+          plugin.settings.voiceCollection = [];
+        }
+        plugin.settings.voiceCollection.unshift(record);
+        await plugin.saveSettings();
+        const fromLabel = record.animeTitle ? ` ——《${record.animeTitle}》` : "";
         return {
           record,
-          hasAudio: true,
-          sourceType: "local-sliced-audio",
-          message: `🎙️ 已从本地番剧《${cand.animeTitle}》抽取原声台词并保存至「${record.audioPath}」：“${record.quoteText}”`
+          hasAudio: false,
+          sourceType: "hitokoto-anime-quote",
+          message: `已收录经典动漫名言：“${quote}”${fromLabel}${noticeSuffix}`
         };
       }
+    } catch (_) {
+      break;
     }
-    if (candidateVideos.length === 0) {
-      diagReasons.push("本地馆藏尚未绑定已下载番剧视频目录");
-    } else {
-      diagReasons.push("本地候选番剧视频未检出可用软字幕轨");
-    }
-  } catch (sliceErr) {
-    diagReasons.push(`本地视频原声切片异常 (${sliceErr.message})`);
   }
 
-  // 阶段 3：实在无法获取音频时，降级抽取纯文字名台词并明确向用户说明原因
-  const fallbackReasonText =
-    diagReasons.length > 0
-      ? diagReasons.join("；")
-      : "当前网络环境无法访问在线原声接口且本地无可切片番剧字幕";
-
-  try {
-    const res = await requestUrl({ url: "https://v1.hitokoto.cn/?c=a&c=c", method: "GET" });
-    const data = res?.json;
-    if (data && data.hitokoto) {
-      const record = {
-        id: `voice-${Date.now()}`,
-        quoteText: data.hitokoto,
-        characterName: data.from_who || "",
-        animeTitle: data.from || "",
-        episode: "",
-        timestamp: "",
-        durationSec: 0,
-        audioPath: "",
-        audioFallbackReason: `仅文字：${fallbackReasonText}`,
-        createdAt: new Date().toISOString()
-      };
-      if (!Array.isArray(plugin.settings.voiceCollection)) {
-        plugin.settings.voiceCollection = [];
-      }
-      plugin.settings.voiceCollection.unshift(record);
-      await plugin.saveSettings();
-      return {
-        record,
-        hasAudio: false,
-        sourceType: "text-fallback",
-        message: `⚠️ 因「${fallbackReasonText}」，本次已降级收录纯文字名台词：“${data.hitokoto}”`
-      };
-    }
-  } catch (e) {
-    diagReasons.push("Hitokoto 文字台词接口连接超时");
-  }
-
-  // 离线兜底名台词库
+  // 离线内置经典动漫名台词库
   const offlineClassicPool = [
     {
       quoteText: "正因为害怕，所以才更要迈出那一步。",
@@ -4148,20 +4368,56 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
       animeTitle: "无职转生 ～到了异世界就拿出真本事～"
     },
     {
+      quoteText: "重要的不是活了多久，而是如何与旅途中的人共度时光。",
+      characterName: "芙莉莲",
+      animeTitle: "葬送的芙莉莲"
+    },
+    {
       quoteText: "努力不一定能立刻看到结果，但走过的每一步都不会白费。",
       characterName: "洛琪希·米格路迪亚",
       animeTitle: "无职转生 ～到了异世界就拿出真本事～"
     },
     {
-      quoteText: "重要的不是活了多久，而是如何与旅途中的人共度时光。",
+      quoteText: "如果是勇者辛美尔的话，他一定也会这么做的。",
       characterName: "芙莉莲",
       animeTitle: "葬送的芙莉莲"
+    },
+    {
+      quoteText: "奇迹不是免费的，祈求希望少不了等价的绝望，但正因如此希望才耀眼。",
+      characterName: "鹿目圆",
+      animeTitle: "魔法少女小圆"
+    },
+    {
+      quoteText: "我并不清楚所有事情，我只知道我知道的事。",
+      characterName: "羽川翼",
+      animeTitle: "化物语"
+    },
+    {
+      quoteText: "能哭的地方，只有厕所和爸爸的怀里。",
+      characterName: "冈崎汐",
+      animeTitle: "CLANNAD ～AFTER STORY～"
+    },
+    {
+      quoteText: "无论在哪条世界线，你都不是孤身一人。",
+      characterName: "牧濑红莉栖",
+      animeTitle: "命运石之门"
+    },
+    {
+      quoteText: "我想知道「我爱你」是什么意思。",
+      characterName: "薇尔莉特·伊芙加登",
+      animeTitle: "紫罗兰永恒花园"
+    },
+    {
+      quoteText: "乐队就是把彼此笨拙的声音叠在一起，变成一个人绝对弹不出的奇迹。",
+      characterName: "后藤一里",
+      animeTitle: "孤独摇滚！"
     }
   ];
-  const pick =
-    offlineClassicPool.find((q) => !existingQuotes.has(q.quoteText)) || offlineClassicPool[0];
+  const uncollected = offlineClassicPool.filter((q) => !existingQuotes.has(q.quoteText));
+  const pool = uncollected.length > 0 ? uncollected : offlineClassicPool;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
   const record = {
-    id: `voice-${Date.now()}`,
+    id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     quoteText: pick.quoteText,
     characterName: pick.characterName,
     animeTitle: pick.animeTitle,
@@ -4169,7 +4425,7 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
     timestamp: "",
     durationSec: 0,
     audioPath: "",
-    audioFallbackReason: `仅文字：${diagReasons.join("；")}`,
+    audioFallbackReason: cardTipText,
     createdAt: new Date().toISOString()
   };
   if (!Array.isArray(plugin.settings.voiceCollection)) {
@@ -4180,8 +4436,8 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
   return {
     record,
     hasAudio: false,
-    sourceType: "offline-text-fallback",
-    message: `⚠️ 因「${diagReasons.join("；")}」，无法获取在线/本地音频，已降级收录纯文字台词：“${record.quoteText}”`
+    sourceType: "offline-classic-quote",
+    message: `已收录经典动漫名言：“${record.quoteText}” ——《${record.animeTitle}》${noticeSuffix}`
   };
 }
 
@@ -4214,19 +4470,18 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
   // 顶栏
   const header = container.createDiv("curator-char-header");
   const titleSide = header.createDiv("curator-char-header-left");
-  titleSide.createDiv({ cls: "curator-char-kicker", text: "VOICE LINE & QUOTE STUDIO" });
   const hRow = titleSide.createDiv("curator-char-title-row");
-  hRow.createEl("h2", { cls: "curator-char-title", text: "🎙️ 台词音声" });
+  hRow.createEl("h2", { cls: "curator-char-title", text: "音声典藏" });
   const voiceCountBadgeEl = hRow.createSpan({
     cls: "curator-char-count-badge curator-mono",
-    text: `共典藏 ${voices.length} 条台词音声`
+    text: `共收录 ${voices.length} 条音声`
   });
 
   const actionSide = header.createDiv("curator-char-header-right");
   const searchInput = actionSide.createEl("input", {
     type: "text",
     cls: "curator-input curator-char-search-input",
-    placeholder: "检索台词内容 / 角色 / 动画作品..."
+    placeholder: "检索台词 / 角色 / 动画作品..."
   });
   searchInput.value = uiState.searchQuery || "";
   searchInput.oninput = () => {
@@ -4236,29 +4491,30 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
 
   if (isDesktopNodeAvailable()) {
     const openDirBtn = actionSide.createEl("button", {
-      cls: "curator-btn",
-      text: "📂 音声库目录"
+      cls: "curator-btn"
     });
+    v07Core.setBtnIconLabel(openDirBtn, "folder", "本地目录", 14);
+    openDirBtn.title = "在资源管理器中打开音声典藏本地文件夹";
     openDirBtn.onclick = async () => {
+      const folder = resolveDefaultVoiceArchiveFolder(plugin);
       const { absDir } = ensureDirectoryAbsolute(
         plugin,
-        plugin.settings.voiceArchiveFolder,
-        "附件/台词音声库"
+        folder,
+        folder
       );
       await openLocalPathSafely(absDir);
     };
   }
 
   const onlineQuoteBtn = actionSide.createEl("button", {
-    cls: "curator-btn",
-    text: "✨ 抽取 ACG 名台词"
+    cls: "curator-btn"
   });
+  v07Core.setBtnIconLabel(onlineQuoteBtn, "volume", "抽取名台词", 14);
   onlineQuoteBtn.title =
-    "优先抽取带可播放原声的二次元台词并持久保存到本地音声库；若无可用音频源则降级为纯文字并提示原因";
+    "本地动画目录含软字幕视频时自动抽取原片语音，未绑定本地视频时即时抽取经典动漫名言卡片";
   onlineQuoteBtn.onclick = async () => {
     onlineQuoteBtn.disabled = true;
-    const origText = onlineQuoteBtn.textContent;
-    onlineQuoteBtn.textContent = "⏳ 正在抽取原声台词...";
+    onlineQuoteBtn.textContent = "抽取中...";
     try {
       const drawRes = await drawPlayableAcgVoiceQuote(
         plugin,
@@ -4266,53 +4522,59 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
         uiState.selectedVideoFile
       );
       if (Notice && drawRes?.message) {
-        new Notice(drawRes.message, drawRes.hasAudio ? 5000 : 8000);
+        new Notice(drawRes.message, 4800);
       }
       renderVoiceCards();
     } catch (e) {
-      if (Notice) new Notice(`抽取台词失败：${e.message || "请稍后重试"}`);
+      if (Notice) new Notice(`抽取名台词失败：${e.message || "请稍后重试"}`);
     } finally {
       onlineQuoteBtn.disabled = false;
-      onlineQuoteBtn.textContent = origText;
+      v07Core.setBtnIconLabel(onlineQuoteBtn, "volume", "抽取名台词", 14);
     }
   };
 
   if (isDesktopNodeAvailable()) {
     const slicerBtn = actionSide.createEl("button", {
-      cls: `curator-btn ${uiState.showSlicerDrawer ? "is-active" : "is-primary"}`,
-      text: uiState.showSlicerDrawer ? "▴ 收起智能字幕截取台" : "✂️ 从本地视频+字幕截取音声"
+      cls: `curator-btn ${uiState.showSlicerDrawer ? "is-active" : "is-primary"}`
     });
+    v07Core.setBtnIconLabel(
+      slicerBtn,
+      "film",
+      uiState.showSlicerDrawer ? "收起截取台" : "截取剧集音声",
+      14
+    );
     slicerBtn.onclick = () => {
       uiState.showSlicerDrawer = !uiState.showSlicerDrawer;
       renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems, options);
     };
   }
 
-  // 智能视频+字幕台词音声截取工坊（仅桌面端）
+  // 智能视频+字幕音声截取工坊（仅桌面端）
   if (isDesktopNodeAvailable() && uiState.showSlicerDrawer) {
     const drawer = container.createDiv("curator-char-add-drawer curator-voice-slicer-drawer");
     drawer.createDiv({
       cls: "curator-char-add-title",
-      text: "✂️ 智能视频+字幕台词音声截取工坊（内置首尾防吞字缓冲 Padding · 自动优选简体中文字幕并剔除免责屏幕字）"
+      text: "本地剧集字幕原声截取（内置首尾防吞字缓冲 · 自动优选简体中文字幕）"
     });
     drawer.createDiv({
       cls: "curator-char-add-sub",
-      text: "选择本地剧集视频后自动解析外置 (.ass/.srt) 或 MKV 多语种内嵌软字幕（支持自由切换字幕语言轨道），搜台词关键字即可一键切出原声 MP3 持久保存在本地"
+      text: "选择本地剧集视频后自动解析外置 (.ass/.srt) 或 MKV 多语种内嵌软字幕，检索台词即可一键切出原声 MP3 保存在本地"
     });
 
     // 音声本地保存路径快捷配置与自动迁移栏
     const pathConfigRow = drawer.createDiv("curator-illust-path-config-row");
-    pathConfigRow.createSpan({ text: "📂 音声本地持久保存路径：" });
+    pathConfigRow.createSpan({ text: "音声典藏保存路径：" });
     const voiceFolderInput = pathConfigRow.createEl("input", {
       type: "text",
       cls: "curator-input curator-mono",
-      placeholder: "默认：附件/台词音声库（支持相对 Vault 路径或绝对路径）"
+      placeholder: "默认：附件/音声典藏（支持相对 Vault 路径或绝对路径）"
     });
     voiceFolderInput.style.flex = "1";
-    voiceFolderInput.value = plugin.settings.voiceArchiveFolder || "附件/台词音声库";
+    const curDefaultVoiceFolder = resolveDefaultVoiceArchiveFolder(plugin);
+    voiceFolderInput.value = curDefaultVoiceFolder;
     const commitVoiceFolderMigration = async () => {
-      const oldFolder = String(plugin.settings.voiceArchiveFolder || "附件/台词音声库").trim();
-      const newFolder = String(voiceFolderInput.value || "").trim() || "附件/台词音声库";
+      const oldFolder = resolveDefaultVoiceArchiveFolder(plugin);
+      const newFolder = String(voiceFolderInput.value || "").trim() || oldFolder;
       voiceFolderInput.value = newFolder;
       if (newFolder === oldFolder) return;
       plugin.settings.voiceArchiveFolder = newFolder;
@@ -4320,13 +4582,13 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       if (typeof plugin.migrateVaultFolderPath === "function") {
         await plugin.migrateVaultFolderPath({
           categoryKey: "voiceArchiveFolder",
-          categoryLabel: "台词音声库目录",
+          categoryLabel: "音声典藏目录",
           oldPath: oldFolder,
           newPath: newFolder
         });
         renderVoiceCards();
       } else if (Notice) {
-        new Notice(`📂 音声保存路径已更新为：${newFolder}`);
+        new Notice(`音声典藏路径已更新为：${newFolder}`);
       }
     };
     voiceFolderInput.addEventListener("blur", commitVoiceFolderMigration);
@@ -4339,15 +4601,18 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
 
     // 步骤 1：选择番剧与剧集视频（或直接浏览本地视频） + 设置首尾缓冲秒数
     const step1Row = drawer.createDiv("curator-voice-slicer-row");
+    const activeLocalRoot = String(plugin.settings?.localAnimeRoot || "").trim();
     const animeWithLocal = (vaultAnimeItems || [])
-      .filter((it) => it.downloadPath && it.downloadPath !== "无")
+      .filter((it) => {
+        if (!it || it.isSamplePreviewItem || !it.downloadPath || it.downloadPath === "无") return false;
+        if (activeLocalRoot && !isPathInsideAnimeRoot(activeLocalRoot, it.downloadPath)) return false;
+        return fs.existsSync(it.downloadPath);
+      })
       .map((ani) => {
         let hasSoftSubHint = false;
         try {
-          if (fs.existsSync(ani.downloadPath)) {
-            const entries = fs.readdirSync(ani.downloadPath);
-            hasSoftSubHint = entries.some((f) => /\.(mkv|ass|ssa|srt|vtt)$/i.test(f));
-          }
+          const entries = fs.readdirSync(ani.downloadPath);
+          hasSoftSubHint = entries.some((f) => /\.(mkv|ass|ssa|srt|vtt)$/i.test(f));
         } catch (e) {}
         return Object.assign({}, ani, { _hasSoftSubHint: hasSoftSubHint });
       })
@@ -4358,7 +4623,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
     animeWithLocal.forEach((ani) => {
       const opt = animeSelect.createEl("option", {
         value: ani.downloadPath,
-        text: ani._hasSoftSubHint ? `《${ani.name}》 ✦ 含软字幕/MKV` : `《${ani.name}》`
+        text: ani._hasSoftSubHint ? `《${ani.name}》 · 含软字幕/MKV` : `《${ani.name}》`
       });
       if (uiState.selectedAnimePath === ani.downloadPath) opt.selected = true;
     });
@@ -4368,7 +4633,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
 
     const browseVideoBtn = step1Row.createEl("button", {
       cls: "curator-btn",
-      text: "📁 浏览任意视频..."
+      text: "浏览任意视频..."
     });
 
     // 首尾缓冲控制
@@ -4475,7 +4740,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       if (uiState.loadingSubtitles) {
         cueHost.createDiv({
           cls: "curator-rs-empty",
-          text: "⏳ 正在解析剧集多语种字幕轨道并过滤非对白屏幕字，请稍候..."
+          text: "正在解析剧集多语种字幕轨道并过滤非对白屏幕字，请稍候..."
         });
         return;
       }
@@ -4483,13 +4748,13 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       const filterRow = cueHost.createDiv("curator-voice-cue-filter-row");
       filterRow.createSpan({
         cls: "curator-mono",
-        text: `📄 ${uiState.cueSourceLabel}（有效对白 ${uiState.cues.length} 句）`
+        text: `${uiState.cueSourceLabel}（有效对白 ${uiState.cues.length} 句）`
       });
 
       // 问题 7：当检测到内嵌或外置多条字幕轨道时，提供字幕语言/轨道切换下拉框
       if (Array.isArray(uiState.subtitleTracks) && uiState.subtitleTracks.length > 0) {
         const trackSelectWrap = filterRow.createDiv("curator-voice-pad-group");
-        trackSelectWrap.createSpan({ text: "🌐 字幕轨道:" });
+        trackSelectWrap.createSpan({ text: "字幕轨道:" });
         const subtitleTrackSelect = trackSelectWrap.createEl("select", {
           cls: "curator-sort-select"
         });
@@ -4520,7 +4785,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       const cueKwInput = filterRow.createEl("input", {
         type: "text",
         cls: "curator-input",
-        placeholder: "🔍 搜索字幕台词关键词..."
+        placeholder: "搜索字幕台词关键词..."
       });
       cueKwInput.style.width = "220px";
       cueKwInput.value = uiState.cueKeyword || "";
@@ -4528,7 +4793,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       // 手动加载外部字幕按钮
       const loadExtSubBtn = filterRow.createEl("button", {
         cls: "curator-dl-mini-btn",
-        text: "📄 手动指定字幕文件 (.ass/.srt)"
+        text: "手动指定字幕文件 (.ass/.srt)"
       });
       loadExtSubBtn.onclick = () => {
         const sInput = document.createElement("input");
@@ -4565,7 +4830,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
           cueListBox.createDiv({
             cls: "curator-rs-empty",
             text: uiState.cues.length === 0
-              ? "未检出有效对白字幕轨 · 可在上方切换「🌐 字幕轨道」或点击「📄 手动指定字幕文件 (.ass/.srt)」导入字幕"
+              ? "未检出有效对白字幕轨 · 可在上方切换「字幕轨道」或点击「手动指定字幕文件 (.ass/.srt)」导入字幕"
               : "未找到包含该关键词的字幕行"
           });
           return;
@@ -4584,7 +4849,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
 
           const sliceActionBtn = row.createEl("button", {
             cls: "curator-dl-mini-btn is-accent",
-            text: "✂️ 截取音声"
+            text: "截取音声"
           });
           sliceActionBtn.onclick = async () => {
             sliceActionBtn.disabled = true;
@@ -4602,8 +4867,8 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
                 animeTitle: matchedAnime ? matchedAnime.name : path.basename(path.dirname(uiState.selectedVideoFile)),
                 episode: uiState.selectedEpisodeNum || ""
               });
-              sliceActionBtn.textContent = "✓ 已入库";
-              if (Notice) new Notice(`🎙️ 已截取台词音声：“${cue.text}”`);
+              sliceActionBtn.textContent = "已入库";
+              if (Notice) new Notice(`已截取音声：“${cue.text}”`);
               renderVoiceCards();
             } catch (err) {
               sliceActionBtn.disabled = false;
@@ -4624,23 +4889,115 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
     renderCuesList();
   }
 
+  if (!uiState.activeFilter) uiState.activeFilter = "all";
+  const voiceFilterStrip = container.createDiv("bm8-voice-filter-strip");
   const cardsHost = container.createDiv("curator-voice-cards-host");
+
+  const fmtAudioClock = (sec) => {
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  };
+
+  const syncVoiceFilterStrip = (allVoices) => {
+    voiceFilterStrip.empty();
+    const pills = [{ key: "all", label: "全部音声", count: allVoices.length }];
+    const charCounts = new Map();
+    const animeCounts = new Map();
+    for (const vc of allVoices) {
+      const ch = String(vc.characterName || "").trim();
+      const ani = String(vc.animeTitle || "").trim();
+      if (ch) charCounts.set(ch, (charCounts.get(ch) || 0) + 1);
+      if (ani) animeCounts.set(ani, (animeCounts.get(ani) || 0) + 1);
+    }
+    Array.from(charCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .forEach(([ch, cnt]) => pills.push({ key: `char::${ch}`, label: ch, count: cnt }));
+    Array.from(animeCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .forEach(([ani, cnt]) => pills.push({ key: `anime::${ani}`, label: `《${ani}》`, count: cnt }));
+
+    if (pills.length <= 1) {
+      voiceFilterStrip.style.display = "none";
+      uiState.activeFilter = "all";
+      return;
+    }
+    voiceFilterStrip.style.display = "flex";
+    if (!pills.some((p) => p.key === uiState.activeFilter)) {
+      uiState.activeFilter = "all";
+    }
+    voiceFilterStrip.createSpan({
+      cls: "bm8-liner-head",
+      text: "曲目单"
+    });
+    const trackRail = voiceFilterStrip.createDiv("bm8-liner-rail");
+    trackRail.addEventListener(
+      "wheel",
+      (ev) => {
+        if (trackRail.scrollWidth > trackRail.clientWidth + 4 && Math.abs(ev.deltaY) > Math.abs(ev.deltaX)) {
+          trackRail.scrollLeft += ev.deltaY;
+          ev.preventDefault();
+        }
+      },
+      { passive: false }
+    );
+    pills.forEach((p, idx) => {
+      const btn = trackRail.createEl("button", {
+        cls: `bm8-liner-track ${uiState.activeFilter === p.key ? "is-active" : ""}`,
+        attr: {
+          type: "button",
+          "aria-pressed": String(uiState.activeFilter === p.key)
+        }
+      });
+      btn.createSpan({
+        cls: "bm8-liner-no curator-mono",
+        text: String(idx + 1).padStart(2, "0")
+      });
+      btn.createSpan({ cls: "bm8-liner-label", text: p.label });
+      btn.createSpan({ cls: "bm8-liner-count curator-mono", text: String(p.count) });
+      btn.onclick = () => {
+        if (uiState.activeFilter === p.key) return;
+        const prevIdx = pills.findIndex((x) => x.key === uiState.activeFilter);
+        uiState.activeFilter = p.key;
+        paperSlipSwap(cardsHost, () => renderVoiceCards(), {
+          dir: idx >= prevIdx ? 1 : -1,
+          small: true
+        });
+      };
+    });
+  };
+
   const renderVoiceCards = () => {
     cardsHost.empty();
     const allVoices = Array.isArray(plugin.settings?.voiceCollection)
       ? plugin.settings.voiceCollection
       : [];
+    syncVoiceFilterStrip(allVoices);
     if (voiceCountBadgeEl && voiceCountBadgeEl.isConnected) {
-      voiceCountBadgeEl.textContent = `共典藏 ${allVoices.length} 条台词音声`;
+      voiceCountBadgeEl.textContent = `${allVoices.length} 条音声`;
     }
     if (typeof document !== "undefined") {
       document
         .querySelectorAll('[data-stat-role="workspace-voice-badge"]')
         .forEach((el) => {
-          el.textContent = `音声 ${allVoices.length} 条`;
+          el.textContent = String(allVoices.length);
         });
     }
     const list = allVoices.filter((vc) => {
+      if (uiState.activeFilter && uiState.activeFilter !== "all") {
+        if (uiState.activeFilter.startsWith("char::")) {
+          if (String(vc.characterName || "").trim() !== uiState.activeFilter.slice("char::".length)) {
+            return false;
+          }
+        } else if (uiState.activeFilter.startsWith("anime::")) {
+          if (String(vc.animeTitle || "").trim() !== uiState.activeFilter.slice("anime::".length)) {
+            return false;
+          }
+        }
+      }
       const q = String(uiState.searchQuery || "").trim().toLowerCase();
       if (!q) return true;
       const hay = [vc.quoteText, vc.characterName, vc.animeTitle, vc.timestamp]
@@ -4653,7 +5010,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
     if (list.length === 0) {
       cardsHost.createDiv({
         cls: "curator-rs-empty",
-        text: "尚未收录台词音声 · 点击右上角「✂️ 从本地视频+字幕截取音声」或「✨ 抽取 ACG 名台词」开始典藏！"
+        text: "暂无匹配音声 · 可点击右上角「截取剧集音声」或「抽取名台词」充实典藏。"
       });
       return;
     }
@@ -4661,46 +5018,111 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
     const grid = cardsHost.createDiv("curator-voice-cards-grid");
     list.forEach((vc) => {
       const card = grid.createDiv("curator-voice-card");
+      const rawQuote = String(vc.quoteText || vc.quote || vc.text || "").trim() || "（未附台词片段）";
       const quoteEl = card.createDiv({
         cls: "curator-voice-quote-text",
-        text: `“${vc.quoteText}”`
+        text: `“${rawQuote}”`
       });
-      quoteEl.title = vc.quoteText;
+      quoteEl.title = rawQuote;
 
       const metaRow = card.createDiv("curator-voice-meta-row");
       if (vc.characterName) {
-        metaRow.createSpan({ cls: "curator-voice-chip is-char", text: `👑 ${vc.characterName}` });
+        metaRow.createSpan({ cls: "curator-voice-chip is-char", text: vc.characterName });
       }
       if (vc.animeTitle) {
         metaRow.createSpan({
           cls: "curator-voice-chip is-anime",
-          text: `🎬 《${vc.animeTitle}》${vc.episode ? ` 第${vc.episode}话` : ""}`
+          text: `《${vc.animeTitle}》${vc.episode ? ` 第${vc.episode}话` : ""}`
         });
       }
       if (vc.timestamp) {
-        metaRow.createSpan({ cls: "curator-voice-chip curator-mono", text: `⏱️ ${vc.timestamp}` });
+        metaRow.createSpan({ cls: "curator-voice-chip curator-mono", text: vc.timestamp });
       }
 
       const diskAudio = resolveVoiceAudioDiskState(plugin, vc.audioPath);
       if (diskAudio.exists && diskAudio.playUrl) {
-        const audioWrap = card.createDiv("curator-voice-audio-wrap");
-        const audioEl = audioWrap.createEl("audio", {
-          cls: "curator-voice-audio-player",
-          attr: { controls: "controls", preload: "metadata", src: diskAudio.playUrl }
+        const player = card.createDiv("bm8-voice-player");
+        const audioEl = player.createEl("audio", {
+          attr: { preload: "metadata", src: diskAudio.playUrl }
         });
-        audioEl.style.width = "100%";
-        audioEl.style.height = "34px";
+        audioEl.style.display = "none";
+
+        const playBtn = player.createEl("button", {
+          cls: "bm8-voice-play-btn",
+          attr: { type: "button", "aria-label": "播放或暂停原声", title: "点击播放/暂停台词原声" }
+        });
+        playBtn.appendChild(v07Core.icon("play", 14));
+
+        const scrubWrap = player.createDiv("bm8-voice-scrub-wrap");
+        const scrubTrack = scrubWrap.createDiv("bm8-voice-scrub");
+        const scrubFill = scrubTrack.createDiv("bm8-voice-scrub-fill");
+        const timeRow = scrubWrap.createDiv("bm8-voice-time-row");
+        const timeSpan = timeRow.createSpan({ text: "0:00 / --:--" });
+        const eqBox = timeRow.createSpan({ cls: "bm8-voice-eq" });
+        eqBox.createEl("i");
+        eqBox.createEl("i");
+        eqBox.createEl("i");
+
+        const syncUi = () => {
+          const dur = Number.isFinite(audioEl.duration) && audioEl.duration > 0 ? audioEl.duration : 0;
+          const curT = Number(audioEl.currentTime) || 0;
+          const pct = dur > 0 ? Math.min(100, Math.max(0, (curT / dur) * 100)) : 0;
+          scrubFill.style.width = `${pct.toFixed(1)}%`;
+          timeSpan.textContent = `${fmtAudioClock(curT)} / ${dur > 0 ? fmtAudioClock(dur) : "0:00"}`;
+        };
+        const setPlayingVisual = (playing) => {
+          card.classList.toggle("is-playing", playing);
+          playBtn.empty();
+          playBtn.appendChild(v07Core.icon(playing ? "pause" : "play", 14));
+        };
+
+        audioEl.addEventListener("loadedmetadata", syncUi);
+        audioEl.addEventListener("timeupdate", syncUi);
+        audioEl.addEventListener("play", () => {
+          if (container._activeVoiceAudioEl && container._activeVoiceAudioEl !== audioEl) {
+            try {
+              container._activeVoiceAudioEl.pause();
+            } catch (_) {}
+          }
+          container._activeVoiceAudioEl = audioEl;
+          setPlayingVisual(true);
+        });
+        audioEl.addEventListener("pause", () => setPlayingVisual(false));
+        audioEl.addEventListener("ended", () => {
+          setPlayingVisual(false);
+          scrubFill.style.width = "0%";
+        });
+
+        playBtn.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (audioEl.paused) {
+            audioEl.play().catch(() => {});
+          } else {
+            audioEl.pause();
+          }
+        };
+
+        scrubTrack.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const rect = scrubTrack.getBoundingClientRect();
+          if (!rect.width || !Number.isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+          const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+          audioEl.currentTime = ratio * audioEl.duration;
+          syncUi();
+        };
       } else if (diskAudio.missingFile) {
         const missingRow = card.createDiv("curator-voice-meta-row");
         missingRow.createSpan({
           cls: "curator-voice-chip curator-mono",
-          text: `⚠️ 本地音频文件已被删除或移动 (${vc.audioPath})`
+          text: `本地音频已移除 (${vc.audioPath})`
         });
       } else {
         const reasonRow = card.createDiv("curator-voice-meta-row");
         reasonRow.createSpan({
           cls: "curator-voice-chip",
-          text: vc.audioFallbackReason || "📝 纯文字台词（抽取时未包含原声音频，可绑定本地音频或从剧集截取）"
+          text: vc.audioFallbackReason || "纯文字台词（可点击下方绑定本地音频）"
         });
       }
 
@@ -4708,7 +5130,7 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       if (!diskAudio.exists) {
         const bindAudioBtn = actions.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "🎵 绑定音频"
+          text: "绑定音频"
         });
         bindAudioBtn.title = "为该条台词绑定本地音频文件并复制到音声典藏目录持久保存";
         bindAudioBtn.onclick = () => {
@@ -4728,10 +5150,11 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
             }
             const audioLen = audioBuf ? (audioBuf.byteLength ?? audioBuf.length ?? 0) : 0;
             if (audioBuf && audioLen > 0) {
+              const defaultVoiceFolder = resolveDefaultVoiceArchiveFolder(plugin);
               const { absDir, vaultBase } = ensureDirectoryAbsolute(
                 plugin,
-                plugin.settings?.voiceArchiveFolder,
-                "附件/台词音声库"
+                defaultVoiceFolder,
+                defaultVoiceFolder
               );
               const ext = path.extname(af.name || afPath || "") || ".mp3";
               const targetName = `bound_voice_${Date.now()}${ext}`;
@@ -4744,64 +5167,50 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
                   storedPath = path.relative(vaultBase, absTarget).replace(/\\/g, "/");
                 }
               } else {
-                const relVoiceFolder = normalizeVaultRelPath(plugin.settings?.voiceArchiveFolder || "附件/台词音声库") || "附件/台词音声库";
+                const relVoiceFolder = normalizeVaultRelPath(defaultVoiceFolder) || "附件/音声典藏";
                 storedPath = `${relVoiceFolder}/${targetName}`;
                 await writeVaultBinaryFile(plugin.app, storedPath, audioBuf);
               }
               vc.audioPath = storedPath;
               delete vc.audioFallbackReason;
               await plugin.saveSettings();
-              if (Notice) new Notice(`🎵 已绑定并持久保存音频至：${storedPath}`);
+              if (Notice) new Notice(`已绑定并持久保存音频至：${storedPath}`);
               renderVoiceCards();
             }
           };
           aInput.click();
         };
       }
-      const wandBtn = actions.createEl("button", {
-        cls: "curator-dl-mini-btn",
-        text: "🪄 关联"
-      });
-      wandBtn.onclick = () => {
-        openMagicWandRelationModal(
-          plugin,
-          {
-            type: "voice",
-            id: vc.id,
-            title: vc.characterName || vc.animeTitle || vc.quoteText,
-            animeTitle: vc.animeTitle
-          },
-          vaultAnimeItems,
-          options.wandCallbacks
+
+      const jumpVoiceToSourceVideo = async () => {
+        const matchedAni = (vaultAnimeItems || []).find(
+          (a) => a.name === vc.animeTitle || (a.downloadPath && vc.sourceVideoPath.startsWith(a.downloadPath))
         );
+        if (matchedAni) {
+          await reviewStudioService.launchVideoAtEpisodeAndTimestamp(plugin, matchedAni, {
+            episode: Number(vc.episode) || 1,
+            timestamp: vc.timestamp || ""
+          });
+        } else {
+          await openLocalPathSafely(vc.sourceVideoPath);
+        }
       };
 
-      if (vc.sourceVideoPath && fs.existsSync(vc.sourceVideoPath)) {
+      if (isDesktopNodeAvailable() && vc.sourceVideoPath && fs.existsSync(vc.sourceVideoPath)) {
         const jumpVideoBtn = actions.createEl("button", {
           cls: "curator-dl-mini-btn is-accent",
-          text: "🎬 跳原片时间点"
-        });
-        jumpVideoBtn.onclick = async () => {
-          const matchedAni = (vaultAnimeItems || []).find(
-            (a) => a.name === vc.animeTitle || (a.downloadPath && vc.sourceVideoPath.startsWith(a.downloadPath))
-          );
-          if (matchedAni) {
-            await reviewStudioService.launchVideoAtEpisodeAndTimestamp(plugin, matchedAni, {
-              episode: Number(vc.episode) || 1,
-              timestamp: vc.timestamp || ""
-            });
-          } else {
-            await openLocalPathSafely(vc.sourceVideoPath);
+          attr: {
+            type: "button",
+            title: "调用本地播放器打开原片视频，并自动定位至该台词时间点"
           }
-        };
+        });
+        jumpVideoBtn.createSpan({ text: "跳至原片时间点" });
+        const cue = jumpVideoBtn.createSpan({ cls: "bm8-jump-cue" });
+        cue.appendChild(v07Core.icon("arrowUpRight", 12));
+        jumpVideoBtn.onclick = jumpVoiceToSourceVideo;
       }
 
-      const delBtn = actions.createEl("button", {
-        cls: "curator-dl-mini-btn",
-        text: "× 移除"
-      });
-      delBtn.title = "移除该条台词记录（若关联音声库本地文件且未被其他记录引用，将一并移入系统回收站）";
-      delBtn.onclick = async () => {
+      const removeVoiceRecord = async () => {
         const remaining = (plugin.settings.voiceCollection || []).filter(
           (x) => x.id !== vc.id
         );
@@ -4810,7 +5219,11 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
           const normAudio = normalizeVaultRelPathCaseInsensitive(plugin, vc.audioPath);
           const normVoiceDir = normalizeVaultRelPathCaseInsensitive(
             plugin,
-            plugin.settings?.voiceArchiveFolder || "附件/台词音声库"
+            resolveDefaultVoiceArchiveFolder(plugin)
+          );
+          const normLegacyVoiceDir = normalizeVaultRelPathCaseInsensitive(
+            plugin,
+            "附件/台词音声库"
           );
           const stillUsed = remaining.some(
             (x) =>
@@ -4818,7 +5231,11 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
               x.audioPath &&
               normalizeVaultRelPathCaseInsensitive(plugin, x.audioPath) === normAudio
           );
-          if (!stillUsed && normVoiceDir && normAudio.startsWith(normVoiceDir + "/")) {
+          if (
+            !stillUsed &&
+            ((normVoiceDir && normAudio.startsWith(normVoiceDir + "/")) ||
+              (normLegacyVoiceDir && normAudio.startsWith(normLegacyVoiceDir + "/")))
+          ) {
             await moveLocalFileToTrashSafely(plugin, vc.audioPath);
           }
         }
@@ -4826,7 +5243,18 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
         renderVoiceCards();
       };
 
-      bindMagicWandLongPress(card, () => {
+      const delBtn = actions.createEl("button", {
+        cls: "bm8-voice-trash-btn",
+        attr: {
+          type: "button",
+          "aria-label": "移除该条音声",
+          title: "移除该条音声记录（若关联本地音频且未被其他记录引用，将一并移入回收站）"
+        }
+      });
+      delBtn.appendChild(v07Core.icon("trash", 14));
+      delBtn.onclick = removeVoiceRecord;
+
+      const openVoiceRelations = () => {
         openMagicWandRelationModal(
           plugin,
           {
@@ -4838,7 +5266,33 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
           vaultAnimeItems,
           options.wandCallbacks
         );
+      };
+
+      card.addEventListener("contextmenu", (ev) => {
+        try {
+          if (typeof Menu === "function") {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const menu = new Menu();
+            menu.addItem((mi) => mi.setTitle("查看关联收藏").onClick(openVoiceRelations));
+            if (isDesktopNodeAvailable() && vc.sourceVideoPath && fs.existsSync(vc.sourceVideoPath)) {
+              menu.addItem((mi) => mi.setTitle("跳原片时间点").onClick(jumpVoiceToSourceVideo));
+            }
+            if (diskAudio.exists && vc.audioPath && isDesktopNodeAvailable()) {
+              menu.addItem((mi) =>
+                mi
+                  .setTitle("在资源管理器中定位音频")
+                  .onClick(() => revealLocalFileInExplorer(plugin, vc.audioPath))
+              );
+            }
+            menu.addSeparator();
+            menu.addItem((mi) => mi.setTitle("移除该条音声记录").onClick(removeVoiceRecord));
+            menu.showAtMouseEvent(ev);
+          }
+        } catch (_) {}
       });
+
+      bindMagicWandLongPress(card, openVoiceRelations);
     });
   };
 
@@ -4851,10 +5305,11 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
 async function syncGameMarkdownNote(plugin, game) {
   if (!game || !game.title) return;
   try {
-    const folder = String(plugin.settings?.gameNoteFolder || "游戏笔记").trim() || "游戏笔记";
-    const { absDir } = ensureDirectoryAbsolute(plugin, folder, "游戏笔记");
+    const folder = normalizeVaultRelPath(
+      String(plugin.settings?.gameNoteFolder || "游戏笔记").trim() || "游戏笔记"
+    );
     const safeName = String(game.title).replace(/[\\/:*?"<>|]/g, "_");
-    const absFile = path.join(absDir, `${safeName}.md`);
+    const relFilePath = `${folder}/${safeName}.md`;
 
     const todosMd = Array.isArray(game.todos) && game.todos.length
       ? game.todos
@@ -4873,7 +5328,7 @@ async function syncGameMarkdownNote(plugin, game) {
 
     const guidesMd = Array.isArray(game.strategyUrls) && game.strategyUrls.length
       ? game.strategyUrls
-          .map((g) => `- [${g.title || g.url}](${g.url})${g.remark ? ` — *备注：${g.remark}*` : ""}`)
+          .map((g) => `- [${g.title || g.url}](${g.url})${g.remark ? ` — *备注${g.spoiler ? "（含剧透）" : ""}：${g.remark}*` : ""}`)
           .join("\n")
       : "- 暂无攻略网址";
 
@@ -4888,7 +5343,7 @@ async function syncGameMarkdownNote(plugin, game) {
       "tags: [game, 游戏典藏]",
       "---",
       "",
-      `# 🎮 ${game.title}`,
+      `# ${game.title}`,
       "",
       `- **游玩状态**：${game.status || "在玩"}`,
       `- **个人评分**：${game.score ? `★ ${Number(game.score).toFixed(1)}` : "未评分"}`,
@@ -4896,22 +5351,52 @@ async function syncGameMarkdownNote(plugin, game) {
       `- **当前进度 / 章节**：${game.currentProgress || "初见"}`,
       `- **启动路径**：\`${game.exePath || game.romPath || "未绑定"}\``,
       "",
-      "## 🧭 攻略与资料站导航",
+      "## 攻略与资料站导航",
       guidesMd,
       "",
-      "## ✅ 进度待办清单 (To-Do)",
+      "## 进度待办清单 (To-Do)",
       todosMd,
       "",
-      "## 📝 时间/进度索引游记手札",
+      "## 时间/进度索引游记手札",
       notesMd,
       ""
     ].join("\n");
 
-    fs.writeFileSync(absFile, md, "utf8");
+    const vault = plugin && plugin.app && plugin.app.vault;
+    if (vault && typeof vault.getAbstractFileByPath === "function") {
+      const parts = folder.split("/").filter(Boolean);
+      let accum = "";
+      for (const seg of parts) {
+        accum = accum ? `${accum}/${seg}` : seg;
+        if (!vault.getAbstractFileByPath(accum) && typeof vault.createFolder === "function") {
+          try {
+            await vault.createFolder(accum);
+          } catch (_) {}
+        }
+      }
+      const existing = vault.getAbstractFileByPath(relFilePath);
+      if (existing && typeof vault.modify === "function") {
+        await vault.modify(existing, md);
+        return;
+      } else if (!existing && typeof vault.create === "function") {
+        await vault.create(relFilePath, md);
+        return;
+      }
+    }
+
+    if (isDesktopNodeAvailable()) {
+      const { absDir } = ensureDirectoryAbsolute(plugin, folder, "游戏笔记");
+      const absFile = path.join(absDir, `${safeName}.md`);
+      fs.writeFileSync(absFile, md, "utf8");
+    }
   } catch (e) {}
 }
 
 function launchLocalGameProcess(plugin, game, onSessionEnd) {
+  if (isMobileEnv()) {
+    if (Notice) new Notice("手机端不支持启动本地 .exe 程序，可使用「开始计时」或「手动补录时长」记录游玩时间。");
+    return;
+  }
   const mode = game.launchMode || "exe";
   const exePath = String(game.exePath || "").trim();
   const romPath = String(game.romPath || "").trim();
@@ -4925,10 +5410,17 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     return;
   }
 
-  // 支持 steam:// 协议链接
+  // 支持 steam:// 协议链接（同步启动游玩计时器，游玩结束后一键结算时长）
   if (/^steam:\/\//i.test(exePath)) {
     window.open(exePath);
-    if (Notice) new Notice(`🎮 已通过 Steam 启动《${game.title}》`);
+    try {
+      const gs = require("./game-stats-and-groups-service.js");
+      if (!gs.getActiveGameTimer(plugin, game.id)) {
+        gs.startActiveGameTimer(plugin, game);
+      }
+    } catch (_) {}
+    if (Notice) new Notice(`已通过 Steam 启动《${game.title}》，已开启游玩计时（结束后点「结束并记入」即可结算时长）`);
+    if (typeof onSessionEnd === "function") onSessionEnd();
     return;
   }
 
@@ -4938,6 +5430,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
   }
 
   const startTs = Date.now();
+  const startIso = new Date(startTs).toISOString();
   const args = mode === "emulator" && romPath ? [...customArgs, romPath] : customArgs;
   try {
     const child = spawn(exePath, args, {
@@ -4949,14 +5442,29 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     if (Notice) {
       new Notice(
         mode === "emulator"
-          ? `🕹️ 已通过模拟器启动《${game.title}》，正在自动记录游玩时长...`
-          : `🎮 已启动《${game.title}》，正在自动记录游玩时长...`
+          ? `已通过模拟器启动《${game.title}》，正在自动记录游玩时长...`
+          : `已启动《${game.title}》，正在自动记录游玩时长...`
       );
     }
     child.on("close", async () => {
-      const elapsedHours = Math.max(0.05, (Date.now() - startTs) / 3600000);
+      const endIso = new Date().toISOString();
+      const elapsedMin = Math.max(1, Math.round((Date.now() - startTs) / 60000));
+      const elapsedHours = Number((elapsedMin / 60).toFixed(2));
+      if (!Array.isArray(game.playSessions)) game.playSessions = [];
+      game.playSessions.unshift({
+        id: `ses-${Date.now().toString(36)}`,
+        start: startIso,
+        startedAt: startIso,
+        endedAt: endIso,
+        minutes: elapsedMin,
+        durationHours: elapsedHours,
+        source: "auto",
+        mode: "auto",
+        note: mode === "emulator" ? "模拟器自动记录" : ""
+      });
       game.playHours = Number(((Number(game.playHours) || 0) + elapsedHours).toFixed(2));
-      game.lastPlayedAt = new Date().toISOString();
+      game.lastPlayedAt = endIso;
+      if (!game.firstPlayedAt) game.firstPlayedAt = startIso;
       await syncGameMarkdownNote(plugin, game);
       await plugin.saveSettings();
       if (typeof onSessionEnd === "function") onSessionEnd();
@@ -4966,217 +5474,1189 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
   }
 }
 
-function openGameDetailAndNotesModal(plugin, game, onRefresh) {
+/* ───────────── Bangumi 游戏封面与词条候选检索器 ───────────── */
+function extractBgmGameDeveloper(sub) {
+  if (!sub || typeof sub !== "object") return "";
+  if (Array.isArray(sub.infobox)) {
+    const keys = ["开发", "开发商", "制作", "发行", "开发团队", "メーカー", "ブランド"];
+    for (const k of keys) {
+      const hit = sub.infobox.find((row) => row && row.key === k);
+      if (hit && hit.value) {
+        if (typeof hit.value === "string") return hit.value.trim();
+        if (Array.isArray(hit.value)) {
+          const vals = hit.value.map((x) => (typeof x === "string" ? x : x?.v || "")).filter(Boolean);
+          if (vals.length) return vals.join(" / ");
+        }
+      }
+    }
+  }
+  return "";
+}
+
+async function searchBangumiGameSubjects(keyword, limit = 12) {
+  const cleanKw = String(keyword || "").trim();
+  if (!cleanKw) return [];
+  const res = await requestUrl({
+    url: `https://api.bgm.tv/v0/search/subjects?limit=${Math.max(1, Math.min(20, limit))}`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": BGM_USER_AGENT
+    },
+    body: JSON.stringify({ keyword: cleanKw, filter: { type: [4] } })
+  });
+  const list = Array.isArray(res?.json?.data) ? res.json.data : [];
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const qNorm = norm(cleanKw);
+
+  return list
+    .map((sub, idx) => {
+      const nameCn = String(sub?.name_cn || "").trim();
+      const nameOrig = String(sub?.name || "").trim();
+      const displayTitle = nameCn || nameOrig || "未命名游戏";
+      const isExact =
+        (nameCn && norm(nameCn) === qNorm) ||
+        (nameOrig && norm(nameOrig) === qNorm);
+      const coverUrl =
+        sub?.images?.large || sub?.images?.common || sub?.images?.medium || "";
+      const thumbUrl =
+        sub?.images?.common || sub?.images?.medium || sub?.images?.large || "";
+      const score = Number.isFinite(Number(sub?.rating?.score)) && Number(sub.rating.score) > 0
+        ? Number(Number(sub.rating.score).toFixed(1))
+        : null;
+      const dateStr = String(sub?.date || "").trim();
+      const platform = String(sub?.platform || "").trim();
+      const developer = extractBgmGameDeveloper(sub);
+      const summary = String(sub?.summary || "").replace(/\s+/g, " ").trim();
+      return {
+        id: sub?.id,
+        idx,
+        displayTitle,
+        nameCn,
+        nameOrig,
+        isExact,
+        coverUrl,
+        thumbUrl,
+        score,
+        dateStr,
+        platform,
+        developer,
+        summary
+      };
+    })
+    .sort((a, b) => {
+      if (a.isExact !== b.isExact) return a.isExact ? -1 : 1;
+      return a.idx - b.idx;
+    });
+}
+
+async function renderBangumiGameCandidatePicker(opts = {}) {
+  const {
+    mountEl,
+    initialQuery = "",
+    getCurrentTitle = () => "",
+    triggerBtn = null,
+    onPickCoverOnly,
+    onPickFullEntry
+  } = opts;
+  if (!mountEl) return;
+
+  mountEl.style.display = "block";
+  mountEl.empty();
+
+  const wrap = mountEl.createDiv("curator-game-bgm-picker");
+  const head = wrap.createDiv("curator-game-bgm-picker-head");
+  const titleEl = head.createDiv({
+    cls: "curator-game-bgm-picker-title",
+    text: "Bangumi 游戏封面与词条候选（点击选用，不会擅自篡改您的标题）"
+  });
+  const closeBtn = head.createEl("button", {
+    cls: "curator-dl-mini-btn",
+    text: "收起候选"
+  });
+  closeBtn.onclick = () => {
+    mountEl.empty();
+    mountEl.style.display = "none";
+  };
+
+  const bar = wrap.createDiv("curator-game-bgm-picker-bar");
+  const kwIn = bar.createEl("input", {
+    type: "text",
+    cls: "curator-input",
+    placeholder: "输入检索词（仅用于搜索 Bangumi 候选，不直接修改上方游戏标题）..."
+  });
+  kwIn.value = initialQuery;
+  const searchAgainBtn = bar.createEl("button", {
+    cls: "curator-dl-mini-btn is-accent",
+    text: "重新检索"
+  });
+
+  const listHost = wrap.createDiv("curator-game-bgm-results-host");
+
+  const runQuery = async (kw) => {
+    const q = String(kw || "").trim();
+    if (!q) return;
+    listHost.empty();
+    listHost.createDiv({
+      cls: "curator-game-bgm-meta",
+      text: `正在从 Bangumi 检索「${q}」的游戏词条候选...`
+    });
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = "检索中...";
+    }
+    searchAgainBtn.disabled = true;
+
+    try {
+      const candidates = await searchBangumiGameSubjects(q, 12);
+      listHost.empty();
+      if (candidates.length === 0) {
+        listHost.createDiv({
+          cls: "curator-game-bgm-meta",
+          text: `未检索到与「${q}」匹配的 Bangumi 游戏词条，您可换用日文/英文原名重新检索，或直接填写本地封面路径。`
+        });
+        titleEl.textContent = `Bangumi 游戏检索结果（0 条）`;
+        return;
+      }
+
+      titleEl.textContent = `Bangumi 游戏候选（共 ${candidates.length} 条 · 同名原作已优先置顶）`;
+      const grid = listHost.createDiv("curator-game-bgm-grid");
+
+      for (const cand of candidates) {
+        const card = grid.createDiv(
+          `curator-game-bgm-card ${cand.isExact ? "is-exact" : ""}`
+        );
+        const thumbBox = card.createDiv("curator-game-bgm-thumb");
+        if (cand.thumbUrl) {
+          const img = thumbBox.createEl("img", {
+            attr: { src: cand.thumbUrl, alt: cand.displayTitle }
+          });
+          img.onerror = () => {
+            img.remove();
+            thumbBox.empty();
+            thumbBox.appendChild(v07Core.icon("gamepad", 18));
+          };
+        } else {
+          thumbBox.appendChild(v07Core.icon("gamepad", 18));
+        }
+
+        const info = card.createDiv("curator-game-bgm-info");
+        const nameRow = info.createDiv("curator-game-bgm-name-row");
+        nameRow.createSpan({
+          cls: "curator-game-bgm-name",
+          text: cand.displayTitle
+        });
+        if (cand.isExact) {
+          nameRow.createSpan({
+            cls: "curator-game-bgm-exact-pill",
+            text: "精准同名"
+          });
+        }
+        if (cand.nameOrig && cand.nameOrig !== cand.displayTitle) {
+          info.createDiv({
+            cls: "curator-game-bgm-orig",
+            text: cand.nameOrig
+          });
+        }
+
+        const metaParts = [
+          cand.platform,
+          cand.dateStr,
+          cand.score ? `BGM ★${cand.score}` : "",
+          cand.developer
+        ].filter(Boolean);
+        if (metaParts.length > 0) {
+          info.createDiv({
+            cls: "curator-game-bgm-meta",
+            text: metaParts.join(" · ")
+          });
+        } else if (cand.summary) {
+          info.createDiv({
+            cls: "curator-game-bgm-orig",
+            text: cand.summary.slice(0, 46)
+          });
+        }
+
+        const actRow = info.createDiv("curator-game-bgm-actions");
+        const curTypedTitle = String(getCurrentTitle() || "").trim();
+        const hasDifferentUserTitle =
+          Boolean(curTypedTitle) && curTypedTitle !== cand.displayTitle;
+
+        const coverOnlyBtn = actRow.createEl("button", {
+          cls: `curator-dl-mini-btn ${hasDifferentUserTitle ? "is-primary" : "is-accent"}`,
+          text: "仅用此封面"
+        });
+        coverOnlyBtn.title = `仅采用该词条的高清封面图，保留您当前填写的游戏标题「${
+          curTypedTitle || cand.displayTitle
+        }」不变`;
+        coverOnlyBtn.onclick = () => {
+          if (typeof onPickCoverOnly === "function") onPickCoverOnly(cand);
+          mountEl.empty();
+          mountEl.style.display = "none";
+        };
+
+        const fullBtn = actRow.createEl("button", {
+          cls: `curator-dl-mini-btn ${hasDifferentUserTitle ? "" : "is-primary"}`,
+          text: "套用词条与封面"
+        });
+        fullBtn.title = `将游戏标题设为《${cand.displayTitle}》并同步填入封面与参考信息`;
+        fullBtn.onclick = () => {
+          if (typeof onPickFullEntry === "function") onPickFullEntry(cand);
+          mountEl.empty();
+          mountEl.style.display = "none";
+        };
+      }
+    } catch (err) {
+      listHost.empty();
+      listHost.createDiv({
+        cls: "curator-game-bgm-meta",
+        text: `检索 Bangumi 游戏词条失败：${err?.message || "请检查网络连接"}`
+      });
+    } finally {
+      if (triggerBtn) {
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = "自动获取 Bangumi 游戏封面";
+      }
+      searchAgainBtn.disabled = false;
+    }
+  };
+
+  searchAgainBtn.onclick = () => runQuery(kwIn.value);
+  kwIn.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.isComposing) {
+      ev.preventDefault();
+      runQuery(kwIn.value);
+    }
+  });
+
+  await runQuery(initialQuery);
+}
+
+function openGameEditMetadataModal(plugin, game, onRefresh) {
+  if (!game) return;
   const modal = new Modal(plugin.app);
   modal.onOpen = () => {
     const { contentEl } = modal;
     contentEl.empty();
-    contentEl.addClass("curator-game-detail-modal");
-    contentEl.style.maxWidth = "780px";
+    contentEl.addClass("curator-game-edit-modal");
 
-    if (!Array.isArray(game.todos)) game.todos = [];
-    if (!Array.isArray(game.playNotes)) game.playNotes = [];
-    if (!Array.isArray(game.strategyUrls)) game.strategyUrls = [];
+    contentEl.createEl("h3", { text: `修改《${game.title || "未命名游戏"}》封面与信息` });
 
-    const head = contentEl.createDiv("curator-game-modal-head");
-    head.createEl("h2", { text: `🎮 《${game.title}》· 进度手札、待办与攻略台` });
-
-    // 顶部进度与时长快速更新栏
-    const progRow = contentEl.createDiv("curator-game-prog-strip");
-    progRow.createSpan({ text: "📍 当前章节/进度锚点：" });
-    const progInput = progRow.createEl("input", {
-      type: "text",
-      cls: "curator-input",
-      placeholder: "例如：共通线 第3章 / 洛琪希线 / 二周目..."
-    });
-    progInput.style.width = "210px";
-    progInput.value = game.currentProgress || "";
-
-    progRow.createSpan({ text: "⏱️ 游玩时长(h)：" });
-    const hoursInput = progRow.createEl("input", {
-      type: "number",
-      cls: "curator-input curator-mono"
-    });
-    hoursInput.style.width = "76px";
-    hoursInput.step = "0.5";
-    hoursInput.value = String(game.playHours ?? 0);
-
-    const saveProgBtn = progRow.createEl("button", {
-      cls: "curator-dl-mini-btn is-accent",
-      text: "✓ 更新进度锚点"
-    });
-    saveProgBtn.onclick = async () => {
-      game.currentProgress = progInput.value.trim();
-      game.playHours = Math.max(0, Number(hoursInput.value) || 0);
-      await syncGameMarkdownNote(plugin, game);
-      await plugin.saveSettings();
-      if (Notice) new Notice("已更新当前游戏进度锚点与时长！");
-      if (typeof onRefresh === "function") onRefresh();
+    const makeField = (label, placeholder, initialVal) => {
+      const row = contentEl.createDiv("curator-game-edit-row");
+      row.createDiv({ cls: "curator-game-edit-label", text: label });
+      const inp = row.createEl("input", {
+        type: "text",
+        cls: "curator-input",
+        placeholder
+      });
+      inp.value = initialVal || "";
+      return { row, inp };
     };
 
-    // 区块 1：🧭 自定义攻略网址与备注导航
-    const guideSec = contentEl.createDiv("curator-game-modal-sec");
-    guideSec.createEl("h3", { text: "🧭 攻略与资料站导航（支持附带防剧透/章节备注）" });
-    const guideAddRow = guideSec.createDiv("curator-game-inline-add");
-    const gTitleInput = guideAddRow.createEl("input", {
-      type: "text",
-      cls: "curator-input",
-      placeholder: "攻略标题（如：全分支好感度攻略）"
+    const titleField = makeField("游戏名称", "例如：千恋＊万花 / 英雄联盟", game.title);
+    const pickerRow = contentEl.createDiv("curator-char-draft-row");
+    const fetchBtn = pickerRow.createEl("button", {
+      cls: "curator-btn",
+      text: "多数据源搜索词条与封面（Bangumi / VNDB / Steam / 月幕）"
     });
-    const gUrlInput = guideAddRow.createEl("input", {
-      type: "text",
-      cls: "curator-input",
-      placeholder: "攻略网址 https://..."
-    });
-    const gRemarkInput = guideAddRow.createEl("input", {
-      type: "text",
-      cls: "curator-input",
-      placeholder: "备注说明（如：第三章迷宫走法，微剧透）"
-    });
-    const addGuideBtn = guideAddRow.createEl("button", {
-      cls: "curator-btn is-primary",
-      text: "+ 添加攻略"
-    });
-    addGuideBtn.onclick = async () => {
-      const url = gUrlInput.value.trim();
-      if (!url) return;
-      game.strategyUrls.push({
-        id: `guide-${Date.now()}`,
-        title: gTitleInput.value.trim() || url,
-        url,
-        remark: gRemarkInput.value.trim()
+    const pickerMount = contentEl.createDiv("curator-game-bgm-picker-mount bm7-root");
+    pickerMount.style.display = "none";
+
+    const coverField = makeField("封面图片 URL 或本地路径", "https://... 或本地图片路径", game.coverUrl);
+    const devField = makeField("开发商 / 社团（可选）", "例如：Yuzusoft / Riot Games", game.developer);
+    const exeField = makeField(
+      "启动程序路径 / Steam 链接（可选）",
+      ".exe / .lnk / steam://rungameid/...",
+      game.exePath
+    );
+
+    fetchBtn.onclick = () => {
+      const q = titleField.inp.value.trim() || game.title || "";
+      pickerMount.style.display = "block";
+      const v07Game = require("./v07-game-ui.js");
+      const v07Adapters = require("./v07-adapters.js");
+      const gameApi = require("./game-multisource-api.js");
+      v07Game.renderGameSourceSearch(pickerMount, {
+        initialQuery: q,
+        source: "all",
+        search: v07Adapters.searchGameSourcesAdapter,
+        onPickCover: async (cand) => {
+          const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+          if (enriched.coverUrl || cand.cover) coverField.inp.value = enriched.coverUrl || cand.cover;
+          if ((enriched.developer || cand.developer) && !devField.inp.value.trim()) {
+            devField.inp.value = enriched.developer || cand.developer;
+          }
+          pickerMount.style.display = "none";
+          pickerMount.empty();
+        },
+        onPickFull: async (cand) => {
+          const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+          if (cand.title) titleField.inp.value = cand.title;
+          if (enriched.coverUrl || cand.cover) coverField.inp.value = enriched.coverUrl || cand.cover;
+          if (enriched.developer || cand.developer) devField.inp.value = enriched.developer || cand.developer;
+          if (cand.source === "steam" && enriched.steamAppId && !exeField.inp.value.trim()) {
+            exeField.inp.value = `steam://rungameid/${enriched.steamAppId}`;
+          }
+          pickerMount.style.display = "none";
+          pickerMount.empty();
+        }
       });
-      await syncGameMarkdownNote(plugin, game);
-      await plugin.saveSettings();
-      modal.onOpen();
-      if (typeof onRefresh === "function") onRefresh();
     };
 
-    const guideList = guideSec.createDiv("curator-game-sublist");
-    game.strategyUrls.forEach((g) => {
-      const row = guideList.createDiv("curator-game-subrow");
-      const linkBtn = row.createEl("a", {
-        cls: "curator-game-guide-link",
-        text: `↗ ${g.title || g.url}`,
-        href: g.url
-      });
-      linkBtn.onclick = (ev) => {
-        ev.preventDefault();
-        window.open(g.url, "_blank");
-      };
-      if (g.remark) {
-        row.createSpan({ cls: "curator-game-guide-remark", text: `💡 备注：${g.remark}` });
-      }
-      const del = row.createEl("button", { cls: "curator-dl-mini-btn", text: "×" });
-      del.onclick = async () => {
-        game.strategyUrls = game.strategyUrls.filter((x) => x.id !== g.id);
-        await syncGameMarkdownNote(plugin, game);
-        await plugin.saveSettings();
-        modal.onOpen();
-      };
-    });
-
-    // 区块 2：✅ 绑定时间/进度的待办清单 (To-Do)
-    const todoSec = contentEl.createDiv("curator-game-modal-sec");
-    todoSec.createEl("h3", { text: "✅ 进度待办清单（自动记录当前游玩小时数与章节锚点）" });
-    const todoAddRow = todoSec.createDiv("curator-game-inline-add");
-    const todoInput = todoAddRow.createEl("input", {
-      type: "text",
-      cls: "curator-input",
-      placeholder: "输入待办目标（如：收集水王级魔杖支线 / 回收 Bad End CG）..."
-    });
-    todoInput.style.flex = "1";
-    const addTodoBtn = todoAddRow.createEl("button", {
-      cls: "curator-btn is-primary",
-      text: "+ 记入待办"
-    });
-    addTodoBtn.onclick = async () => {
-      const txt = todoInput.value.trim();
-      if (!txt) return;
-      const curH = Number(hoursInput.value) || Number(game.playHours) || 0;
-      const curProg = progInput.value.trim() || game.currentProgress || "进行中";
-      game.todos.unshift({
-        id: `todo-${Date.now()}`,
-        text: txt,
-        done: false,
-        progressTag: `${curH}h · ${curProg}`,
-        timeLabel: new Date().toLocaleString("zh-CN", { hour12: false })
-      });
-      await syncGameMarkdownNote(plugin, game);
+    const foot = contentEl.createDiv("curator-char-draft-actions");
+    const cancelBtn = foot.createEl("button", { cls: "curator-btn", text: "取消" });
+    cancelBtn.onclick = () => modal.close();
+    const saveBtn = foot.createEl("button", { cls: "curator-btn is-primary", text: "保存修改" });
+    saveBtn.onclick = async () => {
+      game.title = titleField.inp.value.trim() || game.title || "未命名游戏";
+      game.coverUrl = coverField.inp.value.trim();
+      game.developer = devField.inp.value.trim();
+      game.exePath = exeField.inp.value.trim();
       await plugin.saveSettings();
-      modal.onOpen();
-      if (typeof onRefresh === "function") onRefresh();
-    };
-
-    const todoList = todoSec.createDiv("curator-game-sublist");
-    game.todos.forEach((td) => {
-      const row = todoList.createDiv(`curator-game-subrow ${td.done ? "is-done" : ""}`);
-      const cb = row.createEl("input", { type: "checkbox" });
-      cb.checked = Boolean(td.done);
-      cb.onchange = async () => {
-        td.done = cb.checked;
-        await syncGameMarkdownNote(plugin, game);
-        await plugin.saveSettings();
-        modal.onOpen();
-        if (typeof onRefresh === "function") onRefresh();
-      };
-      row.createSpan({ cls: "curator-game-prog-badge curator-mono", text: `[${td.progressTag}]` });
-      row.createSpan({ cls: "curator-game-todo-text", text: td.text });
-      const del = row.createEl("button", { cls: "curator-dl-mini-btn", text: "×" });
-      del.onclick = async () => {
-        game.todos = game.todos.filter((x) => x.id !== td.id);
-        await syncGameMarkdownNote(plugin, game);
-        await plugin.saveSettings();
-        modal.onOpen();
-      };
-    });
-
-    // 区块 3：📝 时间/进度索引游记手札
-    const noteSec = contentEl.createDiv("curator-game-modal-sec");
-    noteSec.createEl("h3", { text: "📝 时间 / 进度索引游记手札（同步写入本地 Markdown 游戏笔记）" });
-    const noteAddRow = noteSec.createDiv("curator-game-inline-add");
-    const noteInput = noteAddRow.createEl("textarea", {
-      cls: "curator-textarea",
-      placeholder: "记录此刻的剧情感想、配装思路或名场面吐槽（将自动打上当前游玩时长与章节戳）..."
-    });
-    noteInput.rows = 2;
-    noteInput.style.flex = "1";
-    const addNoteBtn = noteAddRow.createEl("button", {
-      cls: "curator-btn is-primary",
-      text: "✒️ 记入手札"
-    });
-    addNoteBtn.onclick = async () => {
-      const txt = noteInput.value.trim();
-      if (!txt) return;
-      const curH = Number(hoursInput.value) || Number(game.playHours) || 0;
-      const curProg = progInput.value.trim() || game.currentProgress || "初见";
-      game.playNotes.unshift({
-        id: `gnote-${Date.now()}`,
-        text: txt,
-        progressTag: `${curH}h · ${curProg}`,
-        timeLabel: new Date().toLocaleString("zh-CN", { hour12: false })
-      });
       await syncGameMarkdownNote(plugin, game);
-      await plugin.saveSettings();
-      modal.onOpen();
+      modal.close();
       if (typeof onRefresh === "function") onRefresh();
+      if (Notice) new Notice(`已更新《${game.title}》的封面与游戏信息`);
     };
-
-    const noteList = noteSec.createDiv("curator-game-sublist");
-    game.playNotes.forEach((n) => {
-      const row = noteList.createDiv("curator-game-subrow");
-      row.createSpan({ cls: "curator-game-prog-badge curator-mono", text: `[${n.progressTag}]` });
-      row.createSpan({ cls: "curator-game-todo-text", text: n.text });
-      row.createSpan({ cls: "curator-game-note-time curator-mono", text: n.timeLabel || "" });
-      const del = row.createEl("button", { cls: "curator-dl-mini-btn", text: "×" });
-      del.onclick = async () => {
-        game.playNotes = game.playNotes.filter((x) => x.id !== n.id);
-        await syncGameMarkdownNote(plugin, game);
-        await plugin.saveSettings();
-        modal.onOpen();
-      };
-    });
   };
+  modal.open();
+}
+
+/* ───────────── 游戏手札：数据规整与格式化辅助（卡片与弹窗共用） ───────────── */
+const GAME_STATUS_ORDER = ["在玩", "通关", "全成就", "想玩", "搁置"];
+
+function formatGameHours(h) {
+  const n = Number(h);
+  if (!Number.isFinite(n) || n <= 0) return "0h";
+  return `${Math.round(n * 10) / 10}h`;
+}
+
+function parseGameJournalTime(entry) {
+  if (!entry) return null;
+  if (entry.createdAt) {
+    const d = new Date(entry.createdAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (entry.timeLabel) {
+    const d = new Date(String(entry.timeLabel).replace(/-/g, "/"));
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+/**
+ * 兼容两代数据：新字段 { hours, chapter, createdAt } 与旧字段 { progressTag: "3h · 第3章", timeLabel }
+ */
+function normalizeGameJournalEntry(entry) {
+  const e = entry || {};
+  let hours =
+    e.hours !== undefined && e.hours !== null && e.hours !== "" && Number.isFinite(Number(e.hours))
+      ? Number(e.hours)
+      : null;
+  let chapter = typeof e.chapter === "string" ? e.chapter.trim() : "";
+  const tag = String(e.progressTag || "").trim();
+  if (tag && (hours === null || !chapter)) {
+    const m = tag.match(/^([\d.]+)\s*h(?:\s*[·・]\s*(.*))?$/i);
+    if (m) {
+      if (hours === null && Number.isFinite(Number(m[1]))) hours = Number(m[1]);
+      if (!chapter && m[2]) chapter = m[2].trim();
+    } else if (!chapter) {
+      chapter = tag;
+    }
+  }
+  return { hours, chapter, time: parseGameJournalTime(e), rawTime: String(e.timeLabel || "") };
+}
+
+function formatGameJournalWhen(date, fallback = "") {
+  if (!date) return fallback;
+  const pad = (n) => String(n).padStart(2, "0");
+  const hm = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const now = new Date();
+  const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((dayStart(now) - dayStart(date)) / 86400000);
+  if (diffDays === 0) return `今天 ${hm}`;
+  if (diffDays === 1) return `昨天 ${hm}`;
+  if (date.getFullYear() === now.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
+/** 以游戏当前进度与时长生成一枚记录戳（同时写入新旧两代字段，旧版 Markdown 同步无需改动） */
+function buildGameJournalStamp(game) {
+  const hours = Math.round(Math.max(0, Number(game.playHours) || 0) * 10) / 10;
+  const chapter = String(game.currentProgress || "").trim();
+  const now = new Date();
+  return {
+    hours,
+    chapter,
+    createdAt: now.toISOString(),
+    progressTag: chapter ? `${hours}h · ${chapter}` : `${hours}h`,
+    timeLabel: now.toLocaleString("zh-CN", { hour12: false })
+  };
+}
+
+function describeGameJournalStamp(meta) {
+  const parts = [];
+  if (meta && meta.chapter) parts.push(meta.chapter);
+  if (meta && meta.hours !== null && meta.hours !== undefined) parts.push(formatGameHours(meta.hours));
+  return parts.join(" · ");
+}
+
+function getGameNoteRelPath(plugin, game) {
+  const folder = String(plugin.settings?.gameNoteFolder || "游戏笔记").trim() || "游戏笔记";
+  const safeName = String(game.title || "").replace(/[\\/:*?"<>|]/g, "_");
+  return `${folder}/${safeName}.md`;
+}
+
+function getGameJournalUiState(plugin) {
+  if (!plugin.__gameJournalUi) plugin.__gameJournalUi = { tabByGame: {}, drafts: {}, showDone: false };
+  return plugin.__gameJournalUi;
+}
+
+function getGuideHostname(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch (_) {
+    return "";
+  }
+}
+
+function normalizeGuideUrl(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(s)) return s;
+  if (/^[\w-]+(\.[\w-]+)+/.test(s)) return `https://${s}`;
+  return s;
+}
+
+/**
+ * 游戏手札弹窗：抬头（身份 + 可直接改的进度/时长/评分）· 手札时间线（主栏）· 待办与攻略（侧栏）
+ * - 宽屏双栏各自滚动；窄屏 / 移动端自动折叠为「手札 / 待办 / 攻略」三段切换
+ * - 所有修改就地局部刷新，不整窗重绘，滚动位置与输入焦点不丢失
+ * @param {object} [openOptions] { tab: "notes" | "todos" | "guides" }
+ */
+function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) {
+  if (!game) return;
+  if (!Array.isArray(game.todos)) game.todos = [];
+  if (!Array.isArray(game.playNotes)) game.playNotes = [];
+  if (!Array.isArray(game.strategyUrls)) game.strategyUrls = [];
+  const seed = Date.now().toString(36);
+  const ensureIds = (list, prefix) =>
+    list.forEach((it, i) => {
+      if (it && typeof it === "object" && !it.id) it.id = `${prefix}-${seed}-${i}`;
+    });
+  ensureIds(game.todos, "todo");
+  ensureIds(game.playNotes, "gnote");
+  ensureIds(game.strategyUrls, "guide");
+
+  const ui = getGameJournalUiState(plugin);
+  const TABS = [
+    { key: "notes", label: "手札" },
+    { key: "todos", label: "待办" },
+    { key: "guides", label: "攻略" }
+  ];
+  const isTabKey = (k) => TABS.some((t) => t.key === k);
+  let activeTab = isTabKey(openOptions.tab) ? openOptions.tab : ui.tabByGame[game.id] || "notes";
+  if (!isTabKey(activeTab)) activeTab = "notes";
+
+  const modal = new Modal(plugin.app);
+  let dirty = false;
+  let saveChain = Promise.resolve();
+  let savedEl = null;
+  let savedTimer = null;
+  let composerEl = null;
+  let todoSettleTimer = null;
+
+  const flashSaved = (text, isError = false) => {
+    if (!savedEl || !savedEl.isConnected) return;
+    savedEl.textContent = text;
+    savedEl.classList.toggle("is-error", Boolean(isError));
+    savedEl.classList.add("is-visible");
+    if (savedTimer) window.clearTimeout(savedTimer);
+    savedTimer = window.setTimeout(() => {
+      if (savedEl && savedEl.isConnected) savedEl.classList.remove("is-visible");
+    }, 1800);
+  };
+
+  const persist = (hint = "已保存") => {
+    dirty = true;
+    saveChain = saveChain.then(async () => {
+      try {
+        await plugin.saveSettings();
+        await syncGameMarkdownNote(plugin, game);
+        flashSaved(hint);
+      } catch (err) {
+        console.error("[bangumi-manager] 游戏手札保存失败", err);
+        flashSaved("保存失败，请稍后重试", true);
+      }
+    });
+    return saveChain;
+  };
+
+  const isImeEnter = (ev) => ev.isComposing || ev.keyCode === 229;
+
+  const autoGrow = (ta, max = 260) => {
+    if (!ta || !ta.isConnected) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight + 2, max)}px`;
+  };
+
+  /** 两步确认删除：第一次点击变为「确认删除」，2.6 秒内再点才执行 */
+  const armDelete = (btn, onConfirm) => {
+    const label = btn.textContent;
+    let armed = false;
+    let timer = null;
+    btn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!armed) {
+        armed = true;
+        btn.classList.add("is-armed");
+        btn.textContent = "确认删除";
+        timer = window.setTimeout(() => {
+          armed = false;
+          if (btn.isConnected) {
+            btn.classList.remove("is-armed");
+            btn.textContent = label;
+          }
+        }, 2600);
+        return;
+      }
+      if (timer) window.clearTimeout(timer);
+      onConfirm();
+    };
+  };
+
+  /** 就地编辑：把文本节点临时换成输入框，保存/取消后由 onDone 局部重绘 */
+  const beginInlineEdit = (hostEl, initial, { multiline = false, onSave, onDone }) => {
+    if (hostEl.dataset.editing === "1") return;
+    hostEl.dataset.editing = "1";
+    hostEl.empty();
+    hostEl.addClass("is-editing");
+    const field = multiline
+      ? hostEl.createEl("textarea", { cls: "curator-gj-edit-field" })
+      : hostEl.createEl("input", { type: "text", cls: "curator-gj-edit-field" });
+    field.value = initial;
+    let finished = false;
+    const finish = (save) => {
+      if (finished) return;
+      finished = true;
+      const v = field.value.trim();
+      if (save && v && v !== initial) onSave(v);
+      onDone();
+    };
+    if (multiline) {
+      const bar = hostEl.createDiv("curator-gj-edit-bar");
+      const cancelBtn = bar.createEl("button", { cls: "curator-gj-btn is-quiet", text: "取消" });
+      const okBtn = bar.createEl("button", { cls: "curator-gj-btn is-primary", text: "保存" });
+      cancelBtn.onclick = () => finish(false);
+      okBtn.onclick = () => finish(true);
+      field.addEventListener("input", () => autoGrow(field, 360));
+      window.requestAnimationFrame(() => autoGrow(field, 360));
+    } else {
+      field.addEventListener("blur", () => finish(true));
+    }
+    field.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" || isImeEnter(ev)) return;
+      if (!multiline || ev.ctrlKey || ev.metaKey) {
+        ev.preventDefault();
+        finish(true);
+      }
+    });
+    field.focus();
+    try {
+      field.setSelectionRange(field.value.length, field.value.length);
+    } catch (_) {}
+  };
+
+  const renderEmpty = (host, title, desc, variant = "") => {
+    const box = host.createDiv(`curator-gj-empty ${variant}`.trim());
+    if (variant === "is-hero") box.createDiv("curator-gj-empty-sheet");
+    box.createDiv({ cls: "curator-gj-empty-title", text: title });
+    box.createDiv({ cls: "curator-gj-empty-desc", text: desc });
+    return box;
+  };
+
+  modal.onOpen = () => {
+    const { contentEl, modalEl } = modal;
+    modalEl.addClass("curator-gj-shell");
+    contentEl.empty();
+    contentEl.addClass("curator-gj");
+
+    /* ── 抬头：封面 · 标题 · 状态 · 进度 / 时长 / 评分 ── */
+    const head = contentEl.createDiv("curator-gj-head");
+    const coverWrap = head.createDiv("curator-gj-cover");
+    const coverSrc = resolveLocalOrVaultImageUrl(plugin, game.coverUrl);
+    if (coverSrc) {
+      const img = coverWrap.createEl("img", { attr: { src: coverSrc, alt: "" } });
+      img.onerror = () => {
+        img.remove();
+        coverWrap.createDiv({ cls: "curator-gj-cover-fallback", text: String(game.title || "?").slice(0, 1) });
+      };
+    } else {
+      coverWrap.createDiv({ cls: "curator-gj-cover-fallback", text: String(game.title || "?").slice(0, 1) });
+    }
+
+    const ident = head.createDiv("curator-gj-ident");
+    ident.createDiv({ cls: "curator-gj-title", text: game.title || "未命名游戏" });
+    const sub = ident.createDiv("curator-gj-sub");
+    const statusWrap = sub.createDiv("curator-gj-status-wrap");
+    const statusSel = statusWrap.createEl("select", { cls: "curator-gj-status" });
+    statusSel.setAttribute("aria-label", "游玩状态");
+    const curStatus = game.status || "在玩";
+    const statusOptions = GAME_STATUS_ORDER.includes(curStatus)
+      ? GAME_STATUS_ORDER
+      : [curStatus, ...GAME_STATUS_ORDER];
+    statusOptions.forEach((s) => statusSel.createEl("option", { value: s, text: s }));
+    statusSel.value = curStatus;
+    statusWrap.dataset.status = curStatus;
+    statusSel.onchange = () => {
+      game.status = statusSel.value;
+      statusWrap.dataset.status = game.status;
+      persist("状态已更新");
+    };
+    if (game.developer) sub.createSpan({ cls: "curator-gj-dev", text: game.developer });
+
+    const stats = ident.createDiv("curator-gj-stats");
+    const makeStat = (label, attrs, suffix, extraCls = "") => {
+      const cell = stats.createEl("label", { cls: `curator-gj-stat ${extraCls}`.trim() });
+      cell.createSpan({ cls: "curator-gj-stat-label", text: label });
+      const box = cell.createDiv("curator-gj-stat-box");
+      const input = box.createEl("input", { cls: "curator-gj-stat-input", attr: attrs });
+      if (suffix) box.createSpan({ cls: "curator-gj-stat-suffix", text: suffix });
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && !isImeEnter(ev)) {
+          ev.preventDefault();
+          input.blur();
+        }
+      });
+      return input;
+    };
+
+    const progInput = makeStat(
+      "进度",
+      { type: "text", placeholder: "还没开始", spellcheck: "false", title: "当前章节 / 路线，新记录会自动带上它" },
+      "",
+      "is-wide"
+    );
+    progInput.value = game.currentProgress || "";
+    progInput.onchange = () => {
+      const v = progInput.value.trim();
+      progInput.value = v;
+      if (v === String(game.currentProgress || "")) return;
+      game.currentProgress = v;
+      updateComposerStamp();
+      persist("进度已更新");
+    };
+
+    const hoursInput = makeStat("时长", { type: "number", min: "0", step: "0.5", inputmode: "decimal" }, "小时");
+    hoursInput.addClass("curator-mono");
+    hoursInput.value = String(Math.round((Number(game.playHours) || 0) * 100) / 100);
+    hoursInput.onchange = () => {
+      const v = Math.max(0, Math.round((Number(hoursInput.value) || 0) * 100) / 100);
+      hoursInput.value = String(v);
+      if (v === Number(game.playHours || 0)) return;
+      game.playHours = v;
+      updateComposerStamp();
+      persist("时长已更新");
+    };
+
+    const scoreInput = makeStat("评分", { type: "number", min: "0", max: "10", step: "0.5", inputmode: "decimal" }, "/ 10");
+    scoreInput.addClass("curator-mono");
+    scoreInput.value = game.score !== undefined && game.score !== null && game.score !== "" ? String(game.score) : "";
+    scoreInput.onchange = () => {
+      if (scoreInput.value.trim() === "") {
+        scoreInput.value = game.score !== undefined && game.score !== null ? String(game.score) : "";
+        return;
+      }
+      const v = Math.min(10, Math.max(0, Math.round((Number(scoreInput.value) || 0) * 10) / 10));
+      scoreInput.value = String(v);
+      if (v === Number(game.score)) return;
+      game.score = v;
+      persist("评分已更新");
+    };
+
+    const headActions = head.createDiv("curator-gj-head-actions");
+    if (String(game.exePath || "").trim() && isDesktopNodeAvailable()) {
+      const playBtn = headActions.createEl("button", {
+        cls: "curator-gj-btn is-primary curator-gj-play",
+        text: game.launchMode === "emulator" ? "▶ 用模拟器启动" : "▶ 继续游戏"
+      });
+      playBtn.title = "结束游戏后会自动累加本次时长";
+      playBtn.onclick = () =>
+        launchLocalGameProcess(plugin, game, () => {
+          if (hoursInput.isConnected) {
+            hoursInput.value = String(Math.round((Number(game.playHours) || 0) * 100) / 100);
+            updateComposerStamp();
+            flashSaved("已累加本次游玩时长");
+          }
+          if (typeof onRefresh === "function") onRefresh();
+        });
+    }
+
+    /* ── 窄屏分段切换（宽屏下隐藏，三块同时可见） ── */
+    const tabBar = contentEl.createDiv({ cls: "curator-gj-tabs", attr: { role: "tablist" } });
+    const tabBtns = {};
+    TABS.forEach((t) => {
+      const b = tabBar.createEl("button", { cls: "curator-gj-tab", attr: { role: "tab", type: "button" } });
+      b.createSpan({ text: t.label });
+      b.createSpan({ cls: "curator-gj-tab-count curator-mono" });
+      b.onclick = () => setTab(t.key);
+      tabBtns[t.key] = b;
+    });
+
+    const bodyEl = contentEl.createDiv("curator-gj-body");
+    const mainCol = bodyEl.createDiv("curator-gj-main");
+    const sideCol = bodyEl.createDiv("curator-gj-side");
+
+    const panelCounts = {};
+    const makePanel = (host, key, title) => {
+      const panel = host.createDiv({ cls: "curator-gj-panel", attr: { "data-panel": key } });
+      const ph = panel.createDiv("curator-gj-panel-head");
+      ph.createSpan({ cls: "curator-gj-panel-title", text: title });
+      panelCounts[key] = ph.createSpan({ cls: "curator-gj-panel-count curator-mono" });
+      return { panel, head: ph };
+    };
+
+    const setTab = (key) => {
+      activeTab = key;
+      ui.tabByGame[game.id] = key;
+      contentEl.dataset.tab = key;
+      Object.entries(tabBtns).forEach(([k, b]) => {
+        b.classList.toggle("is-active", k === key);
+        b.setAttribute("aria-selected", k === key ? "true" : "false");
+      });
+      bodyEl.scrollTop = 0;
+    };
+
+    const refreshCounts = () => {
+      const counts = {
+        notes: game.playNotes.length,
+        todos: game.todos.filter((t) => t && !t.done).length,
+        guides: game.strategyUrls.length
+      };
+      Object.entries(counts).forEach(([k, n]) => {
+        const tabCount = tabBtns[k] && tabBtns[k].querySelector(".curator-gj-tab-count");
+        if (tabCount) tabCount.textContent = n ? String(n) : "";
+        if (panelCounts[k]) {
+          panelCounts[k].textContent =
+            k === "todos" ? (n ? `${n} 项未完成` : "") : n ? String(n) : "";
+        }
+      });
+    };
+
+    /* ── 手札（主栏）：输入框 + 按进度分组的时间线 ── */
+    const { panel: notesPanel } = makePanel(mainCol, "notes", "手札");
+    const composer = notesPanel.createDiv("curator-gj-composer");
+    const noteInput = composer.createEl("textarea", {
+      cls: "curator-gj-composer-input",
+      attr: { rows: "2", placeholder: "玩到哪儿、想到什么，随手记一笔…" }
+    });
+    noteInput.value = ui.drafts[game.id] || "";
+    composerEl = noteInput;
+    const composerBar = composer.createDiv("curator-gj-composer-bar");
+    composerBar.createSpan({ cls: "curator-gj-composer-label", text: "标记" });
+    const stampEl = composerBar.createSpan({ cls: "curator-gj-composer-stamp" });
+    if (!isMobileEnv()) {
+      const isMac = /Mac|iPhone|iPad/i.test(String(navigator.platform || navigator.userAgent || ""));
+      composerBar.createSpan({ cls: "curator-gj-composer-hint", text: isMac ? "⌘ Enter" : "Ctrl Enter" });
+    }
+    const submitNoteBtn = composerBar.createEl("button", { cls: "curator-gj-btn is-primary", text: "记下" });
+
+    const syncSubmitState = () => {
+      submitNoteBtn.disabled = !noteInput.value.trim();
+    };
+    function updateComposerStamp() {
+      if (!stampEl.isConnected) return;
+      const text = describeGameJournalStamp({
+        chapter: String(game.currentProgress || "").trim(),
+        hours: Math.max(0, Number(game.playHours) || 0)
+      });
+      stampEl.textContent = text;
+      stampEl.title = `新手札会标记为：${text}（改抬头里的进度和时长即可调整）`;
+    }
+
+    const notesList = notesPanel.createDiv("curator-gj-timeline");
+    const renderNotes = (opts = {}) => {
+      notesList.empty();
+      if (!game.playNotes.length) {
+        renderEmpty(
+          notesList,
+          "还没有手札",
+          "剧情感想、配装思路、想吐槽的名场面都可以记在这里。每条会自动带上当时的进度和时长，回头翻看就像一份游玩日记。",
+          "is-hero"
+        );
+        return;
+      }
+      let group = null;
+      let lastChapter = null;
+      game.playNotes.forEach((n) => {
+        if (!n || typeof n !== "object") return;
+        const meta = normalizeGameJournalEntry(n);
+        const chapterKey = meta.chapter || "";
+        if (group === null || chapterKey !== lastChapter) {
+          group = notesList.createDiv("curator-gj-chapter");
+          group.createDiv({ cls: "curator-gj-chapter-title", text: chapterKey || "未标进度" });
+          lastChapter = chapterKey;
+        }
+        const entry = group.createDiv("curator-gj-note");
+        if (opts.freshId && opts.freshId === n.id) entry.addClass("is-fresh");
+        const metaRow = entry.createDiv("curator-gj-note-meta");
+        if (meta.hours !== null) {
+          metaRow.createSpan({ cls: "curator-gj-note-hours curator-mono", text: formatGameHours(meta.hours) });
+        }
+        metaRow.createSpan({ cls: "curator-gj-note-when", text: formatGameJournalWhen(meta.time, meta.rawTime) });
+        if (n.editedAt) metaRow.createSpan({ cls: "curator-gj-note-edited", text: "已编辑" });
+        const tools = metaRow.createDiv("curator-gj-row-tools");
+        const textEl = entry.createDiv({ cls: "curator-gj-note-text", text: n.text || "" });
+        const editBtn = tools.createEl("button", { cls: "curator-gj-tool", text: "编辑" });
+        editBtn.onclick = () =>
+          beginInlineEdit(textEl, n.text || "", {
+            multiline: true,
+            onSave: (v) => {
+              n.text = v;
+              n.editedAt = new Date().toISOString();
+              persist("已修改");
+            },
+            onDone: () => renderNotes()
+          });
+        const delBtn = tools.createEl("button", { cls: "curator-gj-tool is-danger", text: "删除" });
+        armDelete(delBtn, () => {
+          game.playNotes = game.playNotes.filter((x) => x !== n);
+          renderNotes();
+          refreshCounts();
+          persist("已删除");
+        });
+      });
+    };
+
+    const submitNote = () => {
+      const text = noteInput.value.trim();
+      if (!text) {
+        noteInput.focus();
+        return;
+      }
+      const id = `gnote-${Date.now()}`;
+      game.playNotes.unshift({ id, text, ...buildGameJournalStamp(game) });
+      noteInput.value = "";
+      ui.drafts[game.id] = "";
+      autoGrow(noteInput);
+      syncSubmitState();
+      renderNotes({ freshId: id });
+      refreshCounts();
+      persist("已记下");
+      mainCol.scrollTop = 0;
+    };
+    submitNoteBtn.onclick = submitNote;
+    noteInput.addEventListener("input", () => {
+      ui.drafts[game.id] = noteInput.value;
+      autoGrow(noteInput);
+      syncSubmitState();
+    });
+    noteInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey) && !isImeEnter(ev)) {
+        ev.preventDefault();
+        submitNote();
+      }
+    });
+
+    /* ── 待办（侧栏上）：一行速记 + 勾选后沉入「已完成」 ── */
+    const { panel: todosPanel } = makePanel(sideCol, "todos", "待办");
+    const todoAdd = todosPanel.createDiv("curator-gj-quick-add");
+    const todoInput = todoAdd.createEl("input", {
+      type: "text",
+      cls: "curator-gj-quick-input",
+      attr: { placeholder: "添加待办，回车确认" }
+    });
+    const todoAddBtn = todoAdd.createEl("button", { cls: "curator-gj-btn", text: "添加" });
+    const todoList = todosPanel.createDiv("curator-gj-checklist");
+
+    const scheduleTodoSettle = () => {
+      if (todoSettleTimer) window.clearTimeout(todoSettleTimer);
+      todoSettleTimer = window.setTimeout(() => {
+        todoSettleTimer = null;
+        if (todoList.isConnected) {
+          renderTodos();
+          refreshCounts();
+        }
+      }, 420);
+    };
+
+    const renderTodoRow = (host, td) => {
+      const row = host.createDiv(`curator-gj-todo${td.done ? " is-done" : ""}`);
+      const check = row.createEl("label", { cls: "curator-gj-check" });
+      const cb = check.createEl("input", { type: "checkbox" });
+      cb.checked = Boolean(td.done);
+      cb.setAttribute("aria-label", td.text || "待办");
+      check.createSpan({ cls: "curator-gj-check-mark" });
+      const main = row.createDiv("curator-gj-todo-main");
+      const textEl = main.createDiv({ cls: "curator-gj-todo-text", text: td.text || "" });
+      const stamp = describeGameJournalStamp(normalizeGameJournalEntry(td));
+      if (stamp) main.createDiv({ cls: "curator-gj-todo-meta", text: `记于 ${stamp}` });
+
+      const startEdit = () =>
+        beginInlineEdit(textEl, td.text || "", {
+          multiline: false,
+          onSave: (v) => {
+            td.text = v;
+            persist("已修改");
+          },
+          onDone: () => renderTodos()
+        });
+      textEl.addEventListener("dblclick", startEdit);
+
+      const tools = row.createDiv("curator-gj-row-tools");
+      const editBtn = tools.createEl("button", { cls: "curator-gj-tool", text: "编辑" });
+      editBtn.onclick = startEdit;
+      const delBtn = tools.createEl("button", { cls: "curator-gj-tool is-danger", text: "删除" });
+      armDelete(delBtn, () => {
+        game.todos = game.todos.filter((x) => x !== td);
+        renderTodos();
+        refreshCounts();
+        persist("已删除");
+      });
+
+      cb.onchange = () => {
+        td.done = cb.checked;
+        if (td.done) td.doneAt = new Date().toISOString();
+        else delete td.doneAt;
+        row.classList.toggle("is-done", td.done);
+        scheduleTodoSettle();
+        persist(td.done ? "已完成一项" : "已移回待办");
+      };
+    };
+
+    function renderTodos() {
+      todoList.empty();
+      if (!game.todos.length) {
+        renderEmpty(todoList, "没有待办", "想回收的结局、还没拿的收集品、下次要打的 Boss，都可以先记在这里。");
+        return;
+      }
+      const open = game.todos.filter((t) => t && !t.done);
+      const done = game.todos.filter((t) => t && t.done);
+      open.forEach((td) => renderTodoRow(todoList, td));
+      if (!open.length) todoList.createDiv({ cls: "curator-gj-allclear", text: "都完成了 ✓" });
+      if (done.length) {
+        const fold = todoList.createEl("details", { cls: "curator-gj-done-fold" });
+        fold.open = Boolean(ui.showDone);
+        fold.createEl("summary", { text: `已完成 ${done.length}` });
+        fold.addEventListener("toggle", () => {
+          ui.showDone = fold.open;
+        });
+        done.forEach((td) => renderTodoRow(fold, td));
+      }
+    }
+
+    const addTodo = () => {
+      const text = todoInput.value.trim();
+      if (!text) {
+        todoInput.focus();
+        return;
+      }
+      game.todos.unshift({ id: `todo-${Date.now()}`, text, done: false, ...buildGameJournalStamp(game) });
+      todoInput.value = "";
+      renderTodos();
+      refreshCounts();
+      persist("已添加待办");
+      todoInput.focus();
+    };
+    todoAddBtn.onclick = addTodo;
+    todoInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !isImeEnter(ev)) {
+        ev.preventDefault();
+        addTodo();
+      }
+    });
+
+    /* ── 攻略（侧栏下）：链接列表 + 折叠的添加 / 编辑表单 ── */
+    const { panel: guidesPanel, head: guidesHead } = makePanel(sideCol, "guides", "攻略");
+    guidesHead.addClass("has-action");
+    const addGuideBtn = guidesHead.createEl("button", {
+      cls: "curator-gj-tool curator-gj-panel-action",
+      text: "＋ 添加链接"
+    });
+
+    const guideForm = guidesPanel.createDiv("curator-gj-guide-form");
+    guideForm.style.display = "none";
+    const gUrl = guideForm.createEl("input", {
+      type: "text",
+      cls: "curator-gj-quick-input",
+      attr: { placeholder: "链接，例如 https://wiki.biligame.com/…", inputmode: "url", spellcheck: "false" }
+    });
+    const TITLE_PH = "标题（可不填，默认显示网站名）";
+    const gTitle = guideForm.createEl("input", {
+      type: "text",
+      cls: "curator-gj-quick-input",
+      attr: { placeholder: TITLE_PH }
+    });
+    const gRemark = guideForm.createEl("input", {
+      type: "text",
+      cls: "curator-gj-quick-input",
+      attr: { placeholder: "备注（可选），比如：第三章迷宫走法" }
+    });
+    const formRow = guideForm.createDiv("curator-gj-guide-form-row");
+    const spoilerLabel = formRow.createEl("label", { cls: "curator-gj-spoiler-toggle" });
+    const gSpoiler = spoilerLabel.createEl("input", { type: "checkbox" });
+    spoilerLabel.createSpan({ text: "备注含剧透，默认遮住" });
+    const gCancel = formRow.createEl("button", { cls: "curator-gj-btn is-quiet", text: "取消" });
+    const gSave = formRow.createEl("button", { cls: "curator-gj-btn is-primary", text: "保存" });
+
+    let editingGuide = null;
+    const openGuideForm = (g = null) => {
+      editingGuide = g;
+      gUrl.value = g ? g.url || "" : "";
+      gTitle.value = g && g.title && g.title !== g.url && g.title !== getGuideHostname(g.url) ? g.title : "";
+      gRemark.value = g ? g.remark || "" : "";
+      gSpoiler.checked = Boolean(g && g.spoiler);
+      gUrl.classList.remove("is-invalid");
+      gTitle.placeholder = TITLE_PH;
+      gSave.textContent = g ? "保存修改" : "保存";
+      guideForm.style.display = "";
+      addGuideBtn.style.visibility = "hidden";
+      gUrl.focus();
+    };
+    const closeGuideForm = () => {
+      editingGuide = null;
+      guideForm.style.display = "none";
+      addGuideBtn.style.visibility = "";
+    };
+    addGuideBtn.onclick = () => openGuideForm(null);
+    gCancel.onclick = closeGuideForm;
+    gUrl.addEventListener("input", () => {
+      gUrl.classList.remove("is-invalid");
+      const host = getGuideHostname(normalizeGuideUrl(gUrl.value));
+      gTitle.placeholder = host ? `标题（不填则显示 ${host}）` : TITLE_PH;
+    });
+    const saveGuide = () => {
+      const url = normalizeGuideUrl(gUrl.value);
+      if (!url) {
+        gUrl.classList.add("is-invalid");
+        gUrl.focus();
+        return;
+      }
+      const payload = {
+        title: gTitle.value.trim() || getGuideHostname(url) || url,
+        url,
+        remark: gRemark.value.trim()
+      };
+      const wasEditing = Boolean(editingGuide);
+      if (editingGuide) {
+        Object.assign(editingGuide, payload);
+        if (gSpoiler.checked) editingGuide.spoiler = true;
+        else delete editingGuide.spoiler;
+      } else {
+        const record = { id: `guide-${Date.now()}`, ...payload };
+        if (gSpoiler.checked) record.spoiler = true;
+        game.strategyUrls.push(record);
+      }
+      closeGuideForm();
+      renderGuides();
+      refreshCounts();
+      persist(wasEditing ? "已修改" : "已添加攻略");
+    };
+    gSave.onclick = saveGuide;
+    [gUrl, gTitle, gRemark].forEach((inp) =>
+      inp.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && !isImeEnter(ev)) {
+          ev.preventDefault();
+          saveGuide();
+        }
+      })
+    );
+
+    const guideList = guidesPanel.createDiv("curator-gj-guide-list");
+    function renderGuides() {
+      guideList.empty();
+      if (!game.strategyUrls.length) {
+        renderEmpty(guideList, "还没收藏攻略", "把常看的 Wiki、攻略帖、地图站放在这里，玩的时候一点就开。");
+        return;
+      }
+      game.strategyUrls.forEach((g) => {
+        if (!g || typeof g !== "object") return;
+        const row = guideList.createDiv("curator-gj-guide");
+        const bodyBox = row.createDiv("curator-gj-guide-body");
+        const host = getGuideHostname(g.url);
+        const titleText = g.title || host || g.url || "未命名链接";
+        const link = bodyBox.createEl("a", { cls: "curator-gj-guide-link", href: g.url || "#" });
+        link.createSpan({ cls: "curator-gj-guide-title", text: titleText });
+        link.title = g.url || "";
+        link.onclick = (ev) => {
+          ev.preventDefault();
+          if (g.url) window.open(g.url, "_blank");
+        };
+        const subLine = bodyBox.createDiv("curator-gj-guide-sub");
+        if (host && host !== titleText) subLine.createSpan({ cls: "curator-gj-guide-host", text: host });
+        if (g.remark) {
+          if (subLine.childElementCount) subLine.createSpan({ cls: "curator-gj-guide-sep", text: "·" });
+          const remark = subLine.createSpan("curator-gj-guide-remark");
+          if (g.spoiler) {
+            remark.addClass("is-spoiler");
+            remark.textContent = "含剧透的备注 · 点按显示";
+            remark.onclick = () => {
+              const reveal = !remark.classList.contains("is-revealed");
+              remark.classList.toggle("is-revealed", reveal);
+              remark.textContent = reveal ? g.remark : "含剧透的备注 · 点按显示";
+            };
+          } else {
+            remark.textContent = g.remark;
+          }
+        }
+        if (!subLine.childElementCount) subLine.remove();
+        const tools = row.createDiv("curator-gj-row-tools");
+        const editBtn = tools.createEl("button", { cls: "curator-gj-tool", text: "编辑" });
+        editBtn.onclick = () => openGuideForm(g);
+        const delBtn = tools.createEl("button", { cls: "curator-gj-tool is-danger", text: "删除" });
+        armDelete(delBtn, () => {
+          game.strategyUrls = game.strategyUrls.filter((x) => x !== g);
+          if (editingGuide === g) closeGuideForm();
+          renderGuides();
+          refreshCounts();
+          persist("已删除");
+        });
+      });
+    }
+
+    /* ── 底栏：Markdown 同步位置 · 保存反馈 · 打开笔记 ── */
+    const foot = contentEl.createDiv("curator-gj-foot");
+    const relPath = getGameNoteRelPath(plugin, game);
+    foot.createSpan({ cls: "curator-gj-foot-path", text: `自动同步到 ${relPath}` });
+    savedEl = foot.createSpan({ cls: "curator-gj-saved", attr: { "aria-live": "polite" } });
+    const openNoteBtn = foot.createEl("button", { cls: "curator-gj-btn is-quiet", text: "在笔记中打开" });
+    openNoteBtn.onclick = async () => {
+      await saveChain;
+      await syncGameMarkdownNote(plugin, game);
+      modal.close();
+      try {
+        const f = plugin.app?.vault?.getAbstractFileByPath?.(relPath);
+        if (f) await plugin.app.workspace.getLeaf(true).openFile(f);
+        else await plugin.app.workspace.openLinkText(relPath, "", true);
+      } catch (_) {
+        if (Notice) new Notice(`没有找到游戏笔记：${relPath}`);
+      }
+    };
+
+    setTab(activeTab);
+    updateComposerStamp();
+    syncSubmitState();
+    renderNotes();
+    renderTodos();
+    renderGuides();
+    refreshCounts();
+    window.requestAnimationFrame(() => autoGrow(noteInput));
+  };
+
+  modal.onClose = () => {
+    if (composerEl) ui.drafts[game.id] = composerEl.value;
+    composerEl = null;
+    if (savedTimer) window.clearTimeout(savedTimer);
+    if (todoSettleTimer) window.clearTimeout(todoSettleTimer);
+    savedEl = null;
+    modal.contentEl.empty();
+    if (dirty && typeof onRefresh === "function") {
+      saveChain.then(() => onRefresh());
+    }
+  };
+
   modal.open();
 }
 
@@ -5196,93 +6676,96 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
     uiState.searchQuery = options.searchQuery;
   }
 
-  const games = Array.isArray(plugin.settings?.gameCollection) ? plugin.settings.gameCollection : [];
-
-  // 顶栏
-  const header = container.createDiv("curator-char-header");
-  const titleSide = header.createDiv("curator-char-header-left");
-  titleSide.createDiv({ cls: "curator-char-kicker", text: "LOCAL GAME & EMULATOR ARCHIVE" });
-  const hRow = titleSide.createDiv("curator-char-title-row");
-  hRow.createEl("h2", { cls: "curator-char-title", text: "🎮 游戏典藏" });
-  const gameCountBadgeEl = hRow.createSpan({
-    cls: "curator-char-count-badge curator-mono",
-    text: `共收录 ${games.length} 部游戏`
-  });
-
-  const actionSide = header.createDiv("curator-char-header-right");
-  const searchInput = actionSide.createEl("input", {
-    type: "text",
-    cls: "curator-input curator-char-search-input",
-    placeholder: "搜索游戏名称 / 进度 / 开发商..."
-  });
-  searchInput.value = uiState.searchQuery || "";
-  searchInput.oninput = () => {
-    uiState.searchQuery = searchInput.value;
-    renderGameGrid();
+  const syncBadge = () => {
+    const allGames = Array.isArray(plugin.settings?.gameCollection)
+      ? plugin.settings.gameCollection
+      : [];
+    if (typeof document !== "undefined") {
+      document
+        .querySelectorAll('[data-stat-role="workspace-game-badge"]')
+        .forEach((el) => {
+          el.textContent = String(allGames.length);
+        });
+    }
   };
+  syncBadge();
 
-  const addGameBtn = actionSide.createEl("button", {
-    cls: `curator-btn ${uiState.showAddDrawer ? "is-active" : "is-primary"}`,
-    text: uiState.showAddDrawer ? "▴ 收起游戏收录台" : "＋ 录入本地游戏 / 模拟器 ROM"
-  });
-  addGameBtn.onclick = () => {
-    uiState.showAddDrawer = !uiState.showAddDrawer;
-    renderGameLibraryWorkspace(plugin, container, vaultAnimeItems, options);
-  };
+  const v07Game = require("./v07-game-ui.js");
+  const v07Adapters = require("./v07-adapters.js");
+  const gameApi = require("./game-multisource-api.js");
+  const mobile = isMobileEnv();
 
   if (uiState.showAddDrawer) {
-    const drawer = container.createDiv("curator-char-add-drawer");
-    drawer.createDiv({
+    const drawer = container.createDiv("curator-char-add-drawer bm7-add-game-drawer");
+    const topBar = drawer.createDiv("curator-char-draft-row");
+    topBar.style.justifyContent = "space-between";
+    topBar.style.alignItems = "center";
+    topBar.createDiv({
       cls: "curator-char-add-title",
-      text: "🕹️ 本地游戏与模拟器 ROM 收录台（支持 Bangumi 游戏封面自动寻访）"
+      text: "添加游戏（支持 Bangumi / VNDB / Steam / 月幕 多数据源搜索词条与封面）"
     });
+    const closeDrawerBtn = topBar.createEl("button", {
+      cls: "curator-btn",
+      text: "收起"
+    });
+    closeDrawerBtn.onclick = () => {
+      uiState.showAddDrawer = false;
+      renderGameLibraryWorkspace(plugin, container, vaultAnimeItems, options);
+    };
+
+    const gsrcMount = drawer.createDiv("curator-game-bgm-picker-mount");
+    gsrcMount.style.marginBottom = "10px";
 
     const row1 = drawer.createDiv("curator-char-draft-row");
     const titleIn = row1.createEl("input", {
       type: "text",
       cls: "curator-input",
-      placeholder: "游戏名称（如：无职转生 ～到了异世界就拿出真本事～ Quest of Memories）"
+      placeholder: "游戏名称（可直接填写，或在上方多源搜索一键套用）"
     });
     titleIn.style.flex = "2";
 
+    const statusSelect = row1.createEl("select", { cls: "curator-sort-select" });
+    ["在玩", "想玩", "通关", "全成就", "搁置"].forEach((st) =>
+      statusSelect.createEl("option", { value: st, text: `状态：${st}` })
+    );
+
     const modeSelect = row1.createEl("select", { cls: "curator-sort-select" });
     [
-      { val: "exe", text: "💻 PC 直装游戏 (.exe / .lnk / Steam)" },
-      { val: "emulator", text: "🕹️ 模拟器 + ROM 镜像启动" }
+      { val: "exe", text: "PC 直装 / Steam / 主机记录" },
+      { val: "emulator", text: "模拟器 + ROM 镜像启动" }
     ].forEach((m) => modeSelect.createEl("option", { value: m.val, text: m.text }));
-
-    const bgmFetchBtn = row1.createEl("button", {
-      cls: "curator-btn",
-      text: "🔍 自动获取 Bangumi 游戏封面"
-    });
+    if (mobile) modeSelect.style.display = "none";
 
     const row2 = drawer.createDiv("curator-char-draft-row");
+    if (mobile) row2.style.display = "none";
     const exeIn = row2.createEl("input", {
       type: "text",
       cls: "curator-input",
-      placeholder: "游戏主程序 .exe 路径 / 模拟器 .exe 路径 / steam://rungameid/..."
+      placeholder: "启动程序 .exe 路径 / 模拟器路径 / steam://rungameid/...（可选）"
     });
     exeIn.style.flex = "2";
-    const browseExeBtn = row2.createEl("button", {
-      cls: "curator-btn",
-      text: "📁 浏览程序..."
-    });
-    browseExeBtn.onclick = () => {
-      const fi = document.createElement("input");
-      fi.type = "file";
-      fi.accept = ".exe,.lnk,.bat,.cmd,.url";
-      fi.onchange = () => {
-        const f = fi.files && fi.files[0];
-        const fPath = getNativeFilePath(f);
-        if (fPath) {
-          exeIn.value = fPath;
-          if (!titleIn.value.trim()) {
-            titleIn.value = path.basename(path.dirname(fPath));
+    if (!mobile) {
+      const browseExeBtn = row2.createEl("button", {
+        cls: "curator-btn",
+        text: "浏览程序..."
+      });
+      browseExeBtn.onclick = () => {
+        const fi = document.createElement("input");
+        fi.type = "file";
+        fi.accept = ".exe,.lnk,.bat,.cmd,.url";
+        fi.onchange = () => {
+          const f = fi.files && fi.files[0];
+          const fPath = getNativeFilePath(f);
+          if (fPath) {
+            exeIn.value = fPath;
+            if (!titleIn.value.trim()) {
+              titleIn.value = path.basename(path.dirname(fPath));
+            }
           }
-        }
+        };
+        fi.click();
       };
-      fi.click();
-    };
+    }
 
     const rowRom = drawer.createDiv("curator-char-draft-row");
     rowRom.style.display = "none";
@@ -5292,35 +6775,37 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
       placeholder: "ROM 镜像文件路径（如 .nsp / .xci / .iso / .gba / .nds）"
     });
     romIn.style.flex = "2";
-    const browseRomBtn = rowRom.createEl("button", {
-      cls: "curator-btn",
-      text: "📁 浏览 ROM..."
-    });
-    browseRomBtn.onclick = () => {
-      const fi = document.createElement("input");
-      fi.type = "file";
-      fi.onchange = () => {
-        const f = fi.files && fi.files[0];
-        const fPath = getNativeFilePath(f);
-        if (fPath) {
-          romIn.value = fPath;
-          if (!titleIn.value.trim()) {
-            titleIn.value = path.basename(fPath, path.extname(fPath));
+    if (!mobile) {
+      const browseRomBtn = rowRom.createEl("button", {
+        cls: "curator-btn",
+        text: "浏览 ROM..."
+      });
+      browseRomBtn.onclick = () => {
+        const fi = document.createElement("input");
+        fi.type = "file";
+        fi.onchange = () => {
+          const f = fi.files && fi.files[0];
+          const fPath = getNativeFilePath(f);
+          if (fPath) {
+            romIn.value = fPath;
+            if (!titleIn.value.trim()) {
+              titleIn.value = path.basename(fPath, path.extname(fPath));
+            }
           }
-        }
+        };
+        fi.click();
       };
-      fi.click();
-    };
+    }
 
     modeSelect.onchange = () => {
-      rowRom.style.display = modeSelect.value === "emulator" ? "flex" : "none";
+      rowRom.style.display = !mobile && modeSelect.value === "emulator" ? "flex" : "none";
     };
 
     const row3 = drawer.createDiv("curator-char-draft-row");
     const coverIn = row3.createEl("input", {
       type: "text",
       cls: "curator-input",
-      placeholder: "封面图片 URL 或本地路径（可点击上方自动获取）"
+      placeholder: "封面图片 URL 或本地路径"
     });
     coverIn.style.flex = "2";
     const devIn = row3.createEl("input", {
@@ -5334,48 +6819,51 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
       placeholder: "评分 (1-10)"
     });
     scoreIn.style.width = "100px";
-    scoreIn.value = "9.0";
+    scoreIn.value = "";
 
-    bgmFetchBtn.onclick = async () => {
-      const q = titleIn.value.trim();
-      if (!q) {
-        if (Notice) new Notice("请先输入游戏名称！");
-        return;
-      }
-      bgmFetchBtn.disabled = true;
-      bgmFetchBtn.textContent = "检索中...";
-      try {
-        const res = await requestUrl({
-          url: "https://api.bgm.tv/v0/search/subjects?limit=5",
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": BGM_USER_AGENT
-          },
-          body: JSON.stringify({ keyword: q, filter: { type: [4] } })
-        });
-        const first = res?.json?.data?.[0];
-        if (first) {
-          if (first.name_cn || first.name) titleIn.value = first.name_cn || first.name;
-          if (first.images?.large) coverIn.value = first.images.large;
-          if (Notice) new Notice(`✨ 已匹配 Bangumi 游戏条目：《${titleIn.value}》`);
-        } else if (Notice) {
-          new Notice("未检索到同名 Bangumi 游戏条目，可手动指定本地封面图。");
+    let pickedSteamAspect = "";
+    v07Game.renderGameSourceSearch(gsrcMount, {
+      initialQuery: "",
+      source: "all",
+      search: v07Adapters.searchGameSourcesAdapter,
+      onPickCover: async (cand) => {
+        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
+        if ((enriched.developer || cand.developer) && !devIn.value.trim()) {
+          devIn.value = enriched.developer || cand.developer;
         }
-      } catch (e) {
-      } finally {
-        bgmFetchBtn.disabled = false;
-        bgmFetchBtn.textContent = "🔍 自动获取 Bangumi 游戏封面";
+        if (Notice) new Notice(`已选用《${cand.title}》的封面`);
+      },
+      onPickFull: async (cand) => {
+        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+        if (cand.title) titleIn.value = cand.title;
+        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
+        if (enriched.developer || cand.developer) devIn.value = enriched.developer || cand.developer;
+        if (cand.score && !scoreIn.value) scoreIn.value = String(cand.score);
+        if (cand.source === "steam" && enriched.steamAppId && !exeIn.value.trim()) {
+          exeIn.value = `steam://rungameid/${enriched.steamAppId}`;
+        }
+        pickedSteamAspect = "";
+        if (Notice) new Notice(`已套用词条：《${cand.title}》`);
       }
-    };
+    });
 
     const submitRow = drawer.createDiv("curator-char-draft-actions");
+    const cancelBtn = submitRow.createEl("button", {
+      cls: "curator-btn",
+      text: "取消"
+    });
+    cancelBtn.onclick = () => {
+      uiState.showAddDrawer = false;
+      renderGameLibraryWorkspace(plugin, container, vaultAnimeItems, options);
+    };
     const saveGameBtn = submitRow.createEl("button", {
       cls: "curator-btn is-primary",
-      text: "✦ 收入游戏典藏"
+      text: "保存并加入游戏典藏"
     });
     saveGameBtn.onclick = async () => {
       const title = titleIn.value.trim() || "未命名游戏";
+      const parsedScore = scoreIn.value.trim() ? Number(scoreIn.value) : null;
       const record = {
         id: `game-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         title,
@@ -5385,15 +6873,17 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
         launchArgs: "",
         coverUrl: coverIn.value.trim(),
         developer: devIn.value.trim(),
-        status: "在玩",
-        score: Number(scoreIn.value) || 9.0,
+        status: statusSelect.value || "在玩",
+        score: Number.isFinite(parsedScore) && parsedScore > 0 ? parsedScore : null,
         playHours: 0,
+        playSessions: [],
         currentProgress: "初见",
         todos: [],
         playNotes: [],
         strategyUrls: [],
         createdAt: new Date().toISOString()
       };
+      if (pickedSteamAspect) record.coverAspect = pickedSteamAspect;
       if (!Array.isArray(plugin.settings.gameCollection)) {
         plugin.settings.gameCollection = [];
       }
@@ -5401,166 +6891,32 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
       await syncGameMarkdownNote(plugin, record);
       await plugin.saveSettings();
       uiState.showAddDrawer = false;
-      if (Notice) new Notice(`🎮 已将《${title}》收入游戏典藏并生成本地笔记！`);
+      syncBadge();
+      if (Notice) new Notice(`已将《${title}》收入游戏典藏并同步本地笔记`);
       renderGameLibraryWorkspace(plugin, container, vaultAnimeItems, options);
     };
+
+    requestAnimationFrame(() => {
+      if (drawer.isConnected && typeof drawer.scrollIntoView === "function") {
+        drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    });
   }
 
-  const gridHost = container.createDiv("curator-game-grid-host");
-  const renderGameGrid = () => {
-    gridHost.empty();
-    const allGames = Array.isArray(plugin.settings?.gameCollection)
-      ? plugin.settings.gameCollection
-      : [];
-    if (gameCountBadgeEl && gameCountBadgeEl.isConnected) {
-      gameCountBadgeEl.textContent = `共收录 ${allGames.length} 部游戏`;
-    }
-    if (typeof document !== "undefined") {
-      document
-        .querySelectorAll('[data-stat-role="workspace-game-badge"]')
-        .forEach((el) => {
-          el.textContent = `游戏 ${allGames.length} 部`;
-        });
-    }
-    const list = allGames.filter((gm) => {
-      const q = String(uiState.searchQuery || "").trim().toLowerCase();
-      if (!q) return true;
-      const hay = [gm.title, gm.developer, gm.currentProgress, gm.status]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-
-    if (list.length === 0) {
-      gridHost.createDiv({
-        cls: "curator-rs-empty",
-        text: "尚未收录本地游戏 · 点击右上角「＋ 录入本地游戏 / 模拟器 ROM」即可一站式管理启动、进度手札、待办与攻略网址！"
-      });
-      return;
-    }
-
-    const grid = gridHost.createDiv("curator-game-cards-grid");
-    list.forEach((gm) => {
-      const card = grid.createDiv("curator-game-card");
-      const coverBox = card.createDiv("curator-game-cover-box");
-      const coverSrc = resolveLocalOrVaultImageUrl(plugin, gm.coverUrl);
-      if (coverSrc) {
-        const img = coverBox.createEl("img", {
-          cls: "curator-game-cover-img",
-          attr: { src: coverSrc, alt: gm.title }
-        });
-        img.loading = "lazy";
-      } else {
-        coverBox.createDiv({ cls: "curator-game-cover-fallback", text: "🎮" });
-      }
-
-      const statusBadge = coverBox.createSpan({
-        cls: "curator-game-status-badge",
-        text: gm.status || "在玩"
-      });
-      statusBadge.title = "点击切换游玩状态";
-      statusBadge.onclick = async (ev) => {
-        ev.stopPropagation();
-        const order = ["在玩", "通关", "全成就", "想玩", "搁置"];
-        const nextIdx = (order.indexOf(gm.status || "在玩") + 1) % order.length;
-        gm.status = order[nextIdx];
-        await syncGameMarkdownNote(plugin, gm);
-        await plugin.saveSettings();
-        renderGameGrid();
-      };
-
-      const body = card.createDiv("curator-game-card-body");
-      body.createDiv({ cls: "curator-game-card-title", text: gm.title });
-      body.createDiv({
-        cls: "curator-game-card-meta curator-mono",
-        text: `⏱️ ${Number(gm.playHours || 0).toFixed(1)}h · 📍 ${gm.currentProgress || "初见"} · ★${Number(gm.score || 9.0).toFixed(1)}`
-      });
-
-      const todoOpenCount = (gm.todos || []).filter((t) => !t.done).length;
-      const noteCount = (gm.playNotes || []).length;
-      const guideCount = (gm.strategyUrls || []).length;
-      body.createDiv({
-        cls: "curator-game-card-counts",
-        text: `✅ 待办 ${todoOpenCount} 项 · 📝 手札 ${noteCount} 条 · 🧭 攻略 ${guideCount} 个`
-      });
-
-      // 攻略快速胶囊行
-      if (Array.isArray(gm.strategyUrls) && gm.strategyUrls.length > 0) {
-        const gRow = body.createDiv("curator-game-quick-guides");
-        gm.strategyUrls.slice(0, 2).forEach((g) => {
-          const pill = gRow.createEl("button", {
-            cls: "curator-dl-mini-btn",
-            text: `🧭 ${g.title || "攻略"}`
-          });
-          pill.title = g.remark ? `备注：${g.remark}\n网址：${g.url}` : g.url;
-          pill.onclick = (ev) => {
-            ev.stopPropagation();
-            window.open(g.url, "_blank");
-          };
-        });
-      }
-
-      const actions = body.createDiv("curator-game-card-actions");
-      const launchBtn = actions.createEl("button", {
-        cls: "curator-btn is-primary",
-        text: gm.launchMode === "emulator" ? "🕹️ 模拟器启动" : "▶ 启动游戏"
-      });
-      launchBtn.onclick = (ev) => {
-        ev.stopPropagation();
-        launchLocalGameProcess(plugin, gm, renderGameGrid);
-      };
-
-      const notesBtn = actions.createEl("button", {
-        cls: "curator-btn",
-        text: "📝 手札/待办/攻略"
-      });
-      notesBtn.onclick = (ev) => {
-        ev.stopPropagation();
-        openGameDetailAndNotesModal(plugin, gm, renderGameGrid);
-      };
-
-      const wandBtn = actions.createEl("button", {
-        cls: "curator-dl-mini-btn",
-        text: "🪄"
-      });
-      wandBtn.title = "打开洛琪希魔杖同源关联谱";
-      wandBtn.onclick = (ev) => {
-        ev.stopPropagation();
-        openMagicWandRelationModal(
-          plugin,
-          { type: "game", id: gm.id, title: gm.title, studio: gm.developer },
-          vaultAnimeItems,
-          options.wandCallbacks
-        );
-      };
-
-      const delBtn = actions.createEl("button", {
-        cls: "curator-dl-mini-btn",
-        text: "×"
-      });
-      delBtn.title = "移除该部游戏记录";
-      delBtn.onclick = async (ev) => {
-        ev.stopPropagation();
-        plugin.settings.gameCollection = (plugin.settings.gameCollection || []).filter(
-          (x) => x.id !== gm.id
-        );
-        await plugin.saveSettings();
-        renderGameGrid();
-      };
-
-      bindMagicWandLongPress(card, () => {
-        openMagicWandRelationModal(
-          plugin,
-          { type: "game", id: gm.id, title: gm.title, studio: gm.developer },
-          vaultAnimeItems,
-          options.wandCallbacks
-        );
-      });
-    });
+  const stageHost = container.createDiv("curator-game-v07-host");
+  const themeRoot = container.closest(".curator-desk-root") || container;
+  const rerenderWorkspace = () => {
+    syncBadge();
+    renderGameLibraryWorkspace(plugin, container, vaultAnimeItems, options);
   };
-
-  renderGameGrid();
+  const ctx = Object.assign(
+    v07Adapters.createGameStageContext(plugin, vaultAnimeItems, rerenderWorkspace, {
+      searchQuery: uiState.searchQuery || "",
+      wandCallbacks: options.wandCallbacks
+    }),
+    { themeRoot }
+  );
+  v07Game.renderGameStage(stageHost, ctx);
 }
 
 /**
@@ -5568,9 +6924,11 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
  */
 function getMultiHallStyles() {
   return `
-/* 🪄 法杖长按蓄力水波纹与星轨关联模态框 */
+/* 🪄 长按蓄力水波纹与跨馆关联模态框 */
 .is-wand-charging {
   position: relative;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .curator-wand-charge-ripple {
   position: absolute;
@@ -6066,7 +7424,7 @@ function getMultiHallStyles() {
 }
 .curator-voice-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: 12px;
   margin-top: 10px;
 }
@@ -6078,11 +7436,13 @@ function getMultiHallStyles() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 .curator-voice-quote-text {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .curator-voice-meta-row {
   display: flex;
@@ -6094,17 +7454,23 @@ function getMultiHallStyles() {
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--background-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .curator-voice-actions-row {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+  margin-top: auto;
+  min-width: 0;
 }
 
-/* 🎮 游戏典藏阁 */
+/* 🎮 游戏典藏 */
 .curator-game-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 248px), 1fr));
   gap: 14px;
   margin-top: 10px;
 }
@@ -6115,6 +7481,12 @@ function getMultiHallStyles() {
   background: var(--background-primary);
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.curator-game-card:hover {
+  border-color: color-mix(in srgb, #8f683d 48%, var(--background-modifier-border));
+  box-shadow: 0 6px 18px rgba(24, 18, 12, 0.08);
 }
 .curator-game-cover-box {
   position: relative;
@@ -6144,79 +7516,1257 @@ function getMultiHallStyles() {
   background: rgba(24, 30, 44, 0.82);
   color: #fff;
   cursor: pointer;
+  z-index: 2;
+}
+.curator-game-top-remove-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(18, 22, 30, 0.68);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  z-index: 2;
+}
+.curator-game-card:hover .curator-game-top-remove-btn,
+.curator-game-top-remove-btn:focus-visible,
+.curator-game-top-remove-btn.is-armed {
+  opacity: 1;
+}
+.curator-game-top-remove-btn:hover,
+.curator-game-top-remove-btn.is-armed {
+  background: #b83b3b !important;
+  border-color: #ffd2d2 !important;
+  color: #fff !important;
 }
 .curator-game-card-body {
-  padding: 10px 12px;
+  padding: 10px 12px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   flex: 1;
+  min-width: 0;
 }
 .curator-game-card-title {
   font-weight: 700;
   font-size: 14px;
+  line-height: 1.38;
+  overflow-wrap: anywhere;
 }
 .curator-game-card-meta, .curator-game-card-counts {
   font-size: 11.5px;
   opacity: 0.8;
+  min-width: 0;
 }
 .curator-game-quick-guides {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+  min-width: 0;
 }
 .curator-game-card-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: auto;
   padding-top: 6px;
+  min-width: 0;
 }
-.curator-game-prog-strip, .curator-game-inline-add {
+.curator-game-card-actions .curator-btn {
+  flex: 1 1 102px;
+  min-width: 0;
+  justify-content: center;
+  white-space: nowrap;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+@container curator-desk (max-width: 780px) {
+  .curator-char-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 9px;
+  }
+  .curator-char-header-right {
+    width: 100%;
+  }
+  .curator-char-search-input {
+    flex: 1 1 180px;
+    min-width: 0;
+  }
+  .curator-photowall-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+}
+@container curator-desk (max-width: 520px) {
+  .curator-game-top-remove-btn {
+    opacity: 0.88;
+  }
+  .curator-game-cards-grid,
+  .curator-voice-cards-grid,
+  .curator-illust-online-grid {
+    grid-template-columns: 1fr;
+  }
+}
+/* 🎮 Bangumi 游戏封面与词条候选选择器（.curator-game-bgm-*） */
+.curator-game-bgm-picker {
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, #8f683d 36%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--background-secondary) 65%, var(--background-primary));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.curator-game-bgm-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.curator-game-bgm-picker-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-normal);
+}
+.curator-game-bgm-picker-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.curator-game-bgm-picker-bar .curator-input {
+  flex: 1 1 200px;
+  min-width: 0;
+  height: 28px;
+  font-size: 12.5px;
+}
+.curator-game-bgm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: 8px;
+  max-height: 290px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.curator-game-bgm-card {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 9px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  align-items: start;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
+}
+.curator-game-bgm-card:hover {
+  border-color: color-mix(in srgb, #8f683d 55%, var(--background-modifier-border));
+  box-shadow: 0 3px 10px rgba(40, 28, 14, 0.08);
+}
+.curator-game-bgm-card.is-exact {
+  border-color: #8f683d;
+  background: color-mix(in srgb, #8f683d 6%, var(--background-primary));
+}
+.curator-game-bgm-thumb {
+  width: 54px;
+  aspect-ratio: 3 / 4;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--background-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: var(--text-faint);
+}
+.curator-game-bgm-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.curator-game-bgm-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.curator-game-bgm-name-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.curator-game-bgm-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text-normal);
+  overflow-wrap: anywhere;
+}
+.curator-game-bgm-exact-pill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(143, 104, 61, 0.16);
+  color: #8f683d;
+}
+.curator-game-bgm-orig {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-game-bgm-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.curator-game-bgm-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.curator-game-edit-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.curator-game-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.curator-game-edit-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* 🎮 游戏手札弹窗（.curator-gj-*）—— 暖宣纸 + 黄铜，跟随 Obsidian 亮/暗主题 */
+.modal.curator-gj-shell {
+  --gj-brass: #8f683d;
+  --gj-on-brass: #fffdf9;
+  --gj-brass-soft: color-mix(in srgb, #8f683d 12%, transparent);
+  --gj-paper: color-mix(in srgb, var(--background-primary) 90%, #f3e6cf 10%);
+  --gj-line: color-mix(in srgb, #8f683d 20%, var(--background-modifier-border));
+  --gj-side: color-mix(in srgb, var(--background-secondary) 55%, var(--background-primary));
+  --gj-danger: #b54a3c;
+  width: min(900px, 94vw);
+  max-width: 900px;
+  height: min(780px, 88vh);
+  max-height: 88vh;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.theme-dark .modal.curator-gj-shell {
+  --gj-brass: #cfa874;
+  --gj-on-brass: #1f1a12;
+  --gj-brass-soft: color-mix(in srgb, #cfa874 14%, transparent);
+  --gj-paper: color-mix(in srgb, var(--background-primary) 93%, #5a4630 7%);
+  --gj-line: color-mix(in srgb, #cfa874 16%, var(--background-modifier-border));
+  --gj-danger: #e2806f;
+}
+.modal.curator-gj-shell .modal-title:empty,
+.modal.curator-gj-shell .modal-header:empty {
+  display: none;
+}
+.modal.curator-gj-shell .modal-close-button {
+  top: 14px;
+  right: 14px;
+  z-index: 4;
+}
+.is-phone .modal.curator-gj-shell {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100%;
+  max-height: 100%;
+  border-radius: 0;
+}
+.modal.curator-gj-shell .modal-content.curator-gj {
+  container-type: inline-size;
+  container-name: curator-gj;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+/* 抬头 */
+.curator-gj-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 16px;
+  padding: 20px 56px 16px 22px;
+  background: linear-gradient(180deg, var(--gj-paper), var(--background-primary));
+  border-bottom: 1px solid var(--gj-line);
+}
+.curator-gj-cover {
+  align-self: start;
+  width: 64px;
+  aspect-ratio: 3 / 4;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--background-secondary);
+  box-shadow: 0 0 0 1px var(--gj-line), 0 4px 12px rgba(40, 28, 14, 0.14);
+}
+.curator-gj-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.curator-gj-cover-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--gj-brass);
+  background: var(--gj-brass-soft);
+}
+.curator-gj-ident {
+  min-width: 0;
+}
+.curator-gj-title {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.curator-gj-sub {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 8px 0;
+  margin-top: 5px;
+  font-size: 12.5px;
+  color: var(--text-muted);
 }
-.curator-game-sublist {
+.curator-gj-status-wrap {
+  --gj-st: var(--gj-brass);
+  position: relative;
+  display: inline-flex;
+}
+.curator-gj-status-wrap[data-status="通关"],
+.curator-gj-status-wrap[data-status="全成就"] { --gj-st: #3a7d5c; }
+.curator-gj-status-wrap[data-status="想玩"] { --gj-st: #3b6998; }
+.curator-gj-status-wrap[data-status="搁置"] { --gj-st: var(--text-muted); }
+.theme-dark .curator-gj-status-wrap[data-status="通关"],
+.theme-dark .curator-gj-status-wrap[data-status="全成就"] { --gj-st: #7cc29d; }
+.theme-dark .curator-gj-status-wrap[data-status="想玩"] { --gj-st: #8db6e3; }
+.curator-gj-status-wrap::after {
+  content: "▾";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-52%);
+  font-size: 10px;
+  color: var(--gj-st);
+  pointer-events: none;
+}
+.curator-gj-shell select.curator-gj-status {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  padding: 0 22px 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--gj-st) 35%, transparent);
+  background: color-mix(in srgb, var(--gj-st) 12%, transparent);
+  background-image: none;
+  box-shadow: none;
+  color: var(--gj-st);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  cursor: pointer;
+}
+.curator-gj-shell select.curator-gj-status:focus-visible {
+  box-shadow: 0 0 0 3px var(--gj-brass-soft);
+}
+.curator-gj-dev {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-gj-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin-top: 12px;
+}
+.curator-gj-stat {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 6px;
+  gap: 1px;
+  min-width: 0;
+  cursor: text;
 }
-.curator-game-subrow {
+.curator-gj-stat.is-wide {
+  flex: 1 1 180px;
+  max-width: 300px;
+}
+.curator-gj-stat-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+.curator-gj-stat-box {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 0.15s ease;
+}
+.curator-gj-stat:hover .curator-gj-stat-box {
+  border-bottom-color: var(--gj-line);
+}
+.curator-gj-stat .curator-gj-stat-box:focus-within {
+  border-bottom: 1px solid var(--gj-brass);
+}
+.curator-gj-shell .curator-gj-stat input.curator-gj-stat-input,
+.curator-gj-shell .curator-gj-stat input.curator-gj-stat-input:hover,
+.curator-gj-shell .curator-gj-stat input.curator-gj-stat-input:focus {
+  width: 4em;
+  min-width: 0;
+  height: auto;
+  padding: 1px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.curator-gj-shell .curator-gj-stat.is-wide input.curator-gj-stat-input {
+  width: 100%;
+}
+@supports (field-sizing: content) {
+  .curator-gj-shell .curator-gj-stat:not(.is-wide) input.curator-gj-stat-input {
+    width: auto;
+    min-width: 2ch;
+    max-width: 6em;
+    field-sizing: content;
+  }
+}
+.curator-gj-stat input.curator-gj-stat-input::placeholder {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+.curator-gj-stat input::-webkit-inner-spin-button,
+.curator-gj-stat input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.curator-gj-stat input[type="number"] {
+  -moz-appearance: textfield;
+}
+.curator-gj-stat-suffix {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.curator-gj-head-actions {
+  align-self: end;
+  display: flex;
+  gap: 8px;
+}
+
+/* 通用按钮 */
+.curator-gj-shell button.curator-gj-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--gj-line);
+  background: var(--background-primary);
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+.curator-gj-shell button.curator-gj-btn:hover {
+  border-color: var(--gj-brass);
+  color: var(--gj-brass);
+}
+.curator-gj-shell button.curator-gj-btn.is-primary {
+  border-color: var(--gj-brass);
+  background: var(--gj-brass);
+  color: var(--gj-on-brass);
+}
+.curator-gj-shell button.curator-gj-btn.is-primary:hover {
+  background: color-mix(in srgb, var(--gj-brass) 86%, var(--text-normal));
+  color: var(--gj-on-brass);
+}
+.curator-gj-shell button.curator-gj-btn.is-primary:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: var(--gj-brass);
+}
+.curator-gj-shell button.curator-gj-btn.is-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+.curator-gj-shell button.curator-gj-btn.is-quiet:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.curator-gj-shell button.curator-gj-play {
+  height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+}
+.curator-gj-shell button.curator-gj-tool {
+  height: 22px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.curator-gj-shell button.curator-gj-tool:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.curator-gj-shell button.curator-gj-tool.is-danger:hover,
+.curator-gj-shell button.curator-gj-tool.is-armed {
+  color: var(--gj-danger);
+  background: color-mix(in srgb, var(--gj-danger) 12%, transparent);
+}
+
+/* 窄屏分段切换（宽屏隐藏） */
+.curator-gj-tabs {
+  display: none;
+  gap: 4px;
+  padding: 4px 12px 0;
+  border-bottom: 1px solid var(--gj-line);
+}
+.curator-gj-shell button.curator-gj-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: auto;
+  padding: 9px 4px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.curator-gj-shell button.curator-gj-tab.is-active {
+  color: var(--text-normal);
+  font-weight: 600;
+  border-bottom-color: var(--gj-brass);
+}
+.curator-gj-tab-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 17px;
+}
+.curator-gj-tab-count:empty {
+  display: none;
+}
+
+/* 主体：宽屏双栏，各自滚动 */
+.curator-gj-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(250px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+.curator-gj-main,
+.curator-gj-side {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.curator-gj-main {
+  padding: 18px 22px 32px;
+}
+.curator-gj-side {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 18px 20px 32px 18px;
+  border-left: 1px solid var(--gj-line);
+  background: var(--gj-side);
+}
+.curator-gj-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 22px;
+  margin-bottom: 10px;
+}
+.curator-gj-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--gj-brass);
+}
+.curator-gj-panel-count {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.curator-gj-panel-action {
+  margin-left: auto;
+}
+
+/* 手札输入 */
+.curator-gj-composer {
+  margin-bottom: 22px;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--gj-line);
+  border-radius: 10px;
+  background: var(--background-primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.curator-gj-composer:focus-within {
+  border-color: color-mix(in srgb, var(--gj-brass) 60%, transparent);
+  box-shadow: 0 0 0 3px var(--gj-brass-soft);
+}
+.curator-gj-shell textarea.curator-gj-composer-input,
+.curator-gj-shell textarea.curator-gj-composer-input:focus,
+.curator-gj-shell textarea.curator-gj-composer-input:hover {
+  display: block;
+  width: 100%;
+  min-height: 46px;
+  max-height: 260px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  resize: none;
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.curator-gj-composer-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--background-secondary);
-  font-size: 12.5px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--gj-line);
 }
-.curator-game-subrow.is-done .curator-game-todo-text {
-  text-decoration: line-through;
-  opacity: 0.6;
-}
-.curator-game-prog-badge {
+.curator-gj-composer-label {
+  flex: 0 0 auto;
   font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(59, 105, 152, 0.16);
-  color: #3b6998;
+  color: var(--text-faint);
 }
-.curator-game-todo-text {
-  flex: 1;
+.curator-gj-composer-stamp {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gj-brass);
 }
-.curator-game-guide-remark {
+.curator-gj-composer-hint {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 手札时间线：按进度分组 */
+.curator-gj-chapter {
+  position: relative;
+  margin-bottom: 18px;
+  padding-left: 18px;
+}
+.curator-gj-chapter::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 10px;
+  bottom: 6px;
+  width: 1px;
+  background: var(--gj-line);
+}
+.curator-gj-chapter-title {
+  position: relative;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.curator-gj-chapter-title::before {
+  content: "";
+  position: absolute;
+  left: -18px;
+  top: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gj-brass);
+  box-shadow: 0 0 0 3px var(--background-primary);
+}
+.curator-gj-note {
+  margin: 0 -10px 2px;
+  padding: 6px 10px 9px;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+}
+.curator-gj-note:hover {
+  background: color-mix(in srgb, var(--background-secondary) 70%, transparent);
+}
+.curator-gj-note.is-fresh {
+  animation: curator-gj-fresh 1.4s ease-out;
+}
+@keyframes curator-gj-fresh {
+  from { background: var(--gj-brass-soft); }
+  to { background: transparent; }
+}
+.curator-gj-note-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
   font-size: 11.5px;
-  opacity: 0.78;
-  flex: 1;
+  color: var(--text-faint);
+}
+.curator-gj-note-hours {
+  font-weight: 600;
+  color: var(--gj-brass);
+}
+.curator-gj-note-edited {
+  font-style: italic;
+}
+.curator-gj-note-text {
+  font-size: 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.curator-gj-note-text.is-editing {
+  white-space: normal;
+}
+.curator-gj-row-tools {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.curator-gj-note:hover .curator-gj-row-tools,
+.curator-gj-todo:hover .curator-gj-row-tools,
+.curator-gj-guide:hover .curator-gj-row-tools,
+.curator-gj-row-tools:focus-within,
+.curator-gj-row-tools:has(.is-armed) {
+  opacity: 1;
+}
+@media (hover: none) {
+  .curator-gj-row-tools { opacity: 0.75; }
+}
+
+/* 就地编辑 */
+.curator-gj-shell .curator-gj-edit-field,
+.curator-gj-shell .curator-gj-edit-field:focus {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--gj-brass);
+  border-radius: 7px;
+  background: var(--background-primary);
+  box-shadow: 0 0 0 3px var(--gj-brass-soft);
+  color: var(--text-normal);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.6;
+  resize: none;
+}
+.curator-gj-shell input.curator-gj-edit-field {
+  height: 30px;
+}
+.curator-gj-edit-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* 待办 */
+.curator-gj-quick-add {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.curator-gj-shell input.curator-gj-quick-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--gj-line);
+  border-radius: 7px;
+  background: var(--background-primary);
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: 13px;
+}
+.curator-gj-shell input.curator-gj-quick-input:focus {
+  border-color: var(--gj-brass);
+  box-shadow: 0 0 0 3px var(--gj-brass-soft);
+}
+.curator-gj-shell input.curator-gj-quick-input.is-invalid {
+  border-color: var(--gj-danger);
+}
+.curator-gj-checklist {
+  display: flex;
+  flex-direction: column;
+}
+.curator-gj-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 -6px;
+  padding: 7px 6px;
+  border-radius: 7px;
+}
+.curator-gj-todo:hover {
+  background: var(--background-modifier-hover);
+}
+.curator-gj-check {
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  cursor: pointer;
+}
+.curator-gj-shell .curator-gj-check input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.curator-gj-check-mark {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid color-mix(in srgb, var(--gj-brass) 55%, var(--background-modifier-border));
+  border-radius: 4px;
+  background: var(--background-primary);
+  pointer-events: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.curator-gj-check input:checked + .curator-gj-check-mark {
+  border-color: var(--gj-brass);
+  background: var(--gj-brass);
+}
+.curator-gj-check input:checked + .curator-gj-check-mark::after {
+  content: "";
+  position: absolute;
+  left: 32%;
+  top: 12%;
+  width: 28%;
+  height: 52%;
+  border: solid var(--gj-on-brass);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.curator-gj-check input:focus-visible + .curator-gj-check-mark {
+  box-shadow: 0 0 0 3px var(--gj-brass-soft);
+}
+@media (hover: none) {
+  .curator-gj-check { width: 20px; height: 20px; margin-top: 0; }
+}
+.curator-gj-todo-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.curator-gj-todo-text {
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  transition: color 0.2s ease;
+}
+.curator-gj-todo.is-done .curator-gj-todo-text {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-faint) 70%, transparent);
+}
+.curator-gj-todo-meta {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.curator-gj-allclear {
+  padding: 6px 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.curator-gj-done-fold {
+  margin-top: 6px;
+}
+.curator-gj-done-fold > summary {
+  list-style: none;
+  padding: 5px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.curator-gj-done-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.curator-gj-done-fold > summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 14px;
+  transition: transform 0.15s ease;
+}
+.curator-gj-done-fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+/* 攻略 */
+.curator-gj-guide-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px dashed var(--gj-line);
+  border-radius: 9px;
+  background: var(--background-primary);
+}
+.curator-gj-guide-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.curator-gj-spoiler-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.curator-gj-guide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.curator-gj-guide {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 -8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+}
+.curator-gj-guide:hover {
+  background: var(--background-modifier-hover);
+}
+.curator-gj-guide-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.curator-gj-guide-link {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+  text-decoration: none;
+}
+.curator-gj-guide-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.curator-gj-guide-title::after {
+  content: " ↗";
+  font-weight: 400;
+  color: var(--text-faint);
+}
+.curator-gj-guide-link:hover .curator-gj-guide-title {
+  color: var(--gj-brass);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.curator-gj-guide-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.curator-gj-guide-host {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.curator-gj-guide-sep {
+  margin: 0 5px;
+  color: var(--text-faint);
+}
+.curator-gj-guide-remark.is-spoiler {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-faint) 14%, transparent);
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  cursor: pointer;
+}
+.curator-gj-guide-remark.is-spoiler.is-revealed {
+  display: inline;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+/* 空状态 */
+.curator-gj-empty {
+  padding: 14px 2px 6px;
+}
+.curator-gj-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.curator-gj-empty-desc {
+  max-width: 30em;
+  margin-top: 4px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-faint);
+}
+.curator-gj-empty.is-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 12px 20px;
+  text-align: center;
+}
+.curator-gj-empty-sheet {
+  width: 46px;
+  height: 58px;
+  margin-bottom: 14px;
+  border-radius: 4px;
+  border: 1px solid var(--gj-line);
+  background:
+    linear-gradient(90deg, transparent 9px, var(--gj-brass-soft) 9px, var(--gj-brass-soft) 10px, transparent 10px),
+    repeating-linear-gradient(180deg, transparent 0 9px, var(--gj-line) 9px 10px),
+    var(--gj-paper);
+  transform: rotate(-4deg);
+}
+
+/* 底栏 */
+.curator-gj-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 14px 7px 22px;
+  border-top: 1px solid var(--gj-line);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.curator-gj-foot-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-gj-saved {
+  flex: 0 0 auto;
+  color: var(--gj-brass);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+.curator-gj-saved.is-visible {
+  opacity: 1;
+}
+.curator-gj-saved.is-error {
+  color: var(--gj-danger);
+}
+.curator-gj-foot .curator-gj-btn {
+  margin-left: auto;
+}
+
+/* 窄容器 / 移动端：折叠为三段切换 */
+@container curator-gj (max-width: 640px) {
+  .curator-gj-head {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 12px;
+    padding: 16px 48px 12px 16px;
+  }
+  .curator-gj-cover { width: 50px; }
+  .curator-gj-title { font-size: 17px; }
+  .curator-gj-stats { gap: 6px 16px; }
+  .curator-gj-head-actions { grid-column: 1 / -1; }
+  .curator-gj-head-actions:empty { display: none; }
+  .curator-gj-shell button.curator-gj-play { flex: 1; }
+  .curator-gj-tabs { display: flex; }
+  .curator-gj-body {
+    display: block;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .curator-gj-main,
+  .curator-gj-side {
+    overflow: visible;
+    padding: 14px 16px 28px;
+    border-left: none;
+    background: none;
+  }
+  .curator-gj[data-tab="notes"] .curator-gj-side,
+  .curator-gj:not([data-tab="notes"]) .curator-gj-main { display: none; }
+  .curator-gj-panel { display: none; }
+  .curator-gj[data-tab="notes"] .curator-gj-panel[data-panel="notes"],
+  .curator-gj[data-tab="todos"] .curator-gj-panel[data-panel="todos"],
+  .curator-gj[data-tab="guides"] .curator-gj-panel[data-panel="guides"] { display: block; }
+  .curator-gj-panel-head:not(.has-action) { display: none; }
+  .curator-gj-panel-title,
+  .curator-gj-panel-count { display: none; }
+  .curator-gj-composer-hint { display: none; }
+  .curator-gj-foot { padding: 7px 10px 7px 16px; }
+}
+
+/* 游戏卡片：最近一条手札摘录 + 入口按钮 */
+.curator-game-card-peek {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, #8f683d 7%, var(--background-secondary));
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.curator-game-card-peek:hover {
+  background: color-mix(in srgb, #8f683d 14%, var(--background-secondary));
+  color: var(--text-normal);
+}
+.curator-game-card-peek-tag {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: #8f683d;
+}
+.theme-dark .curator-game-card-peek-tag {
+  color: #cfa874;
+}
+.curator-game-card-peek-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-game-card-peek.is-empty {
+  border: 1px dashed var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-faint);
+}
+.curator-game-card-actions .curator-btn.curator-game-journal-entry {
+  gap: 6px;
+}
+.curator-game-journal-entry-badge {
+  display: inline-block;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #8f683d;
+  color: #fffdf9;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+.theme-dark .curator-game-journal-entry-badge {
+  background: #cfa874;
+  color: #1f1a12;
 }
 `;
 }
 
 module.exports = {
+  resolveDefaultVoiceArchiveFolder,
+  resolveFfmpegExecutable,
+  isPathInsideAnimeRoot,
   bindMagicWandLongPress,
   openMagicWandRelationModal,
   layoutAvesJustifiedGrid,
@@ -6233,5 +8783,10 @@ module.exports = {
   renderIllustrationGalleryWorkspace,
   renderVoiceLineArchiveWorkspace,
   renderGameLibraryWorkspace,
+  launchLocalGameProcess,
+  openGameDetailAndNotesModal,
+  openGameEditMetadataModal,
+  syncGameMarkdownNote,
+  resolveLocalOrVaultImageUrl,
   getMultiHallStyles
 };

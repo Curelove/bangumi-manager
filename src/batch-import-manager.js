@@ -910,16 +910,21 @@ var BatchAnimeImportModal = class extends Modal {
     const folderPath = path
       ? path.join(root, info.year, info.season, folderName)
       : joinPosixPath(root, info.year, info.season, folderName);
-    fs2.mkdirSync(
-      folderPath,
-      {
-        recursive: true
-      }
-    );
-    return folderPath.replace(
-      /\\/g,
-      "/"
-    );
+    try {
+      fs2.mkdirSync(
+        folderPath,
+        {
+          recursive: true
+        }
+      );
+      return folderPath.replace(
+        /\\/g,
+        "/"
+      );
+    } catch (err) {
+      console.warn("[Bangumi BatchImport] 创建本地动画目录失败，已安全跳过目录创建:", err);
+      return "\u65E0";
+    }
   }
   writeProgress(element, message) {
     element.textContent = message;

@@ -27,6 +27,7 @@ _backup-*/
 Thumbs.db
 
 # Local archives and maintenance folders
+AGENTS.md
 archive/
 backups/
 bangumi-manager-legacy-vib/

@@ -73,37 +73,84 @@ async function ensureVaultFolder(app, folderPath) {
     }
   }
 }
-async function saveCoverLocally(app, coverFolder, subjectId, remoteUrl) {
-  if (!coverFolder || !subjectId || !remoteUrl) {
-    return remoteUrl || "";
+async function saveCoverLocally(app, coverFolder, subjectId, remoteUrl, fallbackRemoteUrl = "") {
+  if (!coverFolder || !subjectId) {
+    return remoteUrl || fallbackRemoteUrl || "";
+  }
+  const candidates = Array.from(
+    new Set(
+      [
+        remoteUrl,
+        fallbackRemoteUrl,
+        "https://api.bgm.tv/v0/subjects/" + encodeURIComponent(String(subjectId)) + "/image?type=large",
+        "https://api.bgm.tv/v0/subjects/" + encodeURIComponent(String(subjectId)) + "/image?type=common"
+      ]
+        .map((u) => String(u || "").trim())
+        .filter((u) => u.startsWith("http"))
+    )
+  );
+  if (candidates.length === 0) {
+    return "";
   }
   await ensureVaultFolder(
     app,
     coverFolder
   );
-  const extension = getImageExtension(remoteUrl);
+  const extension = getImageExtension(remoteUrl || fallbackRemoteUrl);
   const localPath = coverFolder + "/bangumi-cover-" + subjectId + "." + extension;
   if (await app.vault.adapter.exists(
     localPath
   )) {
     return localPath;
   }
-  const response = await requestUrl({
-    url: remoteUrl,
-    method: "GET",
-    throw: true
-  });
-  await app.vault.adapter.writeBinary(
-    localPath,
-    response.arrayBuffer
-  );
-  return localPath;
+  let lastError = null;
+  for (const candidateUrl of candidates) {
+    let timer = null;
+    try {
+      const reqPromise = requestUrl({
+        url: candidateUrl,
+        method: "GET",
+        headers: {
+          "User-Agent": "Curelove/bangumi-manager (https://github.com/Curelove/bangumi-manager)"
+        },
+        throw: true
+      });
+      reqPromise.catch(() => {});
+      const response = await Promise.race([
+        reqPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("封面下载超时")), 8500);
+        })
+      ]);
+      if (response && response.arrayBuffer && response.arrayBuffer.byteLength > 200) {
+        await app.vault.adapter.writeBinary(
+          localPath,
+          response.arrayBuffer
+        );
+        return localPath;
+      }
+    } catch (err) {
+      lastError = err;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error("无法下载作品封面图片");
 }
 function getSeasonInfo(dateText) {
-  const value = String(dateText || "");
-  const match = value.match(
-    /(\d{4})年(\d{1,2})月/
-  );
+  const value = String(dateText || "").trim();
+  const match =
+    value.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/) ||
+    value.match(/(\d{4})[-/.](\d{1,2})(?:[-/.]\d{1,2}|\b)/);
+  if (!match) {
+    const yearOnly = value.match(/\b(19\d{2}|20\d{2})\b/);
+    if (yearOnly) {
+      return {
+        year: yearOnly[1],
+        season: "未知季度"
+      };
+    }
+  }
   if (!match) {
     return {
       year: "",
@@ -353,11 +400,24 @@ function buildNoteContent(info, options) {
       info.netaba
     );
   }
-  addYamlField(
-    yaml,
-    "tags",
-    "bangumi"
-  );
+  const extraTags = Array.isArray(info.tags)
+    ? info.tags
+        .map((t) => String(t || "").trim())
+        .filter((t) => t && t.toLowerCase() !== "bangumi")
+    : [];
+  if (extraTags.length > 0) {
+    const mergedTags = Array.from(new Set(["bangumi", ...extraTags]));
+    yaml.push("tags:");
+    for (const tagItem of mergedTags) {
+      yaml.push("  - " + tagItem);
+    }
+  } else {
+    addYamlField(
+      yaml,
+      "tags",
+      "bangumi"
+    );
+  }
   yaml.push("---");
   yaml.push("");
   yaml.push(

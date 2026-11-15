@@ -1,4 +1,4 @@
-const THREE = require("three");
+import * as THREE from "three";
 const { Notice } = require("obsidian");
 const {
   pluginAssetExists,
@@ -23,9 +23,9 @@ const PACK_SUBDIR = "assets/atelier-hd-pack";
 const PACK_FILES = ["manifest.json", "cel-folio-hd.glb", "collector-box-hd.glb"];
 
 const MIRROR_BASES = [
-  "https://raw.githubusercontent.com/Curelove/bangumi-manager/main/assets/atelier-hd-pack",
+  "https://cdn.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/atelier-hd-pack",
   "https://fastly.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/atelier-hd-pack",
-  "https://cdn.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/atelier-hd-pack"
+  "https://raw.githubusercontent.com/Curelove/bangumi-manager/main/assets/atelier-hd-pack"
 ];
 
 const STYLE_CATALOG = [
@@ -96,7 +96,10 @@ async function fetchPackFileWithMirrors(fileName) {
     const url = `${base}/${encodeURIComponent(fileName)}`;
     try {
       // eslint-disable-next-line no-await-in-loop
-      const ab = await fetchBinaryCrossPlatform(url);
+      const ab = await Promise.race([
+        fetchBinaryCrossPlatform(url),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 7500))
+      ]);
       if (ab && ab.byteLength > 32) {
         return ab;
       }
@@ -126,7 +129,7 @@ async function downloadAtelierHdPack(plugin, options = {}) {
   clearAtelierPrototypeCache();
   await preloadAtelierHdPrototypes(plugin);
   if (!silent) {
-    new Notice("✨ 已安装「白昼原画室 · 典藏精装模型扩展包」，可在原画装裱夹与精装礼盒间随时切换！");
+    new Notice("已安装「白昼原画室 · 典藏精装模型扩展包」，可在原画装裱夹与精装礼盒间随时切换！");
   }
   return await checkAtelierHdPackStatus(plugin);
 }

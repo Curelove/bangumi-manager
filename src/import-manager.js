@@ -9,6 +9,7 @@ const { tryRequireNode, isDesktopNodeAvailable, joinPosixPath } = require("./pla
 const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 var bangumiApi = require("./bangumi-api.js");
 var noteManager = require("./note-manager.js");
+var animeActivityService = require("./anime-activity-and-random-service.js");
 var WATCH_STATES2 = [
   "\u5DF2\u770B",
   "\u5728\u770B",
@@ -243,6 +244,9 @@ var SingleAnimeImportModal = class extends Modal {
       );
     }
     const canCreateLocal = isDesktopNodeAvailable();
+    const configuredRoot = String(
+      this.plugin.settings.localAnimeRoot || ""
+    ).trim();
     const folderLabel = detailArea.createEl(
       "label"
     );
@@ -252,7 +256,8 @@ var SingleAnimeImportModal = class extends Modal {
       "input"
     );
     folderCheckbox.type = "checkbox";
-    folderCheckbox.checked = canCreateLocal;
+    folderCheckbox.checked = Boolean(canCreateLocal && configuredRoot);
+    folderCheckbox.disabled = !configuredRoot;
     folderLabel.appendText(
       " \u521B\u5EFA\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939"
     );
@@ -275,7 +280,11 @@ var SingleAnimeImportModal = class extends Modal {
         /[\\/]+$/,
         ""
       );
-      if (!folderCheckbox.checked || !base || !seasonInfo.year || seasonInfo.season === "\u672A\u77E5\u5B63\u5EA6") {
+      if (!base) {
+        pathPreview.textContent = "尚未在设置中填写「本地动画根目录」，本次仅创建动画笔记（日后可随时绑定本地视频目录）。";
+        return;
+      }
+      if (!folderCheckbox.checked || !seasonInfo.year || seasonInfo.season === "\u672A\u77E5\u5B63\u5EA6") {
         pathPreview.textContent = "\u672C\u6B21\u4E0D\u521B\u5EFA\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939\u3002";
         return;
       }
@@ -325,7 +334,8 @@ var SingleAnimeImportModal = class extends Modal {
       this.app,
       this.plugin.settings.coverFolder,
       info.subjectId,
-      info.Poster
+      info.Poster,
+      info.PosterFallback || ""
     );
 
     if (!info.cover) {
@@ -371,10 +381,19 @@ var SingleAnimeImportModal = class extends Modal {
     }
     let downloadPath = "\u65E0";
     if (shouldCreateFolder) {
-      downloadPath = createDownloadFolder(
-        this.plugin.settings,
-        info
-      );
+      try {
+        downloadPath = createDownloadFolder(
+          this.plugin.settings,
+          info
+        );
+      } catch (folderErr) {
+        console.warn("[Bangumi Import] 创建本地下载目录失败，已降级仅创建笔记:", folderErr);
+        new Notice(
+          "未能创建本地下载文件夹（" + (folderErr?.message || "路径不可用") + "），已正常为您生成动画笔记。",
+          6000
+        );
+        downloadPath = "\u65E0";
+      }
     }
     const result = await noteManager.createAnimeNote(
       this.app,
@@ -418,6 +437,14 @@ var SingleAnimeImportModal = class extends Modal {
       return;
     }
     setSamplePreviewActive(this.plugin, false);
+    animeActivityService.recordAnimeActivity(this.plugin, {
+      type: "import",
+      animeName: info.CN || info.JP || result.filePath,
+      filePath: result.filePath || "",
+      cover: info.Poster || "",
+      status: info.state || "",
+      detail: `导入番剧卡片（${info.state || "想看"}）`
+    }).catch(() => {});
     if (typeof this.plugin.refreshOpenDashboardViews === "function") {
       await this.plugin.refreshOpenDashboardViews();
     }

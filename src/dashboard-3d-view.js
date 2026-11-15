@@ -1,4 +1,4 @@
-const THREE = require("three");
+import * as THREE from "three";
 const { Notice } = require("obsidian");
 const netabaTrendService = require("./netaba-trend-service.js");
 const { inspectLocalFolder, openLocalPathSafely, parseFrontmatter, parseNoteReviewsSection } = require("./note-utils.js");
@@ -695,12 +695,12 @@ class Dashboard3DSpace {
     const top = this.el(this.ui, "div", "atelier-top");
     top.dataset.ui = "top-bar";
 
-    const brand = this.el(top, "div", "atelier-mark", "白昼原画室 · ATELIER CEL");
+    const brand = this.el(top, "div", "atelier-mark", "3D 原画展厅");
     this.brandSubElement = this.el(
       brand,
       "small",
       "",
-      `BANGUMI ORIGINAL CEL ARCHIVE · 馆藏 ${this.items.length} 部`
+      `番剧档案馆 · 馆藏 ${this.items.length} 部`
     );
 
     const topActions = this.el(top, "div", "atelier-actions");
@@ -709,14 +709,14 @@ class Dashboard3DSpace {
     this.corridorSubBtn = this.action(
       this.subViewGroup,
       "subview-corridor",
-      "🏛 开架回廊",
+      "开架回廊",
       () => this.setStatusSubView("corridor"),
       "atelier-subview-btn"
     );
     this.easelSubBtn = this.action(
       this.subViewGroup,
       "subview-easel",
-      "🖼 折屏展架",
+      "折屏展架",
       () => this.setStatusSubView("easel"),
       "atelier-subview-btn"
     );
@@ -724,7 +724,7 @@ class Dashboard3DSpace {
     this.searchButton = this.action(topActions, "search", "⌕ 档案检索 [/]", () => this.openSearch());
     this.audioButton = this.action(topActions, "audio", "♪ 环境音景 · 已静音", () => this.toggleAudio());
     this.settingsButton = this.action(topActions, "settings", "◷ 空间设置", () => this.openSettings());
-    this.exitButton = this.action(topActions, "exit", "↖ 返回仪表盘", () => this.onExit3D?.());
+    this.exitButton = this.action(topActions, "exit", "← 返回档案馆", () => this.onExit3D?.());
 
     this.curationBanner = this.el(this.ui, "div", "atelier-curation-banner");
     this.curationBanner.dataset.ui = "curation-banner";
@@ -736,7 +736,7 @@ class Dashboard3DSpace {
         this.sampleBanner,
         "span",
         "",
-        "✨ 示例样片预览中（3 部虚拟档案，不占用也不修改笔记库）"
+        "✦ 示例样片预览中（3 部虚拟档案，不占用也不修改笔记库）"
       );
       this.action(
         this.sampleBanner,
@@ -828,7 +828,7 @@ class Dashboard3DSpace {
   renderCurationBanner() {
     if (!this.curationBanner) return;
     this.curationBanner.empty();
-    this.el(this.curationBanner, "span", "atelier-curation-eyebrow", "✦ 高分策展四柱 ／ CURATED HALL");
+    this.el(this.curationBanner, "span", "atelier-curation-eyebrow", "✦ 高分策展四柱");
 
     this.activeLaneConfigs.forEach((cfg, idx) => {
       const count = (this.lanes[idx] || []).length;
@@ -892,7 +892,7 @@ class Dashboard3DSpace {
         fallbackNotice.className = "atelier-webgl-fallback";
         fallbackNotice.style.cssText =
           "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#5c4b3b;font-size:13px;";
-        fallbackNotice.textContent = "当前窗口环境暂未启用 WebGL 硬件加速，可点击右上角「↖ 返回仪表盘」切换回二维案头编目台。";
+        fallbackNotice.textContent = "当前窗口环境暂未启用 WebGL 硬件加速，可点击右上角「← 返回档案馆」切换回番剧档案馆。";
         this.viewport.appendChild(fallbackNotice);
         return;
       }
@@ -3399,7 +3399,7 @@ class Dashboard3DSpace {
       headerLeft,
       "div",
       "atelier-meta",
-      `MANUSCRIPT SHEET · BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")} · 随附原画笔记纸页`
+      `原画手稿页 · BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")}`
     );
     this.el(headerLeft, "div", "atelier-note-sheet-title", `《${item.name || "未命名档案"}》`);
     this.el(headerLeft, "div", "atelier-meta", item.japaneseName || `${item.year || ""} ${item.season || ""}`);
@@ -3408,7 +3408,7 @@ class Dashboard3DSpace {
     this.action(
       headerRight,
       "open-review-studio-sheet",
-      "💬 观片手札工作台",
+      "观片手札工作台",
       () => {
         reviewStudioService.openAnimeReviewStudioModal(this.plugin, item, {
           onUpdated: () => {
@@ -3444,9 +3444,9 @@ class Dashboard3DSpace {
     const drawContent = (parsed) => {
       body.empty();
 
-      // 01 核心编目与观看进度
+      // 01 作品信息与观看进度
       const sec1 = this.el(body, "section", "atelier-note-section");
-      this.el(sec1, "h3", "", "01 · 档案编目与观看记录 / CATALOGUE RECORD");
+      this.el(sec1, "h3", "", "01 · 作品详情与观看记录 / CATALOGUE RECORD");
       const kvGrid = this.el(sec1, "div", "atelier-note-kv-grid");
 
       const rawBgm = Number(item.preciseScore ?? item.publicScore ?? item.bangumiScore);
@@ -3505,7 +3505,7 @@ class Dashboard3DSpace {
             }
           };
 
-          const copyBtn = this.el(metaRow, "button", "atelier-text-action", "📋 复制");
+          const copyBtn = this.el(metaRow, "button", "atelier-text-action", "复制");
           copyBtn.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -3520,8 +3520,8 @@ class Dashboard3DSpace {
             "div",
             "",
             rv.isPlaceholder
-              ? "⏱️ 已打下看番时间点占位锚点，点击上方「💬 观片手札工作台」可补齐正文感想。"
-              : rv.text || (rv.images?.length ? `🖼️ [附 ${rv.images.length} 张截图]` : "")
+              ? "已打下看番时间点占位锚点，点击上方「观片手札工作台」可补齐正文感想。"
+              : rv.text || (rv.images?.length ? `[附 ${rv.images.length} 张截图]` : "")
           );
         });
       } else if (parsed.userParagraphs.length > 0) {
@@ -3533,7 +3533,7 @@ class Dashboard3DSpace {
           sec2,
           "p",
           "atelier-note-paragraph",
-          `当前笔记《${item.name}》尚未填写观片手札或长评。您可点击右上角「💬 观片手札工作台」随时记录单集吐槽、打下时间点占位或粘贴截图。`
+          `当前笔记《${item.name}》尚未填写观片手札或长评。您可点击右上角「观片手札工作台」随时记录单集吐槽、打下时间点占位或粘贴截图。`
         );
       }
 
@@ -3633,7 +3633,7 @@ class Dashboard3DSpace {
         if (item.isSamplePreviewItem) {
           item.personalScore = score;
           this.audio.cue("confirm");
-          new Notice("✨ 示例样片预览：已临时体验打分（收录真实动画后将自动保存至本地笔记）");
+          new Notice("示例样片预览：已临时体验打分（收录真实动画后将自动保存至本地笔记）");
           this.renderDetail(item);
           return;
         }
@@ -3663,7 +3663,7 @@ class Dashboard3DSpace {
         item.watchedEpisodes = next;
         drawProgress();
         this.audio.cue("confirm");
-        new Notice("✨ 示例样片预览：已临时体验追番进度更新");
+        new Notice("示例样片预览：已临时体验追番进度更新");
         return;
       }
 
@@ -3685,7 +3685,7 @@ class Dashboard3DSpace {
         if (item.isSamplePreviewItem) {
           item.state = state;
           this.audio.cue("confirm");
-          new Notice(`✨ 示例样片预览：已临时切换为「${state}」`);
+          new Notice(`示例样片预览：已临时切换为「${state}」`);
           this.renderDetail(item);
           return;
         }
@@ -3810,7 +3810,7 @@ class Dashboard3DSpace {
       "button",
       "atelier-primary-action",
       item.isSamplePreviewItem
-        ? "✨ 退出示例并收录真实动画"
+        ? "退出示例并收录真实动画"
         : localInfo?.nextEpisodeFile
           ? `▶ 播放第 ${localInfo.nextEpisodeNumber || Number(item.watchedEpisodes || 0) + 1} 话`
           : "打开动画笔记 ↗"
@@ -3838,7 +3838,7 @@ class Dashboard3DSpace {
       actions,
       "button",
       "atelier-text-action",
-      reviewCount > 0 ? `💬 观片手札 (${reviewCount})` : "💬 观片手札"
+      reviewCount > 0 ? `观片手札 (${reviewCount})` : "观片手札"
     );
     reviewBtn.dataset.ui = "open-reviews-studio";
     reviewBtn.onclick = () => {
@@ -3856,7 +3856,7 @@ class Dashboard3DSpace {
       });
     };
 
-    const viewer = this.el(actions, "button", "atelier-text-action", "360° 装帧检视 ↗");
+    const viewer = this.el(actions, "button", "atelier-text-action", "360° 装帧预览 ↗");
     viewer.onclick = () => {
       this.activeViewer = new ModelViewer(this, item);
       this.activeViewer.open();
@@ -3884,11 +3884,11 @@ class Dashboard3DSpace {
     }
 
     if (this.brandSubElement) {
-      const subLabel = this.statusSubView === "easel" ? "画报折屏展架" : "开架阅览回廊";
+      const subLabel = this.statusSubView === "easel" ? "折屏展架" : "开架回廊";
       this.brandSubElement.textContent =
         this.lensMode === "highscore"
-          ? `HIGH-SCORE CURATED HALL · 四柱高分策展 · 馆藏 ${this.items.length} 部`
-          : `BANGUMI ORIGINAL CEL ARCHIVE · ${subLabel} · 馆藏 ${this.items.length} 部 · 轨道 ${this.laneCount} 条`;
+          ? `高分精选展陈 · 馆藏 ${this.items.length} 部`
+          : `${subLabel} · 馆藏 ${this.items.length} 部 · 分栏 ${this.laneCount} 组`;
     }
 
     const active = Boolean(this.settings.audio && this.audio.context?.state === "running");
@@ -4001,7 +4001,7 @@ class Dashboard3DSpace {
 
     const headerRow = this.el(panel, "div", "atelier-row");
     headerRow.style.justifyContent = "space-between";
-    this.el(headerRow, "h2", "", "空间设置与轨道编目 / ATELIER PREFERENCES");
+    this.el(headerRow, "h2", "", "空间设置与分栏管理");
     this.action(headerRow, "close-settings", "关闭设置 [ESC]", () => this.closeModal());
 
     // 实体档案装帧风格 & 双风格精装模型扩展包管理卡片（首帧同步渲染防闪白，随后异步校验磁盘状态）
@@ -4514,8 +4514,8 @@ class Dashboard3DSpace {
       "div",
       "boot-title",
       this.bootMode === "full"
-        ? `白昼原画室 · 已收录动画档案 ${this.items.length} 部`
-        : "ATELIER CEL / 原画分镜台就位"
+        ? `3D 原画展厅 · 已收录动画 ${this.items.length} 部`
+        : "3D 原画展厅 · 展陈就绪"
     );
 
     const totalSlots = this.hydrationTotal || POOL_ROWS * this.laneCount || 68;
@@ -5612,12 +5612,13 @@ class ModelViewer {
   }
 
   open() {
+    this.space.stopLoop();
     this.root = this.space.el(this.space.root, "section", "atelier-viewer");
     const host = this.space.el(this.root, "div", "atelier-viewer-canvas");
     const header = this.space.el(this.root, "div", "atelier-viewer-ui");
 
-    this.space.el(header, "div", "atelier-mark", `360° 装帧检视 ／ 《${this.item.name || "未命名档案"}》`);
-    this.space.action(header, "close-viewer", "关闭检视", () => this.close());
+    this.space.el(header, "div", "atelier-mark", `360° 装帧预览 ／ 《${this.item.name || "未命名档案"}》`);
+    this.space.action(header, "close-viewer", "关闭预览", () => this.close());
 
     const tools = this.space.el(this.root, "div", "atelier-viewer-tools");
     this.space.action(tools, "explode", "＋ 拆解装帧", () => { this.targetExplode = 1; });
@@ -5652,13 +5653,37 @@ class ModelViewer {
 
     this.scene.add(this.model);
 
+    this.activePointers = new Map();
+    this.lastPinchDist = 0;
+
     this.onDown = (event) => {
+      this.activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.activePointers.size === 2) {
+        this.dragging = false;
+        const pts = Array.from(this.activePointers.values());
+        this.lastPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        return;
+      }
       this.dragging = true;
       this.lastX = event.clientX;
       this.lastY = event.clientY;
     };
 
     this.onMove = (event) => {
+      if (this.activePointers.has(event.pointerId)) {
+        this.activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+      if (this.activePointers.size === 2) {
+        const pts = Array.from(this.activePointers.values());
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        if (this.lastPinchDist > 8) {
+          const delta = (this.lastPinchDist - dist) * 0.022;
+          this.camDist = clamp(this.camDist + delta, 4.2, 11.5);
+          this.camera.position.z = this.camDist;
+        }
+        this.lastPinchDist = dist;
+        return;
+      }
       if (!this.dragging) return;
       this.angle += (event.clientX - this.lastX) * 0.008;
       this.tiltX = clamp(this.tiltX + (event.clientY - (this.lastY ?? event.clientY)) * 0.004, -0.45, 0.45);
@@ -5666,8 +5691,18 @@ class ModelViewer {
       this.lastY = event.clientY;
     };
 
-    this.onUp = () => {
-      this.dragging = false;
+    this.onUp = (event) => {
+      if (event && event.pointerId !== undefined) {
+        this.activePointers.delete(event.pointerId);
+      } else {
+        this.activePointers.clear();
+      }
+      if (this.activePointers.size < 2) {
+        this.lastPinchDist = 0;
+      }
+      if (this.activePointers.size === 0) {
+        this.dragging = false;
+      }
     };
 
     this.onWheel = (event) => {
@@ -5696,6 +5731,10 @@ class ModelViewer {
 
   render = () => {
     if (!this.root) return;
+    if (typeof document !== "undefined" && document.hidden) {
+      this.rafId = requestAnimationFrame(this.render);
+      return;
+    }
 
     this.explode += (this.targetExplode - this.explode) * 0.1;
     this.model.rotation.y = this.angle;
@@ -5733,6 +5772,10 @@ class ModelViewer {
     this.space.disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
+    this.root = null;
+    if (this.space && !this.space.isDestroyed && (typeof document === "undefined" || !document.hidden)) {
+      this.space.startLoop();
+    }
 
     this.root = null;
 

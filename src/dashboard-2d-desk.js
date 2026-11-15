@@ -1,12 +1,22 @@
-const { Notice } = require("obsidian");
+const { Notice, Menu } = require("obsidian");
 const { tryRequireNode, isMobileEnv, isDesktopNodeAvailable } = require("./platform-env.js");
 const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
-const { openLocalPathSafely, inspectLocalFolder } = require("./note-utils.js");
+const { openLocalPathSafely, inspectLocalFolder, matchesTagOrMetaQuery } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const animeDownloadService = require("./anime-download-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const characterArchiveService = require("./character-archive-service.js");
 const multiHallArchiveService = require("./multi-hall-archive-service.js");
+const v07Core = require("./v07-core.js");
+const v07Themes = require("./v07-themes.js");
+const v07Stage = require("./v07-anime-stage.js");
+const v07Adapters = require("./v07-adapters.js");
+const v07Styles = require("./v07-styles.js");
+const {
+  animateWorkspaceGlide,
+  paperSlipSwap,
+  scrollUnrollMorph
+} = require("./v08-motion-and-lens.js");
 
 /**
  * 提取同系列作品的季数、OVA、剧场版、篇章或副标题区分信息，
@@ -218,7 +228,13 @@ function matchesInstantSearch(item, rawQuery) {
     .join(" ")
     .toLowerCase();
 
-  return tokens.every((tok) => haystack.includes(tok));
+  return tokens.every((tok) => {
+    const cleanTok = tok.replace(/^#+/, "");
+    if (!cleanTok) return true;
+    if (haystack.includes(cleanTok) || haystack.includes(tok)) return true;
+    if (typeof matchesTagOrMetaQuery === "function" && matchesTagOrMetaQuery(item, cleanTok)) return true;
+    return false;
+  });
 }
 
 /**
@@ -433,11 +449,11 @@ function getSeasonSortOrderValue(seasonStr) {
 
 function getSeasonIcon(seasonStr) {
   const s = String(seasonStr || "");
-  if (/10|秋/.test(s)) return "🍁";
-  if (/0?7|夏/.test(s)) return "☀️";
-  if (/0?4|春/.test(s)) return "🌸";
-  if (/0?1|冬/.test(s)) return "❄️";
-  return "📅";
+  if (/10|秋/.test(s)) return "·";
+  if (/0?7|夏/.test(s)) return "·";
+  if (/0?4|春/.test(s)) return "·";
+  if (/0?1|冬/.test(s)) return "·";
+  return "·";
 }
 
 function collectAvailableSeasons(items) {
@@ -620,7 +636,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
       contentEl.addClass("curator-season-mgr-modal");
 
       contentEl.createEl("h2", {
-        text: "追番 · 多季度席位与滑动显示设置"
+        text: "追番 · 多季度筛选与滑动显示设置"
       });
       contentEl.createEl("p", {
         cls: "curator-season-mgr-desc",
@@ -650,7 +666,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
       };
 
       const limitLabel = prefRow.createEl("label", { cls: "curator-season-mgr-field" });
-      limitLabel.createSpan({ text: "单席位显示上限（0 = 不限数量）：" });
+      limitLabel.createSpan({ text: "单栏显示上限（0 = 不限数量）：" });
       const limitInput = limitLabel.createEl("input", {
         type: "number",
         value: String(this.displayLimit)
@@ -662,11 +678,11 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
         this.displayLimit = Math.max(0, parseInt(limitInput.value, 10) || 0);
       };
 
-      // 2. 当前已固定的季度席位列表（支持排序、筛选范围切换、移除）
+      // 2. 当前已固定的番季筛选列表（支持排序、筛选范围切换、移除）
       const pinnedSection = contentEl.createDiv("curator-season-mgr-box");
       pinnedSection.createDiv({
         cls: "curator-season-mgr-subtitle",
-        text: `二、已固定在案头追番席的番季标签（当前 ${this.pinned.length} 个）`
+        text: `二、已固定的番季筛选标签（当前 ${this.pinned.length} 个）`
       });
 
       if (this.pinned.length === 0) {
@@ -681,7 +697,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
           const row = pinnedList.createDiv("curator-season-mgr-row");
           row.createSpan({
             cls: "curator-season-mgr-name",
-            text: `${getSeasonIcon(p.season)} ${p.year}年${p.season}（当前匹配 ${matchedCount} 部）`
+            text: `${p.year}年${p.season}（当前匹配 ${matchedCount} 部）`
           });
 
           const filterSel = row.createEl("select", { cls: "curator-season-mgr-filter" });
@@ -774,7 +790,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
 
       const addCustomBtn = customAddRow.createEl("button", {
         cls: "curator-dl-btn",
-        text: "+ 添加指定季度到追番席"
+        text: "+ 添加指定季度"
       });
       addCustomBtn.onclick = () => {
         const y = yearInput.value.trim().replace(/年$/, "");
@@ -797,7 +813,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
 
       const saveBtn = footer.createEl("button", {
         cls: "curator-dl-btn is-primary",
-        text: "保存追番席设置"
+        text: "保存季度筛选设置"
       });
       saveBtn.onclick = async () => {
         this.plugin.settings.deskPinnedSeasons = this.pinned;
@@ -806,7 +822,7 @@ function openDeskSeasonManagerModal(plugin, items, onSaved) {
         this.plugin.settings.deskDisplayLimit = this.displayLimit;
         await this.plugin.saveSettings();
         if (NoticeClass) {
-          new NoticeClass(`已保存案头追番席配置（已固定 ${this.pinned.length} 个季度席位）`);
+          new NoticeClass(`已保存番季筛选设置（已固定 ${this.pinned.length} 个季度）`);
         }
         this.close();
         if (typeof this.onSaved === "function") {
@@ -847,7 +863,7 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
   });
   head.createDiv({
     cls: "curator-starter-sub",
-    text: "当前笔记库中还没有收录动画案卷。无需复杂设置，任选下方最顺手的一种方式即可立起第一份典藏："
+    text: "当前笔记库中还没有收录动画笔记。无需复杂设置，任选下方最顺手的一种方式即可立起第一份典藏："
   });
 
   const grid = box.createDiv("curator-starter-grid");
@@ -855,7 +871,7 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
   // 路径 1：在线搜索单部喜欢的番剧立即建档
   const cardSearch = grid.createDiv("curator-starter-card");
   cardSearch.createDiv({ cls: "curator-starter-step", text: "方式一 · 即搜即藏" });
-  cardSearch.createEl("h3", { cls: "curator-starter-card-title", text: "🔍 搜一部喜欢的动画立即建档" });
+  cardSearch.createEl("h3", { cls: "curator-starter-card-title", text: "搜一部喜欢的动画立即建档" });
   cardSearch.createDiv({
     cls: "curator-starter-card-desc",
     text: "直接检索 Bangumi 条目，自动抓取高清封面、番季年份、制作阵容与评分，一键生成精美本地笔记。"
@@ -906,7 +922,7 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
   // 路径 2：填入 Bangumi ID 一键同步历史片单
   const cardSync = grid.createDiv("curator-starter-card");
   cardSync.createDiv({ cls: "curator-starter-step", text: "方式二 · 账号迁移" });
-  cardSync.createEl("h3", { cls: "curator-starter-card-title", text: "🔄 同步已有 Bangumi 追番片单" });
+  cardSync.createEl("h3", { cls: "curator-starter-card-title", text: "同步已有 Bangumi 追番片单" });
   cardSync.createDiv({
     cls: "curator-starter-card-desc",
     text: "如果你平时已经在 bgm.tv 标记过动画，填入你的 Bangumi 数字用户 ID 即可批量同步「在看 / 已看 / 想看」。"
@@ -938,16 +954,16 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
   // 路径 3：零污染开启 3 部示例样片预览（同时打通 2D 与 3D 展厅）
   const cardSample = grid.createDiv("curator-starter-card is-sample-card");
   cardSample.createDiv({ cls: "curator-starter-step", text: "方式三 · 零打扰逛展" });
-  cardSample.createEl("h3", { cls: "curator-starter-card-title", text: "✨ 先载入 3 部示例样片逛逛展厅" });
+  cardSample.createEl("h3", { cls: "curator-starter-card-title", text: "先载入 3 部示例样片体验" });
   cardSample.createDiv({
     cls: "curator-starter-card-desc",
-    text: "纯内存虚拟样片，绝不在你的笔记库新建任何文件；可立即体验二维追番席、统计年鉴与「三维白昼原画室」！"
+    text: "纯内存虚拟样片，绝不在你的笔记库新建任何文件；可立即体验追番主舞台、看番记录与「三维白昼原画室」。"
   });
   const sampleActions = cardSample.createDiv("curator-starter-sample-actions");
   const startSampleBtn = sampleActions.createEl("button", {
-    cls: "curator-top-btn is-3d-entry mod-cta",
-    text: "✨ 载入 3 部示例样片预览"
+    cls: "curator-top-btn is-3d-entry mod-cta"
   });
+  v07Core.setBtnIconLabel(startSampleBtn, "sparkles", "载入 3 部示例样片预览");
   startSampleBtn.dataset.starterAction = "start-sample-preview";
   startSampleBtn.onclick = async (e) => {
     e.preventDefault();
@@ -958,7 +974,7 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
       category: "样片导览",
       priority: roxyMascotService.PRIORITY.NORMAL,
       dedupeKey: "onboarding:sample_start",
-      message: "欢迎光临！我已经为您临时摆上了 3 部示例原画案卷，您可以随意翻阅二维案头或点击右上角进入「三维原画档案室」体验，不会弄乱您的笔记库哦。"
+      message: "欢迎光临！我已经为您临时摆上了 3 部示例作品，您可以随意翻阅档案馆或点击右上角进入「3D 展厅」体验，不会弄乱您的笔记库哦。"
     });
     if (rootContainer) {
       await renderCuratorDesk(plugin, rootContainer, deskOptions, helpers);
@@ -966,9 +982,9 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
   };
 
   const sample3DBtn = sampleActions.createEl("button", {
-    cls: "curator-top-btn is-subtle",
-    text: "🧊 直接带样片进入三维原画室"
+    cls: "curator-top-btn is-subtle"
   });
+  v07Core.setBtnIconLabel(sample3DBtn, "cube", "直接带样片进入 3D 展厅");
   sample3DBtn.dataset.starterAction = "start-sample-3d";
   sample3DBtn.onclick = async (e) => {
     e.preventDefault();
@@ -1043,34 +1059,34 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
 
   const header = deskMount.createDiv("curator-section-header curator-desk-header");
   const titleWrap = header.createDiv("curator-section-title-wrap");
-  titleWrap.createEl("h2", { cls: "curator-section-title", text: "追番" });
+  titleWrap.createEl("h2", { cls: "curator-section-title", text: "在看列表与当季番" });
   titleWrap.createSpan({
     cls: `curator-section-badge ${hasWatching ? "is-watching-active" : "is-standby-mode"}`,
     text: hasWatching
       ? `连载跟进 ${watchingItems.length} 部`
       : recentItems.length > 0
       ? `本地待看新更 ${recentItems.length} 部`
-      : "待命候补席 · 暂无在看"
+      : "暂无在看"
   });
 
   const controlsWrap = header.createDiv("curator-desk-controls-wrap");
   const tabs = controlsWrap.createDiv("curator-desk-tabs");
   const tabDefs = [
-    { id: "watching", label: `正在追番 (${watchingItems.length})`, title: "当前观看状态为「在看」的连载跟进作品" },
+    { id: "watching", label: `继续看 (${watchingItems.length})`, title: "当前观看状态为「在看」的连载跟进作品" },
     {
       id: "recent",
-      label: `📁 本地更新 (${recentItems.length})`,
+      label: `刚下载 (${recentItems.length})`,
       title: "仅展示本地视频文件夹内有剧集更新（本地视频集数 > 已看集数，或近期下载了新视频）的作品，完结老番或未建文件夹作品不会混入"
     }
   ];
 
-  // 追加用户自定义的多个季度收藏席位
+  // 追加用户自定义的多个番季标签
   for (const seasonCfg of pinnedSeasons) {
     const sItems = filterItemsForPinnedSeason(items, seasonCfg);
     tabDefs.push({
       id: seasonCfg.id,
-      label: `${getSeasonIcon(seasonCfg.season)} ${seasonCfg.label} (${sItems.length})`,
-      title: `自定义季度追番席：${seasonCfg.label}（点击右侧「+ 季度席位」可自由增删季度）`,
+      label: `${seasonCfg.label} (${sItems.length})`,
+      title: `自定义番季筛选：${seasonCfg.label}（点击右侧「+ 番季筛选」可自由增删季度）`,
       isSeasonTab: true
     });
   }
@@ -1090,13 +1106,13 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     };
   });
 
-  // 「+ 季度席位」配置按钮
+  // 「+ 番季筛选」配置按钮
   const addSeasonBtn = tabs.createEl("button", {
     cls: "curator-desk-tab-btn is-manage-seasons",
-    text: "+ 季度席位"
+    text: "+ 番季筛选"
   });
   addSeasonBtn.dataset.deskAction = "manage-seasons";
-  addSeasonBtn.title = "自由添加/管理多个季度的收藏动画席位，或调整案头追番席显示上限";
+  addSeasonBtn.title = "自由添加/管理多个季度的收藏动画筛选标签，或调整显示上限";
   addSeasonBtn.onclick = (e) => {
     e.preventDefault();
     openDeskSeasonManagerModal(plugin, items, ({ layoutMode: newMode }) => {
@@ -1112,14 +1128,14 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     text: "‹"
   });
   scrollLeftBtn.dataset.deskAction = "scroll-left";
-  scrollLeftBtn.title = "向左滑动案头席位";
+  scrollLeftBtn.title = "向左滑动卡片列表";
 
   const scrollRightBtn = navBar.createEl("button", {
     cls: "curator-desk-scroll-btn",
     text: "›"
   });
   scrollRightBtn.dataset.deskAction = "scroll-right";
-  scrollRightBtn.title = "向右滑动案头席位";
+  scrollRightBtn.title = "向右滑动卡片列表";
 
   const toggleLayoutBtn = navBar.createEl("button", {
     cls: "curator-desk-layout-btn",
@@ -1137,7 +1153,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     renderActiveDeskSection(plugin, deskMount, state, helpers);
   };
 
-  // 当没有正在追番作品且处于 watching 页时，给出轻量紧凑的案头待命提示条
+  // 当没有正在追番作品且处于 watching 页时，给出轻量紧凑的待看提示条
   if (!hasWatching && activeTab === "watching") {
     const fallbackBanner = deskMount.createDiv("curator-desk-fallback-banner");
     const noticeLeft = fallbackBanner.createDiv("curator-desk-fallback-text");
@@ -1146,7 +1162,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
       text: "✦"
     });
     noticeLeft.createSpan({
-      text: "当前暂无「在看」作品。以下为您展示待命候补案卷（可左右滑动浏览全部），点击「▶ 置入在看」即可开启连载追踪，或切换至「🗂️ 编目总览」检索全部馆藏。"
+      text: "当前暂无「在看」作品。以下展示待看作品（可左右滑动浏览全部），点击「▶ 设为在看」即可开启连载追踪，或切换至「全部番剧」检索全部馆藏。"
     });
     const fallbackActions = fallbackBanner.createDiv("curator-desk-fallback-actions");
     if (pinnedSeasons.length > 0) {
@@ -1162,7 +1178,7 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     if (typeof helpers?.switchWorkspaceMode === "function") {
       const toCatalogBtn = fallbackActions.createEl("button", {
         cls: "curator-mini-btn",
-        text: "🗂️ 前往编目总览 →"
+        text: "前往全部番剧 →"
       });
       toCatalogBtn.onclick = () => {
         helpers.switchWorkspaceMode("catalog", { statusFilter: planItems.length > 0 ? "想看" : "all" });
@@ -1206,12 +1222,12 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
       });
       emptyDesk.createDiv({
         cls: "curator-empty-sub",
-        text: "「本地更新」仅由动画本地文件夹（下载路径）中的真实视频集数决定：当本地视频集数 > 已观看集数，或本地目录内新放入视频文件时会自动出现在此席位。"
+        text: "「刚下载」仅由动画本地文件夹（下载路径）中的真实视频集数决定：当本地视频集数 > 已观看集数，或本地目录内新放入视频文件时会自动出现在此处。"
       });
       const emptyActions = emptyDesk.createDiv("curator-empty-actions");
       const scanNowBtn = emptyActions.createEl("button", {
         cls: "curator-mini-btn is-accent",
-        text: "🔄 立即扫描全部本地视频文件夹"
+        text: "立即扫描全部本地视频文件夹"
       });
       scanNowBtn.onclick = async () => {
         await plugin.checkAllLocalStatus(true);
@@ -1224,16 +1240,16 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
       });
       emptyDesk.createDiv({
         cls: "curator-empty-sub",
-        text: "可通过「导入单个/批量动画」补充该季度番剧，或点击「+ 季度席位」切换筛选范围。"
+        text: "可通过「导入单个/批量动画」补充该季度番剧，或点击「+ 番季筛选」切换筛选范围。"
       });
     } else {
       emptyDesk.createDiv({
         cls: "curator-empty-title",
-        text: "案头席位暂无可展示的动画档案"
+        text: "当前列表暂无可展示的动画档案"
       });
       emptyDesk.createDiv({
         cls: "curator-empty-sub",
-        text: "可通过命令面板导入动画笔记，或切换至「🗂️ 馆藏编目总览」调整作品观看状态。"
+        text: "可通过命令面板导入动画笔记，或切换至「全部番剧」调整作品观看状态。"
       });
     }
     return;
@@ -1319,7 +1335,7 @@ function renderCardReviewMicroStrip(plugin, body, item, state, helpers, isStandb
   if (reviews.length === 0) {
     strip.createSpan({
       cls: "curator-desk-review-empty-prompt",
-      text: isStandby ? "💬 记一笔观片手札…" : "💬 记一笔本集吐槽 / 打个时间点锚点…"
+      text: isStandby ? "记一笔观片手札…" : "随手记一句本集观感 / 打个时间点锚点…"
     });
     strip.title = "点击打开观片手札工作台（自动锁定当前集数，支持 1422 智能时间码与截图粘贴）";
     strip.onclick = openStudio;
@@ -1354,8 +1370,8 @@ function renderCardReviewMicroStrip(plugin, body, item, state, helpers, isStandb
 
   const hasCoverImg = Boolean(latest.coverImage || (Array.isArray(latest.images) && latest.images.length > 0));
   const snippetText = latest.isPlaceholder
-    ? `${hasCoverImg ? "🖼️ " : ""}⏱️ 待补完锚点（点击补齐感想）`
-    : `${hasCoverImg ? "🖼️ " : ""}“${String(latest.text || "[附图手札]").replace(/\s+/g, " ")}”`;
+    ? `${hasCoverImg ? "[图] " : ""}待补完时间点锚点（点击补齐感想）`
+    : `${hasCoverImg ? "[图] " : ""}“${String(latest.text || "[附图手札]").replace(/\s+/g, " ")}”`;
 
   const textSpan = strip.createSpan({
     cls: `curator-desk-review-snippet ${latest.isPlaceholder ? "is-placeholder-text" : ""}`,
@@ -1365,7 +1381,7 @@ function renderCardReviewMicroStrip(plugin, body, item, state, helpers, isStandb
 
   const countBadge = strip.createSpan({
     cls: "curator-desk-review-count curator-mono",
-    text: placeholderCount > 0 ? `💬${reviews.length}·待补${placeholderCount}` : `💬${reviews.length} ▸`
+    text: placeholderCount > 0 ? `${reviews.length}条·待补${placeholderCount}` : `${reviews.length}条 ▸`
   });
   countBadge.title = `共 ${reviews.length} 条观片手札`;
 
@@ -1449,8 +1465,8 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
       cls: `curator-local-ep-pill ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
       text:
         localResult.newCount > 0
-          ? `📁 本地 +${localResult.newCount}集`
-          : `📁 本地 ${localResult.fileCount}集`
+          ? `本地 +${localResult.newCount}集`
+          : `本地 ${localResult.fileCount}集`
     });
     localPill.title = `本地文件夹共 ${localResult.fileCount} 集视频，未看新集 ${localResult.newCount} 集（点击打开本地文件夹）`;
     localPill.onclick = async (e) => {
@@ -1516,6 +1532,50 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     });
   }
 
+  const triggerDeskWand = () => {
+    multiHallArchiveService.openMagicWandRelationModal(
+      plugin,
+      {
+        type: "anime",
+        name: item.name,
+        title: item.name,
+        studio: item.studio,
+        file: item.file
+      },
+      state.items || [],
+      {
+        onSwitchMode: helpers.switchWorkspaceMode,
+        onFilterCatalog: helpers.switchWorkspaceMode
+          ? (kw) => helpers.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+          : null
+      }
+    );
+  };
+  multiHallArchiveService.bindMagicWandLongPress(card, triggerDeskWand);
+  card.addEventListener("contextmenu", (ev) => {
+    if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select")) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const menu = new Menu();
+    menu.addItem((mi) =>
+      mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerDeskWand())
+    );
+    menu.addItem((mi) =>
+      mi.setTitle("打开观片手札").setIcon("message-square").onClick(() => {
+        reviewStudioService.openAnimeReviewStudioModal(plugin, item);
+      })
+    );
+    if (item.file) {
+      menu.addItem((mi) =>
+        mi.setTitle("打开动画笔记").setIcon("file-text").onClick(async () => {
+          const leaf = plugin.app.workspace.getLeaf(true);
+          await leaf.openFile(item.file);
+        })
+      );
+    }
+    menu.showAtMouseEvent(ev);
+  });
+
   // 分支 A：轻量候补推荐卡
   if (isStandby) {
     if (reviews.length > 0) {
@@ -1524,23 +1584,23 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     const standbyFooter = body.createDiv("curator-standby-footer");
     const watchNowBtn = standbyFooter.createEl("button", {
       cls: "curator-quick-watch-btn curator-standby-watch-btn",
-      text: "▶ 置入在看"
+      text: "▶ 设为在看"
     });
-    watchNowBtn.title = "一键将此作品置入正在追番席位";
+    watchNowBtn.title = "一键将此作品设为「在看」";
     watchNowBtn.onclick = async (e) => {
       e.preventDefault();
       e.stopPropagation();
       state.deskTab = "watching";
       await plugin.quickUpdateAnimeNote(item, { state: "在看" });
       if (globalThis.__BangumiManagerNotice) {
-        new globalThis.__BangumiManagerNotice(`已将《${item.name}》置入案头「在看」席位`);
+        new globalThis.__BangumiManagerNotice(`已将《${item.name}》设为「在看」`);
       }
     };
 
     const rightStandbyActions = standbyFooter.createDiv("curator-standby-right-actions");
     const rvBtn = rightStandbyActions.createEl("button", {
       cls: "curator-standby-note-btn",
-      text: reviews.length > 0 ? `💬 观片手札(${reviews.length})` : "💬 观片手札"
+      text: reviews.length > 0 ? `观片手札(${reviews.length})` : "观片手札"
     });
     rvBtn.dataset.deskAction = "open-reviews";
     rvBtn.title = "打开观片手札工作台";
@@ -1659,7 +1719,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
 
   const reviewActionBtn = actionsRow.createEl("button", {
     cls: `curator-action-link is-review-btn ${reviews.length > 0 ? "has-reviews" : ""}`,
-    text: reviews.length > 0 ? `💬 观片手札(${reviews.length})` : "💬 观片手札"
+    text: reviews.length > 0 ? `观片手札(${reviews.length})` : "观片手札"
   });
   reviewActionBtn.dataset.deskAction = "open-reviews";
   reviewActionBtn.title = "打开观片手札工作台（支持单集多条吐槽、1422 智能时间码、截图粘贴与播放器空降）";
@@ -1672,7 +1732,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
   if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
     const dlBtn = actionsRow.createEl("button", {
       cls: "curator-action-link is-download",
-      text: item.rssUrl ? "⬇ 追更/下载" : "⬇ 下载/RSS"
+      text: item.rssUrl ? "追更/下载" : "下载/RSS"
     });
     dlBtn.dataset.deskAction = "open-download";
     dlBtn.title = "搜索漫猫 (comicat.org) 发布源、获取单集唯一 RSS 或调用 qBittorrent 下载剧集";
@@ -1690,7 +1750,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
   if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
     const dirBtn = actionsRow.createEl("button", {
       cls: "curator-action-link",
-      text: "📂 目录"
+      text: "本地目录"
     });
     dirBtn.title = item.downloadPath;
     dirBtn.onclick = async (e) => {
@@ -1700,10 +1760,10 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
         roxyMascotService.emitRoxyEvent(plugin, {
           type: "local:not_found",
           state: "blocked",
-          category: "本地卷宗",
+          category: "本地视频",
           priority: roxyMascotService.PRIORITY.NORMAL,
           dedupeKey: `local:not_found:${item.name}`,
-          message: `那个……《${item.name}》的本地目录里好像还没有放入剧集视频文件呢，可以点击旁边「⬇ 下载/RSS」获取剧集哦。`
+          message: `那个……《${item.name}》的本地目录里好像还没有放入剧集视频文件呢，可以点击旁边「下载/RSS」获取剧集哦。`
         });
       }
       await openLocalPathSafely(item.downloadPath);
@@ -1712,7 +1772,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
 
   const noteBtn = actionsRow.createEl("button", {
     cls: "curator-action-link",
-    text: "✎ 笔记"
+    text: "笔记"
   });
   noteBtn.onclick = async (e) => {
     e.preventDefault();
@@ -1726,7 +1786,7 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
   if (item.subjectId) {
     const trendBtn = actionsRow.createEl("button", {
       cls: "curator-action-link",
-      text: "📈 趋势"
+      text: "评分趋势"
     });
     trendBtn.onclick = (e) => {
       e.preventDefault();
@@ -1734,37 +1794,6 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
       helpers.openTrendModal(item);
     };
   }
-
-  const triggerDeskWand = () => {
-    multiHallArchiveService.openMagicWandRelationModal(
-      plugin,
-      {
-        type: "anime",
-        name: item.name,
-        title: item.name,
-        studio: item.studio,
-        file: item.file
-      },
-      state.items || [],
-      {
-        onSwitchMode: helpers.switchWorkspaceMode,
-        onFilterCatalog: helpers.switchWorkspaceMode
-          ? (kw) => helpers.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
-          : null
-      }
-    );
-  };
-  const wandBtn = actionsRow.createEl("button", {
-    cls: "curator-action-link",
-    text: "🪄 关联"
-  });
-  wandBtn.title = "长按卡片或点击打开洛琪希魔杖同源星轨关联谱";
-  wandBtn.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    triggerDeskWand();
-  };
-  multiHallArchiveService.bindMagicWandLongPress(card, triggerDeskWand);
 }
 
 /**
@@ -1798,18 +1827,18 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       const colConfig = (plugin.settings.customCollectionSections || []).find((c) => c.id === shelfId);
       if (colConfig) {
         baseFiltered = plugin.resolveCollectionItems(colConfig, allItems);
-        activeFilterLabel = `收藏展柜 · ${colConfig.title}`;
+        activeFilterLabel = `个人片单 · ${colConfig.title}`;
       }
     } else if (state.statusFilter.startsWith("query:")) {
       const queryId = state.statusFilter.slice("query:".length);
       const qConfig = (plugin.settings.customQuerySections || []).find((c) => c.id === queryId);
       if (qConfig) {
         baseFiltered = plugin.filterCustomQueryItems(allItems, qConfig);
-        activeFilterLabel = `查询分区 · ${qConfig.title}`;
+        activeFilterLabel = `智能筛选 · ${qConfig.title}`;
       }
     } else {
       baseFiltered = allItems.filter((it) => (it.state || "未设置") === state.statusFilter);
-      activeFilterLabel = `状态 · ${state.statusFilter}`;
+      activeFilterLabel = `状态 · ${state.statusFilter === "抛弃" ? "搁置" : state.statusFilter}`;
     }
   }
 
@@ -1831,13 +1860,13 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
 
     header = catalogMount.createDiv("curator-section-header curator-catalog-header");
     const titleWrap = header.createDiv("curator-section-title-wrap");
-    titleWrap.createEl("h2", { cls: "curator-section-title", text: "编目总览" });
+    titleWrap.createEl("h2", { cls: "curator-section-title", text: "全部番剧" });
     const countBadge = titleWrap.createSpan({
       cls: "curator-section-badge"
     });
     countBadge.dataset.role = "catalog-count-badge";
 
-    // 模块头部右侧：重置筛选 + 排序下拉 + 画廊封面/编目索引切换
+    // 模块头部右侧：重置筛选 + 排序下拉 + 封面视图/列表视图切换
     const headerControls = header.createDiv("curator-view-controls curator-catalog-header-controls");
     const clearFilterBtn = headerControls.createEl("button", {
       cls: "curator-mini-btn curator-catalog-reset-btn",
@@ -1883,21 +1912,22 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
 
     const modeGroup = headerControls.createDiv("curator-mode-toggle-group");
     const btnGallery = modeGroup.createEl("button", {
-      cls: `curator-mode-btn ${state.viewMode === "gallery" ? "is-active" : ""}`,
-      text: "⊞ 画廊封面"
+      cls: `curator-mode-btn ${state.viewMode === "gallery" ? "is-active" : ""}`
     });
+    v07Core.setBtnIconLabel(btnGallery, "grid", "封面视图", 14);
     btnGallery.dataset.viewMode = "gallery";
 
     const btnIndex = modeGroup.createEl("button", {
-      cls: `curator-mode-btn ${state.viewMode === "index" ? "is-active" : ""}`,
-      text: "☰ 编目索引"
+      cls: `curator-mode-btn ${state.viewMode === "index" ? "is-active" : ""}`
     });
+    v07Core.setBtnIconLabel(btnIndex, "list", "列表视图", 14);
     btnIndex.dataset.viewMode = "index";
 
     btnGallery.onclick = (e) => {
       e.preventDefault();
       if (state.viewMode !== "gallery") {
         state.viewMode = "gallery";
+        state._nextCatalogAnim = { dir: -1, small: false };
         persistDeskPrefs(plugin, state);
         roxyMascotService.emitRoxyEvent(plugin, {
           type: "view:mode_switch",
@@ -1905,7 +1935,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
           category: "视图切换",
           priority: roxyMascotService.PRIORITY.LOW,
           dedupeKey: "view:gallery",
-          message: "已经为您切换回「画廊封面」模式了，看着一排排封面心情也会变好呢。"
+          message: "已经为您切换回「封面视图」了，看着一排排封面心情也会变好呢。"
         });
         renderCatalogSection(plugin, catalogMount, state, helpers);
       }
@@ -1915,6 +1945,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       e.preventDefault();
       if (state.viewMode !== "index") {
         state.viewMode = "index";
+        state._nextCatalogAnim = { dir: 1, small: false };
         persistDeskPrefs(plugin, state);
         roxyMascotService.emitRoxyEvent(plugin, {
           type: "view:mode_switch",
@@ -1922,20 +1953,21 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
           category: "视图切换",
           priority: roxyMascotService.PRIORITY.LOW,
           dedupeKey: "view:index",
-          message: "已经切换成「编目索引」台账模式了，像这样核对集数和评分对比会更清晰一些。"
+          message: "已经切换成「列表视图」了，像这样核对集数和评分对比会更清晰一些。"
         });
         renderCatalogSection(plugin, catalogMount, state, helpers);
       }
     };
 
-    // 目录工具栏：即时检索框 + 状态/展柜快筛胶囊栏
+    // 目录工具栏：即时检索框 + 状态/片单快筛胶囊栏 + 高频题材标签快筛
     toolbar = catalogMount.createDiv("curator-catalog-toolbar");
     const searchWrap = toolbar.createDiv("curator-search-wrap");
-    searchWrap.createSpan({ cls: "curator-search-icon", text: "⌕" });
+    const searchIconSpan = searchWrap.createSpan({ cls: "curator-search-icon" });
+    searchIconSpan.appendChild(v07Core.icon("search", 14));
     const searchInput = searchWrap.createEl("input", {
       type: "text",
       cls: "curator-search-input",
-      placeholder: "即时检索：中文标题 / 日文原名 / BGM编号 / 标签 / 制作公司 / 年份番季..."
+      placeholder: "搜索标题、日文原名、标签（如 百合 / 原创）、制作公司、年份…"
     });
     searchInput.value = state.searchQuery || "";
     const searchClearBtn = searchWrap.createEl("button", {
@@ -1959,6 +1991,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
     };
 
     toolbar.createDiv("curator-filter-bar");
+    toolbar.createDiv("curator-catalog-tagbar");
     bodyMount = catalogMount.createDiv("curator-catalog-body-mount");
   }
 
@@ -1997,7 +2030,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       { key: "在看", label: "在看", count: metrics.stateCounts["在看"] },
       { key: "已看", label: "已看", count: metrics.stateCounts["已看"] },
       { key: "想看", label: "想看", count: metrics.stateCounts["想看"] },
-      { key: "抛弃", label: "抛弃", count: metrics.stateCounts["抛弃"] }
+      { key: "抛弃", label: "搁置", count: metrics.stateCounts["抛弃"] }
     ];
     const collections = Array.isArray(plugin.settings.customCollectionSections)
       ? plugin.settings.customCollectionSections
@@ -2006,7 +2039,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       const resolved = plugin.resolveCollectionItems(col, allItems);
       baseFilters.push({
         key: `shelf:${col.id}`,
-        label: `展柜·${col.title}`,
+        label: `片单 · ${col.title}`,
         count: resolved.length
       });
     }
@@ -2018,7 +2051,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       const matched = plugin.filterCustomQueryItems(allItems, cq);
       baseFilters.push({
         key: `query:${cq.id}`,
-        label: `分区·${cq.title}`,
+        label: `筛选 · ${cq.title}`,
         count: matched.length
       });
     }
@@ -2033,52 +2066,108 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       pill.createSpan({ cls: "curator-pill-count curator-mono", text: String(f.count) });
       pill.onclick = (e) => {
         e.preventDefault();
+        if (state.statusFilter === f.key) return;
         state.statusFilter = f.key;
+        state._nextCatalogAnim = { dir: 1, small: true };
         renderCatalogSection(plugin, catalogMount, state, helpers);
       };
     });
   }
 
-  bodyMount.empty();
-
-  if (sortedItems.length === 0) {
-    if (state.searchQuery) {
-      roxyMascotService.emitRoxyEvent(plugin, {
-        type: "search:empty",
-        state: "surprised",
-        category: "检索轮空",
-        priority: roxyMascotService.PRIORITY.NORMAL,
-        dedupeKey: `search:empty:${state.searchQuery}`,
-        message: `咦，馆藏里没有找到关于“${state.searchQuery}”的案卷呢……要不要换个日文原名、制作公司或者 Bangumi 编号再查查看？`
-      });
-    } else if (state.statusFilter && state.statusFilter !== "all") {
-      roxyMascotService.emitRoxyEvent(plugin, {
-        type: "filter:empty",
-        state: "blocked",
-        category: "筛选提示",
-        priority: roxyMascotService.PRIORITY.NORMAL,
-        dedupeKey: `filter:empty:${state.statusFilter}`,
-        message: `当前的「${activeFilterLabel}」分类下还没有收录作品呢，需要的话可以点击右上角把筛选条件重置一下。`
-      });
+  // 同步高频题材标签一键快筛栏
+  const tagBar = toolbar.querySelector(".curator-catalog-tagbar");
+  if (tagBar) {
+    const tagCounts = new Map();
+    const skipTagRe = /^(?:bangumi|\d{4}(?:年(?:\d{1,2}月)?)?|\d{1,2}月(?:新番)?|TV|TVA|OVA|OAD|WEB|剧场版|动画|日本|日本动画|未分类)$/i;
+    for (const it of allItems) {
+      const seen = new Set();
+      for (const rawTok of String(it.tags || "").split(/[,，;；/|\s#\[\]"']+/)) {
+        const clean = rawTok.trim();
+        if (!clean || clean.length > 12 || skipTagRe.test(clean) || seen.has(clean)) continue;
+        seen.add(clean);
+        tagCounts.set(clean, (tagCounts.get(clean) || 0) + 1);
+      }
     }
-    const emptyBox = bodyMount.createDiv("curator-empty-box");
-    emptyBox.createDiv({
-      cls: "curator-empty-title",
-      text: state.searchQuery
-        ? `未检索到匹配“${state.searchQuery}”的动画档案`
-        : `当前筛选（${activeFilterLabel}）下暂无动画记录`
-    });
-    emptyBox.createDiv({
-      cls: "curator-empty-sub",
-      text: "可尝试搜索其他标题、日文原名、Bangumi 编号、制作公司，或切换上方状态快筛。"
-    });
-    return;
+    const topTagEntries = Array.from(tagCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12);
+
+    tagBar.empty();
+    if (topTagEntries.length > 0) {
+      tagBar.style.display = "flex";
+      const curQ = String(state.searchQuery || "").trim().replace(/^#+/, "");
+      topTagEntries.forEach(([tg, cnt]) => {
+        const active = curQ.toLowerCase() === tg.toLowerCase();
+        const chip = tagBar.createEl("button", {
+          cls: `curator-filter-pill is-tag-chip ${active ? "is-active" : ""}`
+        });
+        chip.createSpan({ cls: "curator-pill-label", text: `#${tg}` });
+        chip.createSpan({ cls: "curator-pill-count curator-mono", text: String(cnt) });
+        chip.onclick = (e) => {
+          e.preventDefault();
+          state.searchQuery = active ? "" : tg;
+          state._nextCatalogAnim = { dir: active ? -1 : 1, small: true };
+          if (searchInput) searchInput.value = state.searchQuery;
+          if (searchClearBtn) searchClearBtn.classList.toggle("is-visible", Boolean(state.searchQuery));
+          renderCatalogSection(plugin, catalogMount, state, helpers);
+        };
+      });
+    } else {
+      tagBar.style.display = "none";
+    }
   }
 
-  if (state.viewMode === "index") {
-    renderCatalogIndexMode(plugin, bodyMount, sortedItems, state, helpers, catalogMount);
+  const pendingCatalogAnim = state._nextCatalogAnim || null;
+  state._nextCatalogAnim = null;
+
+  const paintCatalogBody = () => {
+    bodyMount.empty();
+
+    if (sortedItems.length === 0) {
+      if (state.searchQuery) {
+        roxyMascotService.emitRoxyEvent(plugin, {
+          type: "search:empty",
+          state: "surprised",
+          category: "检索轮空",
+          priority: roxyMascotService.PRIORITY.NORMAL,
+          dedupeKey: `search:empty:${state.searchQuery}`,
+          message: `咦，馆藏里没有找到关于“${state.searchQuery}”的案卷呢……要不要换个日文原名、制作公司或者 Bangumi 编号再查查看？`
+        });
+      } else if (state.statusFilter && state.statusFilter !== "all") {
+        roxyMascotService.emitRoxyEvent(plugin, {
+          type: "filter:empty",
+          state: "blocked",
+          category: "筛选提示",
+          priority: roxyMascotService.PRIORITY.NORMAL,
+          dedupeKey: `filter:empty:${state.statusFilter}`,
+          message: `当前的「${activeFilterLabel}」分类下还没有收录作品呢，需要的话可以点击右上角把筛选条件重置一下。`
+        });
+      }
+      const emptyBox = bodyMount.createDiv("curator-empty-box");
+      emptyBox.createDiv({
+        cls: "curator-empty-title",
+        text: state.searchQuery
+          ? `未检索到匹配“${state.searchQuery}”的动画记录`
+          : `当前筛选（${activeFilterLabel}）下暂无动画记录`
+      });
+      emptyBox.createDiv({
+        cls: "curator-empty-sub",
+        text: "可尝试搜索其他标题、日文原名、Bangumi 编号、制作公司，或切换上方状态快筛。"
+      });
+      return;
+    }
+
+    if (state.viewMode === "index") {
+      renderCatalogIndexMode(plugin, bodyMount, sortedItems, state, helpers, catalogMount);
+    } else {
+      renderCatalogGalleryMode(plugin, bodyMount, sortedItems, state, helpers, catalogMount);
+    }
+  };
+
+  if (pendingCatalogAnim && bodyMount.childNodes.length > 0) {
+    paperSlipSwap(bodyMount, paintCatalogBody, pendingCatalogAnim);
   } else {
-    renderCatalogGalleryMode(plugin, bodyMount, sortedItems, state, helpers, catalogMount);
+    paintCatalogBody();
   }
 
   if (scrollParent && savedScrollTop > 0) {
@@ -2278,17 +2367,7 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
 
     const quietActions = footer.createDiv("curator-gallery-quiet-actions");
     const reviewCount = Array.isArray(item.reviews) ? item.reviews.length : 0;
-    const galleryReviewBtn = quietActions.createEl("button", {
-      cls: `curator-gallery-quiet-link ${reviewCount > 0 ? "has-reviews" : ""}`,
-      text: reviewCount > 0 ? `观片手札(${reviewCount})` : "观片手札"
-    });
-    galleryReviewBtn.dataset.galleryAction = "open-reviews";
-    galleryReviewBtn.title = "打开观片手札工作台";
-    galleryReviewBtn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      reviewStudioService.openAnimeReviewStudioModal(plugin, item);
-    };
+    let primaryCardActionRendered = false;
 
     if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
       const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
@@ -2296,9 +2375,9 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
         const nextEpNum = localResult.nextEpisodeNumber || (watched + 1);
         const playBtn = quietActions.createEl("button", {
           cls: "curator-gallery-quiet-link is-play",
-          text: `▶第${nextEpNum}话`
+          text: `播第 ${nextEpNum} 集`
         });
-        playBtn.title = `播放第 ${nextEpNum} 话`;
+        playBtn.title = `播放本地第 ${nextEpNum} 集`;
         playBtn.onclick = async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -2307,56 +2386,21 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
             timestamp: ""
           });
         };
-      } else {
-        const folderBtn = quietActions.createEl("button", {
-          cls: "curator-gallery-quiet-link",
-          text: "目录"
-        });
-        folderBtn.title = `打开本地目录：${item.downloadPath}`;
-        folderBtn.onclick = async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          roxyMascotService.emitRoxyEvent(plugin, {
-            type: "local:not_found",
-            state: "blocked",
-            category: "本地卷宗",
-            priority: roxyMascotService.PRIORITY.NORMAL,
-            dedupeKey: `local:not_found:${item.name}`,
-            message: `那个……《${item.name}》的本地目录里好像还没有放入剧集视频文件呢，请先确认一下存放路径吧。`
-          });
-          await openLocalPathSafely(item.downloadPath);
-        };
+        primaryCardActionRendered = true;
       }
     }
 
-    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
-      const dlBtn = quietActions.createEl("button", {
-        cls: "curator-gallery-quiet-link",
-        text: "下载"
+    if (!primaryCardActionRendered) {
+      const galleryReviewBtn = quietActions.createEl("button", {
+        cls: `curator-gallery-quiet-link ${reviewCount > 0 ? "has-reviews" : ""}`,
+        text: reviewCount > 0 ? `随记(${reviewCount})` : "随记"
       });
-      dlBtn.dataset.galleryAction = "open-download";
-      dlBtn.title = "打开追番下载与单集 RSS 助手";
-      dlBtn.onclick = (e) => {
+      galleryReviewBtn.dataset.galleryAction = "open-reviews";
+      galleryReviewBtn.title = "打开观片手札（记录单集吐槽、时间码或截图）";
+      galleryReviewBtn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        animeDownloadService.openAnimeDownloadModal(plugin, item, () => {
-          if (helpers.deskMount) {
-            renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
-          }
-        });
-      };
-    }
-
-    if (item.subjectId) {
-      const trendBtn = quietActions.createEl("button", {
-        cls: "curator-gallery-quiet-link",
-        text: "趋势"
-      });
-      trendBtn.title = "查看 Netaba 评分趋势";
-      trendBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        helpers.openTrendModal(item);
+        reviewStudioService.openAnimeReviewStudioModal(plugin, item);
       };
     }
 
@@ -2379,21 +2423,64 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
         }
       );
     };
-    const wandGalleryBtn = quietActions.createEl("button", {
-      cls: "curator-gallery-quiet-link",
-      text: "🪄"
-    });
-    wandGalleryBtn.title = "长按卡片或点击打开洛琪希魔杖同源星轨关联谱";
-    wandGalleryBtn.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      triggerGalleryWand();
-    };
     multiHallArchiveService.bindMagicWandLongPress(card, triggerGalleryWand);
+
+    const showGalleryCardMenu = (ev) => {
+      const menu = new Menu();
+      menu.addItem((mi) =>
+        mi.setTitle(reviewCount > 0 ? `观片手札 (${reviewCount})` : "打开观片手札").setIcon("message-square").onClick(() => {
+          reviewStudioService.openAnimeReviewStudioModal(plugin, item);
+        })
+      );
+      if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
+        menu.addItem((mi) =>
+          mi.setTitle("下载与自动追更").setIcon("download").onClick(() => {
+            animeDownloadService.openAnimeDownloadModal(plugin, item, () => {
+              if (helpers.deskMount) {
+                renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
+              }
+            });
+          })
+        );
+      }
+      if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
+        menu.addItem((mi) =>
+          mi.setTitle("打开本地文件夹").setIcon("folder").onClick(async () => {
+            await openLocalPathSafely(item.downloadPath);
+          })
+        );
+      }
+      if (item.subjectId) {
+        menu.addItem((mi) =>
+          mi.setTitle("查看 Bangumi 评分趋势").setIcon("trending-up").onClick(() => {
+            helpers.openTrendModal(item);
+          })
+        );
+      }
+      menu.addItem((mi) =>
+        mi.setTitle("关联角色、画集与游戏").setIcon("sparkles").onClick(() => triggerGalleryWand())
+      );
+      if (item.file) {
+        menu.addItem((mi) =>
+          mi.setTitle("打开 Markdown 笔记").setIcon("file-text").onClick(async () => {
+            const leaf = plugin.app.workspace.getLeaf(true);
+            await leaf.openFile(item.file);
+          })
+        );
+      }
+      menu.showAtMouseEvent(ev);
+    };
+
+    card.addEventListener("contextmenu", (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      showGalleryCardMenu(ev);
+    });
 
     const openNoteBtn = quietActions.createEl("button", {
       cls: "curator-gallery-quiet-link",
-      text: "笔记↗"
+      text: "笔记 ↗"
     });
     openNoteBtn.title = "打开动画 Markdown 笔记";
     openNoteBtn.onclick = async (e) => {
@@ -2403,6 +2490,18 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
         const leaf = plugin.app.workspace.getLeaf(true);
         await leaf.openFile(item.file);
       }
+    };
+
+    const moreCardBtn = quietActions.createEl("button", {
+      cls: "curator-gallery-quiet-link is-more-btn",
+      attr: { type: "button", "aria-label": "更多操作" }
+    });
+    moreCardBtn.appendChild(v07Core.icon("more", 13));
+    moreCardBtn.title = "更多操作（下载追更、评分趋势、本地目录、关联收藏）";
+    moreCardBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showGalleryCardMenu(e);
     };
   }
 
@@ -2478,8 +2577,10 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
 
   foldBtn.onclick = (e) => {
     e.preventDefault();
-    state.catalogExpanded = !state.catalogExpanded;
-    applyGalleryTwoRowFold();
+    scrollUnrollMorph(container, () => {
+      state.catalogExpanded = !state.catalogExpanded;
+      applyGalleryTwoRowFold();
+    });
   };
 
   applyGalleryTwoRowFold();
@@ -2488,6 +2589,12 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
   }
 
   if (typeof ResizeObserver === "function") {
+    if (catalogMount && catalogMount._catalogResizeObserver) {
+      try {
+        catalogMount._catalogResizeObserver.disconnect();
+      } catch (_) {}
+      catalogMount._catalogResizeObserver = null;
+    }
     const ro = new ResizeObserver(() => {
       applyGalleryTwoRowFold();
     });
@@ -2513,7 +2620,7 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
   head.createDiv({ cls: "col-progress", text: "观看进度" });
   head.createDiv({ cls: "col-myscore", text: "个人评分" });
   head.createDiv({ cls: "col-bgmscore", text: "BGM 评分" });
-  head.createDiv({ cls: "col-actions", text: "案头操作" });
+  head.createDiv({ cls: "col-actions", text: "快捷操作" });
 
   const body = tableWrap.createDiv("curator-index-body");
   const rowEls = [];
@@ -2528,6 +2635,50 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     if (item.file?.path) {
       row.dataset.filePath = item.file.path;
     }
+
+    const triggerRowWand = () => {
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "anime",
+          name: item.name,
+          title: item.name,
+          studio: item.studio,
+          file: item.file
+        },
+        state.items || [],
+        {
+          onSwitchMode: helpers.switchWorkspaceMode,
+          onFilterCatalog: helpers.switchWorkspaceMode
+            ? (kw) => helpers.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    multiHallArchiveService.bindMagicWandLongPress(row, triggerRowWand);
+    row.addEventListener("contextmenu", (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const menu = new Menu();
+      menu.addItem((mi) =>
+        mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerRowWand())
+      );
+      menu.addItem((mi) =>
+        mi.setTitle("打开观片手札").setIcon("message-square").onClick(() => {
+          reviewStudioService.openAnimeReviewStudioModal(plugin, item);
+        })
+      );
+      if (item.file) {
+        menu.addItem((mi) =>
+          mi.setTitle("打开动画笔记").setIcon("file-text").onClick(async () => {
+            const leaf = plugin.app.workspace.getLeaf(true);
+            await leaf.openFile(item.file);
+          })
+        );
+      }
+      menu.showAtMouseEvent(ev);
+    });
 
     // 1. 编号列
     const colIdx = row.createDiv("col-idx curator-mono");
@@ -2551,10 +2702,10 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       img.src = coverUrl;
       img.onerror = () => {
         img.remove();
-        thumbWrap.textContent = "🎬";
+        thumbWrap.textContent = "—";
       };
     } else {
-      thumbWrap.textContent = "🎬";
+      thumbWrap.textContent = "—";
     }
     thumbWrap.onclick = async (e) => {
       e.preventDefault();
@@ -2700,7 +2851,7 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     const reviewCount = Array.isArray(item.reviews) ? item.reviews.length : 0;
     const rvBtn = colActions.createEl("button", {
       cls: `curator-table-action-btn ${reviewCount > 0 ? "has-reviews" : ""}`,
-      text: reviewCount > 0 ? `💬观片手札(${reviewCount})` : "💬观片手札"
+      text: reviewCount > 0 ? `观片手札(${reviewCount})` : "观片手札"
     });
     rvBtn.dataset.indexAction = "open-reviews";
     rvBtn.title = "打开观片手札工作台";
@@ -2726,7 +2877,7 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
       const dlBtn = colActions.createEl("button", {
         cls: "curator-table-action-btn",
-        text: "⬇下载"
+        text: "下载"
       });
       dlBtn.dataset.indexAction = "open-download";
       dlBtn.title = "打开追番下载与单集 RSS 助手";
@@ -2777,8 +2928,10 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     });
     foldBtn.onclick = (e) => {
       e.preventDefault();
-      state.catalogExpanded = !state.catalogExpanded;
-      renderCatalogSection(plugin, catalogMount || container, state, helpers);
+      scrollUnrollMorph(container, () => {
+        state.catalogExpanded = !state.catalogExpanded;
+        renderCatalogSection(plugin, catalogMount || container, state, helpers);
+      });
     };
   }
 }
@@ -2803,25 +2956,25 @@ function renderCustomShelvesSection(plugin, shelvesMount, state, container, opti
 
   const header = shelvesMount.createDiv("curator-section-header curator-shelves-header");
   const titleWrap = header.createDiv("curator-section-title-wrap");
-  titleWrap.createEl("h2", { cls: "curator-section-title", text: "收藏展柜与自定义分区" });
+  titleWrap.createEl("h2", { cls: "curator-section-title", text: "个人片单与智能筛选" });
   titleWrap.createSpan({
     cls: "curator-section-badge",
-    text: `${collectionConfigs.length} 展柜 · ${effectiveCustomCount} 分区`
+    text: `${collectionConfigs.length} 片单 · ${effectiveCustomCount} 筛选`
   });
 
   const headerActions = header.createDiv("curator-shelves-header-actions");
   const addQueryBtn = headerActions.createEl("button", {
     cls: "curator-top-btn",
-    text: "+ 新建查询分区"
+    text: "+ 新建智能筛选"
   });
   addQueryBtn.onclick = () => {
     plugin.openCustomQuerySectionModal(null, async () => {
       roxyMascotService.emitRoxyEvent(plugin, {
         type: "shelf:created_query",
         state: "success",
-        category: "分区编目",
+        category: "分组整理",
         priority: roxyMascotService.PRIORITY.HIGH,
-        message: "新的自定义查询分区已经整理好了，把同类型的作品归纳在一起确实会好找很多呢。"
+        message: "新的智能筛选分组已经整理好了，把同类型的作品归纳在一起确实会好找很多呢。"
       });
       await renderCuratorDesk(plugin, container, options, container._deskRuntime || {});
     });
@@ -2829,16 +2982,16 @@ function renderCustomShelvesSection(plugin, shelvesMount, state, container, opti
 
   const addCollectionBtn = headerActions.createEl("button", {
     cls: "curator-top-btn",
-    text: "+ 新建收藏展柜"
+    text: "+ 新建个人片单"
   });
   addCollectionBtn.onclick = () => {
     plugin.openCustomCollectionModal(null, async () => {
       roxyMascotService.emitRoxyEvent(plugin, {
         type: "shelf:created_collection",
         state: "success",
-        category: "展柜编目",
+        category: "片单整理",
         priority: roxyMascotService.PRIORITY.HIGH,
-        message: "新的个人收藏展柜已经建好啦，可以把您最珍视的作品慢慢陈列进去了。"
+        message: "新的个人片单已经建好啦，可以把您最珍视的作品慢慢放进去了。"
       });
       await renderCuratorDesk(plugin, container, options, container._deskRuntime || {});
     });
@@ -2896,10 +3049,10 @@ function renderCustomShelvesSection(plugin, shelvesMount, state, container, opti
     plugin.createDashboardSection(sectionsGrid, {
       def: {
         id: secId,
-        title: `展柜 · ${colConfig.title || "自定义展柜"}`,
+        title: `片单 · ${colConfig.title || "个人片单"}`,
         badgeText: `${colItems.length} 部`,
         hasData: true,
-        emptyText: "展柜内暂无动画（点击右上角“管理”添加）",
+        emptyText: "片单内暂无动画（点击右上角“管理”添加）",
         spanFull: true,
         isCollection: true,
         collectionConfig: colConfig,
@@ -3010,7 +3163,7 @@ function renderCustomShelvesSection(plugin, shelvesMount, state, container, opti
     const emptyBar = shelvesMount.createDiv("curator-shelves-empty-bar");
     emptyBar.createSpan({
       cls: "curator-shelves-empty-text",
-      text: "当前尚未陈列自定义收藏展柜或查询分区 · 可点击右上角「+ 新建查询分区」或「+ 新建收藏展柜」按个人偏好归档陈列"
+      text: "当前尚未创建个人片单或智能筛选 · 可点击右上角「+ 新建智能筛选」或「+ 新建个人片单」按喜好分组"
     });
   }
 }
@@ -3039,7 +3192,7 @@ function renderChronologyTreeDrawer(plugin, hostEl, labelTitle, groupItems) {
 
   const head = drawer.createDiv("curator-chrono-header");
   head.createSpan({
-    text: `🌿 「${labelTitle}」收录作品时间树（共 ${(groupItems || []).length} 部 · 按较前年份 → 较后年份排列）`
+    text: `「${labelTitle}」收录作品时间轴（共 ${(groupItems || []).length} 部 · 按较前年份 → 较后年份排列）`
   });
   head.createSpan({
     cls: "curator-mono",
@@ -3341,7 +3494,7 @@ function renderUnifiedScoreRankBody(plugin, body, items, state) {
     if (sliced.length === 0) {
       const emptyBox = listWrap.createDiv("curator-rank-empty");
       const emptyHints = {
-        personal: "暂无「我的评分」记录 · 可在案头卡片或馆藏目录中直接点击 ★ 为作品打分",
+        personal: "暂无「我的评分」记录 · 可在追番舞台或全部番剧中直接点击 ★ 为作品打分",
         userBgm: "暂无「你在 BGM 上的评分」记录 · 若已在 Bangumi 网站打分，可通过命令面板或设置页同步拉取",
         bgm: "暂无「BGM 评分」记录 · 导入或刷新作品信息后会自动写入 Bangumi 社区评分",
         studio: "暂无制作公司信息 · 笔记中未填写“制作公司”字段"
@@ -3417,7 +3570,7 @@ function renderUnifiedScoreRankBody(plugin, body, items, state) {
         if (isExpanded && groupItems.length > 0) {
           renderChronologyTreeDrawer(plugin, row, studioName, groupItems);
         }
-        multiHallArchiveService.bindMagicWandLongPress(row, () => {
+        const triggerStudioWand = () => {
           const deskRoot = row.closest(".curator-desk-root");
           const rt = deskRoot && deskRoot._deskRuntime;
           multiHallArchiveService.openMagicWandRelationModal(
@@ -3431,19 +3584,71 @@ function renderUnifiedScoreRankBody(plugin, body, items, state) {
                 : null
             }
           );
-        });
-        return;
-      }
-
-      const { item, primaryVal, primaryText, secondaryText, deltaVal } = entry;
-      const key = item.file?.path || item.subjectId || item.name;
-      const prev = prevMap.get(key);
-
-      const row = listWrap.createDiv({
-        cls: `bangumi-dashboard-rank-row curator-unified-rank-row ${newRank <= 3 ? `is-top-${newRank}` : ""}`
+        };
+        multiHallArchiveService.bindMagicWandLongPress(row, triggerStudioWand);
+        row.addEventListener("contextmenu", (ev) => {
+          if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select")) return;
+          ev.preventDefault();
+          ev.stopPropagation();
+        const menu = new Menu();
+        menu.addItem((mi) =>
+          mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerStudioWand())
+        );
+        menu.showAtMouseEvent(ev);
       });
-      row.dataset.rankKey = key;
-      row.dataset.rankIndex = String(newRank);
+      return;
+    }
+
+    const { item, primaryVal, primaryText, secondaryText, deltaVal } = entry;
+    const key = item.file?.path || item.subjectId || item.name;
+    const prev = prevMap.get(key);
+
+    const row = listWrap.createDiv({
+      cls: `bangumi-dashboard-rank-row curator-unified-rank-row ${newRank <= 3 ? `is-top-${newRank}` : ""}`
+    });
+    row.dataset.rankKey = key;
+    row.dataset.rankIndex = String(newRank);
+
+    const triggerAnimeRankWand = () => {
+      const deskRoot = row.closest(".curator-desk-root");
+      const rt = deskRoot && deskRoot._deskRuntime;
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "anime",
+          name: item.name,
+          title: item.name,
+          studio: item.studio,
+          file: item.file
+        },
+        items,
+        {
+          onSwitchMode: rt ? rt.switchWorkspaceMode : null,
+          onFilterCatalog: rt
+            ? (kw) => rt.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    multiHallArchiveService.bindMagicWandLongPress(row, triggerAnimeRankWand);
+    row.addEventListener("contextmenu", (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest("input, textarea, select")) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const menu = new Menu();
+      menu.addItem((mi) =>
+        mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerAnimeRankWand())
+      );
+      if (item.file) {
+        menu.addItem((mi) =>
+          mi.setTitle("打开动画笔记").setIcon("file-text").onClick(async () => {
+            const leaf = plugin.app.workspace.getLeaf(true);
+            await leaf.openFile(item.file);
+          })
+        );
+      }
+      menu.showAtMouseEvent(ev);
+    });
 
       const head = row.createDiv("bangumi-dashboard-rank-head curator-unified-rank-head");
       const leftGroup = head.createDiv("curator-rank-left-group");
@@ -3782,6 +3987,13 @@ function renderUnifiedDistributionBody(plugin, body, items, state) {
         return;
       }
 
+      const typeClsMap = {
+        "原创": "is-type-original",
+        "漫画改": "is-type-manga",
+        "轻小说改": "is-type-novel",
+        "游戏改": "is-type-game",
+        "其他": "is-type-other"
+      };
       const typeList = listHost.createDiv("bangumi-type-list curator-unified-dist-list");
       ["原创", "漫画改", "轻小说改", "游戏改", "其他"].forEach((key) => {
         const groupItems = typeItemsMap[key] || [];
@@ -3798,7 +4010,7 @@ function renderUnifiedDistributionBody(plugin, body, items, state) {
         });
 
         const track = row.createDiv("bangumi-type-track");
-        const bar = track.createDiv("bangumi-type-bar");
+        const bar = track.createDiv(`bangumi-type-bar ${typeClsMap[key] || "is-type-other"}`);
         bar.style.width = `${pct}%`;
 
         const countBtn = row.createEl("button", {
@@ -3844,11 +4056,11 @@ function renderUnifiedDistributionBody(plugin, body, items, state) {
       };
 
       const ranges = [
-        { label: "9–10 分", shortLabel: "9–10", min: 9, max: 10.01 },
-        { label: "7–8 分", shortLabel: "7–8", min: 7, max: 8.9999 },
-        { label: "5–6 分", shortLabel: "5–6", min: 5, max: 6.9999 },
-        { label: "3–4 分", shortLabel: "3–4", min: 3, max: 4.9999 },
-        { label: "0–2 分", shortLabel: "0–2", min: 0, max: 2.9999 }
+        { label: "9–10 分", shortLabel: "9–10", min: 9, max: 10.01, tierCls: "is-score-tier-5" },
+        { label: "7–8 分", shortLabel: "7–8", min: 7, max: 8.9999, tierCls: "is-score-tier-4" },
+        { label: "5–6 分", shortLabel: "5–6", min: 5, max: 6.9999, tierCls: "is-score-tier-3" },
+        { label: "3–4 分", shortLabel: "3–4", min: 3, max: 4.9999, tierCls: "is-score-tier-2" },
+        { label: "0–2 分", shortLabel: "0–2", min: 0, max: 2.9999, tierCls: "is-score-tier-1" }
       ];
 
       const scoredEntries = items
@@ -3889,7 +4101,7 @@ function renderUnifiedDistributionBody(plugin, body, items, state) {
         });
 
         const track = row.createDiv("bangumi-type-track");
-        const bar = track.createDiv("bangumi-type-bar");
+        const bar = track.createDiv(`bangumi-type-bar ${range.tierCls}`);
         bar.style.width = `${pct}%`;
 
         const countBtn = row.createEl("button", {
@@ -3966,7 +4178,7 @@ function renderUnifiedDistributionBody(plugin, body, items, state) {
 const ROXY_RADICAL_POOL = [
   "氵", "辶", "纟", "灬", "艹", "孑", "厶", "冫", "巛", "彳",
   "卩", "凵", "爻", "彡", "丿", "丶", "乙", "亅", "亠", "冖",
-  "讠", "钅", "☵", "♒", "⟡", "✧", "◈", "≈"
+  "讠", "钅", "⟡", "✧", "◈", "≈"
 ];
 
 function buildSerpentBezierPath(W, H, laneIndex, totalLanes) {
@@ -4163,10 +4375,10 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
   const divider = filler.createDiv("curator-roxy-grimoire-divider");
   divider.createSpan({
     cls: "curator-roxy-grimoire-divider-text",
-    text: "✦ 洛琪希魔导典藏压印 ✦"
+    text: "✦ 洛琪希的馆藏手记 ✦"
   });
 
-  // 微型火漆印章 / 单行魔导铭文尾花模式（专供 36px <= diff < 105px 的紧凑高度差）
+  // 微型火漆印章 / 单行批注模式（专供 36px <= diff < 105px 的紧凑高度差）
   const microStrip = filler.createDiv("curator-roxy-micro-strip");
   const microSeal = microStrip.createDiv("curator-roxy-micro-seal");
   microSeal.innerHTML = `<svg viewBox="0 0 36 36" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
@@ -4186,7 +4398,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
   const microBody = microStrip.createDiv("curator-roxy-micro-body");
   microBody.createSpan({
     cls: "curator-roxy-micro-kicker",
-    text: "魔导尾花"
+    text: "馆藏批注"
   });
   const microInscriptionEl = microBody.createSpan({
     cls: "curator-roxy-micro-inscription"
@@ -4199,9 +4411,9 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
   microSwitchBtn.title = "切换洛琪希魔导铭文批注";
   const microCloseBtn = microActions.createEl("button", {
     cls: "curator-roxy-micro-btn is-close",
-    text: "✕ 散印"
+    text: "✕ 收起"
   });
-  microCloseBtn.title = "解除洛琪希魔导典藏尾花（触发魔力失义与蛇形曲线游走消散）";
+  microCloseBtn.title = "收起洛琪希馆藏随笔卡片";
 
   const canvas = filler.createDiv("curator-roxy-grimoire-canvas");
 
@@ -4378,9 +4590,9 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
 
   const closeBtn = topActionsGroup.createEl("button", {
     cls: "curator-roxy-grimoire-close-btn",
-    text: "✕ 收起压印"
+    text: "✕ 收起批注"
   });
-  closeBtn.title = "解除洛琪希魔导典藏压印（魔力失义与蛇形曲线游走消散，收起后可在角落重新盖印）";
+  closeBtn.title = "收起洛琪希馆藏随笔卡片";
 
   const quoteEl = noteBox.createDiv("curator-roxy-grimoire-quote");
   const stampsRow = noteBox.createDiv("curator-roxy-grimoire-stamps curator-mono");
@@ -4404,7 +4616,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
 
   const notesDeck = [];
 
-  // 分支 1：按真实阅片话数与建档阶段分流（彻底杜绝 0 话折算课时笑话）
+  // 分支 1：按真实观看话数与建档阶段分流（彻底杜绝 0 话折算课时笑话）
   if (totalCount === 0) {
     notesDeck.push(
       "“目前档案室里还没有登记任何作品呢。您可以先从命令面板导入几部常看的动画，我会帮您把封套、集数和分类目录一步步整理妥当的。”"
@@ -4415,12 +4627,12 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
     );
     if (planCount > 0) {
       notesDeck.push(
-        `“我看目录里已经记下了 ${planCount} 部『想看』的动画，挑一部最感兴趣的点开第一话吧？看番的时候顺手记下集数，这本账目就会慢慢充实起来了。”`
+        `“我看目录里已经记下了 ${planCount} 部『想看』的动画，挑一部最感兴趣的点开第一话吧？看番的时候顺手记下集数，这本记录就会慢慢充实起来了。”`
       );
     }
   } else if (watchedEps < 25) {
     notesDeck.push(
-      `“目前账本上刚刚记录了 ${watchedEps} 话（大约 ${metrics.hours} 小时）。刚开始整理时不用着急一次补完，每次看完一集顺手点一下『+1』，日积月累下来也是一份很踏实的记录呢。”`
+      `“目前记录册上刚刚记下了 ${watchedEps} 话（大约 ${metrics.hours} 小时）。刚开始整理时不用着急一次补完，每次看完一集顺手点一下『+1』，日积月累下来也是一份很踏实的记录呢。”`
     );
   } else if (watchedEps < 150) {
     notesDeck.push(
@@ -4428,7 +4640,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
     );
   } else {
     notesDeck.push(
-      `“不知不觉间，您的累计阅片量已经达到 ${watchedEps} 话（约 ${metrics.hours} 小时）了呢。能把这么多部作品一集一集看完并整理得井井有条，连我看着这本厚厚的台账都觉得很有成就感。”`
+      `“不知不觉间，您的累计观看集数已经达到 ${watchedEps} 话（约 ${metrics.hours} 小时）了呢。能把这么多部作品一集一集看完并整理得井井有条，连我看着这本厚厚的记录册都觉得很有成就感。”`
     );
   }
 
@@ -4440,11 +4652,11 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
   }
   if (watchingCount >= 6) {
     notesDeck.push(
-      `“您现在同时在追 ${watchingCount} 部动画呢，数量稍微有点多，如果隔几天没看很容易忘记上一集停在哪里。建议多用案头追番席的进度条和手札时间点记一下，免得串戏了哦。”`
+      `“您现在同时在追 ${watchingCount} 部动画呢，数量稍微有点多，如果隔几天没看很容易忘记上一集停在哪里。建议多用追番舞台的进度条和手札时间点记一下，免得串戏了哦。”`
     );
   } else if (watchingCount >= 1 && watchingCount <= 5) {
     notesDeck.push(
-      `“目前案头正保持着 ${watchingCount} 部『在看』作品的步调，这个数量刚刚好，既不会觉得追更太累，也能静下心来好好体会每一集的内容。”`
+      `“目前正保持着 ${watchingCount} 部『在看』作品的步调，这个数量刚刚好，既不会觉得追更太累，也能静下心来好好体会每一集的内容。”`
     );
   }
   if (totalCount >= 5 && metrics.completionRate >= 65) {
@@ -4474,7 +4686,7 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
     );
   } else if (totalCount > 0) {
     notesDeck.push(
-      "“目前目录里的作品还没有登记个人评分呢。看完一部动画后，随时点击卡片上的『★ 评分』给它打个分，这本年鉴里的排行榜和偏好分析就会自动帮您绘制出来了。”"
+      "“目前目录里的作品还没有登记个人评分呢。看完一部动画后，随时点击卡片上的『★ 评分』给它打个分，看番记录里的口味分布和排行就会自动帮您整理出来了。”"
     );
   }
 
@@ -4498,18 +4710,18 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
 
   // 分支 6：务实的排版与拖拽操作提示
   notesDeck.push(
-    "“如果觉得年鉴里某个统计卡片的位置不够顺手，直接按住标题左侧的『⋮⋮』拖到想换的位置就可以了，我会帮您把版面重新对齐好的。”"
+    "“如果觉得顶栏模块标签的位置不够顺手，直接按住任意标签左右拖拽就能调整顺序了。”"
   );
 
-  // 单行魔导尾花短铭文（专供 micro 模式）
+  // 单行短铭文（专供 micro 模式）
   const microDeck = [
-    `案卷已录 ${totalCount} 部番剧 · 累计阅片 ${watchedEps} 话（完结率 ${metrics.completionRate}%）—— 洛琪希谨识`,
+    `已收录 ${totalCount} 部番剧 · 累计观看 ${watchedEps} 话（完结率 ${metrics.completionRate}%）—— 洛琪希手记`,
     watchingCount > 0
-      ? `案头正追更 ${watchingCount} 部连载，记得随手在进度条上点『+1』记下话数哦。`
+      ? `正在追更 ${watchingCount} 部连载，看完一话记得顺手点『+1』记下进度哦。`
       : `目录已备妥 ${planCount} 部待看番剧，闲暇时挑一部开启新的旅程吧。`,
     scoredCount > 0
       ? `已为 ${scoredCount} 部作品留存个人评鉴（均分 ★${metrics.personalAvg}，佳作 ${highRatedCount} 部）。`
-      : `按住年鉴卡片标题左侧的『⋮⋮』即可自由拖拽编排席位顺序。`
+      : `按住顶栏模块标签左右拖拽即可自由调整排列顺序。`
   ];
 
   let noteIdx = Number(state._roxyGrimoireNoteIdx) || 0;
@@ -4545,9 +4757,9 @@ function createRoxyArchivalGrimoireFiller(parentEl, items, state, opts = {}) {
   const restoreWrap = parentEl.createDiv("curator-roxy-grimoire-restore-wrap");
   const restoreBtn = restoreWrap.createEl("button", {
     cls: "curator-roxy-grimoire-restore-btn",
-    text: "✦ 盖上洛琪希典藏压印"
+    text: "✦ 展开洛琪希馆藏手记"
   });
-  restoreBtn.title = "在当前余白处重新盖下洛琪希魔导典藏压印";
+  restoreBtn.title = "在当前余白处重新展开洛琪希的馆藏手记";
 
   // 关闭按钮：三阶段「魔力紊乱 · 文字失义 · 笔画拆解 · 蛇形曲线游走」消散动效
   const handleDismissSpell = (e) => {
@@ -4661,7 +4873,7 @@ function renderTagAndVolumeInsights(plugin, body, items, state, container) {
       if (avgText) {
         chip.createSpan({ cls: "curator-almanac-tag-score curator-mono", text: avgText });
       }
-      chip.title = `点击在上方「馆藏编目总览」中检索「${tg.tag}」`;
+      chip.title = `点击在「全部番剧」中检索「${tg.tag}」`;
       chip.onclick = (e) => {
         e.preventDefault();
         if (container && container._deskRuntime && typeof container._deskRuntime.switchWorkspaceMode === "function") {
@@ -4865,15 +5077,15 @@ function renderAlmanacSection(plugin, almanacMount, state, container, options, p
 
   const header = almanacMount.createDiv("curator-section-header curator-almanac-header");
   const titleWrap = header.createDiv("curator-section-title-wrap");
-  titleWrap.createEl("h2", { cls: "curator-section-title", text: "馆藏统计与洞察年鉴" });
+  titleWrap.createEl("h2", { cls: "curator-section-title", text: "观看统计与偏好概览" });
   titleWrap.createSpan({
     cls: "curator-section-badge",
-    text: "7 项统计与多维排行模块 · 支持拖拽⋮⋮换位"
+    text: "7 项统计与排行模块 · 支持拖拽 ⋮⋮ 调整位置"
   });
 
   const toggleBtn = header.createEl("button", {
     cls: `curator-almanac-toggle-btn ${state.almanacExpanded ? "is-expanded" : ""}`,
-    text: state.almanacExpanded ? "收起完整统计年鉴 ▲" : "展开完整统计年鉴 ▼"
+    text: state.almanacExpanded ? "收起详细统计 ▲" : "展开详细统计 ▼"
   });
 
   // 默认常驻的简洁摘要条
@@ -4963,7 +5175,7 @@ function renderAlmanacSection(plugin, almanacMount, state, container, options, p
   const almanacDefs = [
     {
       id: "progressStats",
-      title: "追番全景与时长统计",
+      title: "观看进度与时长",
       badgeText: `所有收藏 ${items.length} 部`,
       hasData: items.length > 0,
       emptyText: "暂无动画数据",
@@ -4973,7 +5185,7 @@ function renderAlmanacSection(plugin, almanacMount, state, container, options, p
     {
       id: "yearStats",
       title: "年代与番季分布",
-      badgeText: items.some((it) => it.year) ? "纪元星轨 · 四季展龛" : "",
+      badgeText: items.some((it) => it.year) ? "历年书架 · 四季归档" : "",
       hasData: items.some((it) => it.year),
       emptyText: "笔记中暂无开播年份或季度信息",
       spanFull: true,
@@ -4981,7 +5193,7 @@ function renderAlmanacSection(plugin, almanacMount, state, container, options, p
     },
     {
       id: "scoreDelta",
-      title: "评分差异与偏好分析",
+      title: "个人与大众评分对比",
       badgeText: items.some((it) => itemHasBothScores(it)) ? "对比分析" : "",
       hasData: items.some((it) => itemHasBothScores(it)),
       emptyText: "需要同时拥有“我的评分”与“BGM 评分”方可进行对比分析",
@@ -5002,7 +5214,7 @@ function renderAlmanacSection(plugin, almanacMount, state, container, options, p
     },
     {
       id: "personalRank",
-      title: "综合评分与制作社排行榜",
+      title: "高分作品与制作公司排行",
       badgeText: "点击制作社部数展开时间树",
       hasData: items.length > 0 || hasAnyRankedScore,
       emptyText: "暂无可显示的评分与制作社排行记录",
@@ -5242,6 +5454,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   container.empty();
   container.addClass("curator-desk-root");
+  v07Themes.applyTheme(container, v07Adapters.getAppearance(plugin));
   const isMarkdown = Boolean(options && options.isMarkdown);
   if (isMarkdown) {
     container.dataset.markdownDashboard = "true";
@@ -5255,50 +5468,80 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const brandCol = topRow1.createDiv("curator-brand-col");
   brandCol.createDiv({
     cls: "curator-brand-kicker",
-    text: "番剧档案馆"
+    text: "个人番剧与 ACG 典藏"
   });
   const titleLine = brandCol.createDiv("curator-brand-title-line");
   titleLine.createEl("h1", {
     cls: "curator-brand-title",
-    text: "二维案头编目台"
+    text: "番剧档案馆"
   });
 
-  // 紧凑核心馆藏摘要（0 部新馆态收起全 0 废胶囊，改为柔和开馆提示）
+  // 紧凑核心馆藏摘要（0 部新馆态收起全 0 废胶囊，改为柔和开馆提示；有馆藏时点击任意胶囊滑出统计画像抽屉）
   const isZeroAnimeOnboarding = items.length === 0;
   const isSampleMode = items.length > 0 && items.some((it) => Boolean(it?.isSamplePreviewItem));
   const metrics = computeDeskMetrics(items);
-  const summaryStrip = topRow1.createDiv("curator-summary-strip");
+
   if (isZeroAnimeOnboarding) {
+    const summaryStrip = topRow1.createDiv("curator-summary-strip");
     const onboardingPill = summaryStrip.createDiv("curator-summary-pill is-onboarding-pill");
     onboardingPill.dataset.ui = "onboarding-summary-pill";
+    onboardingPill.appendChild(v07Core.icon("sparkles"));
     onboardingPill.createSpan({
       cls: "curator-summary-label",
-      text: "🌱 新馆待启 · 挑选一部喜欢的动画开启典藏（也可先载入示例样片逛展）"
-    });
-  } else {
-    const summaryDefs = [
-      { label: "所有收藏", val: `${metrics.total} 部`, role: "summary-total" },
-      { label: "在看", val: `${metrics.stateCounts["在看"]}`, role: "summary-watching" },
-      { label: "已看", val: `${metrics.stateCounts["已看"]}`, role: "summary-completed" },
-      { label: "想看", val: `${metrics.stateCounts["想看"]}`, role: "summary-plan" },
-      { label: "个人均分", val: `${metrics.personalAvg}`, role: "summary-myavg" },
-      { label: "BGM 均分", val: `${metrics.bgmAvg}`, role: "summary-bgmavg" }
-    ];
-    summaryDefs.forEach((sd) => {
-      const pill = summaryStrip.createDiv("curator-summary-pill");
-      pill.createSpan({ cls: "curator-summary-label", text: sd.label });
-      const valSpan = pill.createSpan({ cls: "curator-summary-val curator-mono", text: sd.val });
-      valSpan.dataset.statRole = sd.role;
+      text: "新馆待启 · 挑选一部喜欢的动画开启典藏（也可先载入示例样片体验）"
     });
   }
 
-  // 顶栏右侧主操作按钮组（仅保留全局级操作：刷新、恢复默认布局、打开 Markdown/番剧档案馆、三维原画档案室）
+  // 顶栏右侧主操作按钮组（仅保留全局级操作：外观、刷新、恢复默认布局、打开 Markdown 版/番剧档案馆、3D 展厅）
   const actionsCol = topRow1.createDiv("curator-topbar-actions");
 
-  const refreshBtn = actionsCol.createEl("button", {
-    cls: "curator-top-btn is-subtle",
-    text: "刷新"
+  const appearanceBtn = actionsCol.createEl("button", {
+    cls: "curator-top-btn is-subtle"
   });
+  const syncAppearanceBtnLabel = (appState) => {
+    const label =
+      typeof v07Themes.formatAppearanceButtonLabel === "function"
+        ? v07Themes.formatAppearanceButtonLabel(appState)
+        : "外观";
+    v07Core.setBtnIconLabel(appearanceBtn, "palette", label);
+  };
+  syncAppearanceBtnLabel(v07Adapters.getAppearance(plugin));
+  appearanceBtn.dataset.ui = "appearance-picker-btn";
+  appearanceBtn.title = "切换档案馆外观与动态开关（跟随 Obsidian / 暖色纸本 / 封面柔光 / 夜间影院 / 洛琪希手记 / 晴空画集）";
+  appearanceBtn.onclick = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    v07Core.popover(
+      appearanceBtn,
+      (box) => {
+        v07Themes.renderAppearancePicker(box, {
+          appearance: v07Adapters.getAppearance(plugin),
+          onChange: async (next) => {
+            syncAppearanceBtnLabel(next);
+            v07Themes.applyTheme(container, next);
+            await v07Adapters.saveAppearance(plugin, next);
+            if (container._deskRuntime && typeof container._deskRuntime.refreshV07Stage === "function") {
+              container._deskRuntime.refreshV07Stage();
+            }
+            if (state.workspaceMode === "game" && container._deskRuntime && container._deskRuntime.gameMount) {
+              multiHallArchiveService.renderGameLibraryWorkspace(
+                plugin,
+                container._deskRuntime.gameMount,
+                state.items || [],
+                { wandCallbacks: getWandCallbacks() }
+              );
+            }
+          }
+        });
+      },
+      { width: 540, alignRight: true }
+    );
+  };
+
+  const refreshBtn = actionsCol.createEl("button", {
+    cls: "curator-top-btn is-subtle"
+  });
+  v07Core.setBtnIconLabel(refreshBtn, "refresh", "刷新");
   refreshBtn.onclick = async () => {
     refreshBtn.disabled = true;
     try {
@@ -5329,7 +5572,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       state: "warn2",
       category: "布局重置",
       priority: roxyMascotService.PRIORITY.HIGH,
-      message: "请注意，我已经把二维案头编目台的检索、筛选和分区排列全部还原成最初的默认状态了。"
+      message: "请注意，我已经把番剧档案馆的检索、筛选和分区排列全部还原成最初的默认状态了。"
     });
     await plugin.resetScoreDashboardLayout(container, options);
   };
@@ -5345,19 +5588,19 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   } else {
     const mdBtn = actionsCol.createEl("button", {
       cls: "curator-top-btn is-subtle",
-      text: "打开 Markdown 档案馆"
+      text: "打开 Markdown 版"
     });
     mdBtn.onclick = async () => {
       await plugin.openScoreDashboard();
     };
   }
 
-  // 进入三维原画档案室主入口按钮
+  // 进入 3D 原画展厅主入口按钮
   const enter3DBtn = actionsCol.createEl("button", {
-    cls: "curator-top-btn is-3d-entry mod-cta",
-    text: "🧊 三维原画档案室"
+    cls: "curator-top-btn is-3d-entry mod-cta"
   });
-  enter3DBtn.title = "进入番剧档案馆 · 三维原画档案室";
+  v07Core.setBtnIconLabel(enter3DBtn, "cube", "3D 展厅");
+  enter3DBtn.title = "进入番剧档案馆 · 3D 原画展厅";
   enter3DBtn.onclick = async (e) => {
     e.preventDefault();
     if (typeof options?.onEnter3D === "function") {
@@ -5378,16 +5621,17 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     const sampleBar = container.createDiv("curator-sample-preview-bar");
     sampleBar.dataset.ui = "sample-preview-bar";
     const sampleInfo = sampleBar.createDiv("curator-sample-preview-info");
-    sampleInfo.createSpan({ cls: "curator-sample-preview-badge", text: "✨ 示例样片预览中" });
+    const sampleBadge = sampleInfo.createSpan({ cls: "curator-sample-preview-badge" });
+    v07Core.setBtnIconLabel(sampleBadge, "sparkles", "示例样片预览中");
     sampleInfo.createSpan({
       cls: "curator-sample-preview-text",
       text: "当前展示 3 部纯内存示例样片（不会在笔记库生成任何文件）。一旦收录真实动画将自动退场。"
     });
     const sampleBtns = sampleBar.createDiv("curator-sample-preview-actions");
     const addFirstBtn = sampleBtns.createEl("button", {
-      cls: "curator-top-btn mod-cta",
-      text: "➕ 搜索收录第一部番"
+      cls: "curator-top-btn mod-cta"
     });
+    v07Core.setBtnIconLabel(addFirstBtn, "plus", "搜索收录第一部番");
     addFirstBtn.dataset.sampleAction = "add-first-anime";
     addFirstBtn.onclick = async (e) => {
       e.preventDefault();
@@ -5396,9 +5640,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       }
     };
     const syncBgmBtn = sampleBtns.createEl("button", {
-      cls: "curator-top-btn",
-      text: "🔄 同步 Bangumi 片单"
+      cls: "curator-top-btn"
     });
+    v07Core.setBtnIconLabel(syncBgmBtn, "refresh", "同步 Bangumi 片单");
     syncBgmBtn.dataset.sampleAction = "sync-bgm";
     syncBgmBtn.onclick = async (e) => {
       e.preventDefault();
@@ -5438,6 +5682,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   const unifiedWorkspace = container.createDiv("curator-unified-workspace");
   unifiedWorkspace.dataset.activeMode = effectiveWorkspaceMode;
+  container.dataset.activeMode = effectiveWorkspaceMode;
 
   const modeBar = unifiedWorkspace.createDiv("curator-workspace-mode-bar");
   const modeTabs = modeBar.createDiv("curator-workspace-mode-tabs");
@@ -5458,52 +5703,52 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     ? plugin.settings.gameCollection.length
     : 0;
 
-  // 问题 8b：统一简洁的 6 大顶栏模块名称，并支持用户手动拖拽或点击箭头调整顺序（持久化在 workspaceTabOrder）
+  // 6 大顶栏模块名称（单色 1.75px 线性图标 + 悬浮药丸分段槽），支持用户手动拖拽或点击箭头调整顺序（持久化在 workspaceTabOrder）
   const workspaceTabDefs = {
     desk: {
       mode: "desk",
-      icon: "📖",
+      iconName: "tv",
       title: "追番",
       statRole: "workspace-desk-badge",
       getBadgeText: () =>
         localUpdatedCount > 0
           ? `在看 ${watchingCount} · 新更 ${localUpdatedCount}`
-          : `在看 ${watchingCount} 部`
+          : `在看 ${watchingCount}`
     },
     catalog: {
       mode: "catalog",
-      icon: "🗂️",
-      title: "编目总览",
+      iconName: "grid",
+      title: "全部番剧",
       statRole: "workspace-catalog-badge",
-      getBadgeText: () => `收藏 ${metrics.total} 部`
+      getBadgeText: () => `${metrics.total}`
     },
     character: {
       mode: "character",
-      icon: "👑",
+      iconName: "user",
       title: "角色典藏",
       statRole: "workspace-char-badge",
-      getBadgeText: () => `角色 ${charCount} 位`
+      getBadgeText: () => `${charCount}`
     },
     gallery: {
       mode: "gallery",
-      icon: "🖼️",
+      iconName: "image",
       title: "画册典藏",
       statRole: "workspace-gallery-badge",
-      getBadgeText: () => `画作 ${illustCount} 幅`
+      getBadgeText: () => `${illustCount}`
     },
     voice: {
       mode: "voice",
-      icon: "🎙️",
-      title: "台词音声",
+      iconName: "mic",
+      title: "音声典藏",
       statRole: "workspace-voice-badge",
-      getBadgeText: () => `音声 ${voiceCount} 条`
+      getBadgeText: () => `${voiceCount}`
     },
     game: {
       mode: "game",
-      icon: "🎮",
+      iconName: "gamepad",
       title: "游戏典藏",
       statRole: "workspace-game-badge",
-      getBadgeText: () => `游戏 ${gameCount} 部`
+      getBadgeText: () => `${gameCount}`
     }
   };
 
@@ -5552,7 +5797,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       await shiftWorkspaceTabOrder(modeKey, -1);
     };
 
-    btn.createSpan({ cls: "curator-ws-mode-icon", text: def.icon });
+    const iconSpan = btn.createSpan({ cls: "curator-ws-mode-icon" });
+    iconSpan.appendChild(v07Core.icon(def.iconName));
     btn.createSpan({ cls: "curator-ws-mode-title", text: def.title });
     const badge = btn.createSpan({
       cls: "curator-ws-mode-badge curator-mono",
@@ -5661,6 +5907,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       effectiveWorkspaceMode === "desk" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
     }`
   );
+  const v07StageMount = deskMount.createDiv("bm7-stage-mount");
+  const deskDetailMount = deskMount.createDiv("curator-desk-detail-host");
   const catalogMount = workspaceStage.createDiv(
     `curator-mount-catalog curator-workspace-pane ${
       effectiveWorkspaceMode === "catalog" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
@@ -5712,27 +5960,27 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       : 0;
     if (deskModeBadge) {
       deskModeBadge.textContent =
-        curLocalUpd > 0 ? `在看 ${curWatching} · 新更 ${curLocalUpd}` : `在看 ${curWatching} 部`;
+        curLocalUpd > 0 ? `在看 ${curWatching} · 新更 ${curLocalUpd}` : `在看 ${curWatching}`;
     }
     if (catalogModeBadge) {
-      catalogModeBadge.textContent = `收藏 ${curMetrics.total} 部`;
+      catalogModeBadge.textContent = `${curMetrics.total}`;
     }
     if (charModeBadge) {
-      charModeBadge.textContent = `角色 ${curCharCount} 位`;
+      charModeBadge.textContent = `${curCharCount}`;
     }
     if (galleryModeBadge) {
-      galleryModeBadge.textContent = `画作 ${curIllustCount} 幅`;
+      galleryModeBadge.textContent = `${curIllustCount}`;
     }
     if (voiceModeBadge) {
-      voiceModeBadge.textContent = `音声 ${curVoiceCount} 条`;
+      voiceModeBadge.textContent = `${curVoiceCount}`;
     }
     if (gameModeBadge) {
-      gameModeBadge.textContent = `游戏 ${curGameCount} 部`;
+      gameModeBadge.textContent = `${curGameCount}`;
     }
 
     const reorderToggleBtn = quickRibbon.createEl("button", {
       cls: `curator-ws-quick-jump-btn ${modeTabs.classList.contains("is-reorder-mode") ? "is-active" : ""}`,
-      text: modeTabs.classList.contains("is-reorder-mode") ? "✓ 完成标签排序" : "⇄ 调整标签顺序"
+      text: modeTabs.classList.contains("is-reorder-mode") ? "完成标签排序" : "调整标签顺序"
     });
     reorderToggleBtn.title = "点击开启/关闭顶栏 6 大模块标签的左右调序箭头（也可直接按住任意标签拖拽排序）";
     reorderToggleBtn.onclick = (e) => {
@@ -5742,16 +5990,16 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     };
 
     if (state.workspaceMode === "desk") {
-      const hintSpan = quickRibbon.createSpan({
-        cls: "curator-ws-ribbon-hint",
-        text: "长按任意卡片可唤醒 🪄 洛琪希魔杖 · 同源关联检索"
-      });
-      hintSpan.title = "追番席专注于正在追番、本地视频更新与季度席位；长按卡片或点击 🪄 查看跨馆同源关联";
-
       const quickSearchBtn = quickRibbon.createEl("button", {
         cls: "curator-ws-quick-jump-btn",
-        text: `⌕ 检索全部 ${curMetrics.total} 部馆藏 / 多维筛选 →`
+        attr: {
+          type: "button",
+          title: "切换至「全部番剧」面板并定位搜索框"
+        }
       });
+      quickSearchBtn.createSpan({ text: `检索全部 ${curMetrics.total} 部` });
+      const cue = quickSearchBtn.createSpan({ cls: "bm8-jump-cue" });
+      cue.appendChild(v07Core.icon("arrowUpRight", 12));
       quickSearchBtn.dataset.workspaceAction = "jump-to-catalog-search";
       quickSearchBtn.onclick = (e) => {
         e.preventDefault();
@@ -5760,7 +6008,11 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     } else {
       const backDeskBtn = quickRibbon.createEl("button", {
         cls: "curator-ws-quick-jump-btn",
-        text: `← 返回追番 (在看 ${curWatching} 部)`
+        text: `← 返回追番 (在看 ${curWatching})`,
+        attr: {
+          type: "button",
+          title: "切换回「追番」主视图"
+        }
       });
       backDeskBtn.dataset.workspaceAction = "jump-to-desk";
       backDeskBtn.onclick = (e) => {
@@ -5778,6 +6030,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const switchWorkspaceMode = (nextMode, switchOpts = {}) => {
     const targetMode = validModes.includes(nextMode) ? nextMode : "desk";
     const prevMode = state.workspaceMode;
+    const orderedModes = getOrderedWorkspaceModes();
+    const prevIdx = orderedModes.indexOf(prevMode);
+    const nextIdx = orderedModes.indexOf(targetMode);
     state.workspaceMode = targetMode;
     state.workspaceModeCustomized = true;
 
@@ -5798,6 +6053,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     persistDeskPrefs(plugin, state);
 
     unifiedWorkspace.dataset.activeMode = targetMode;
+    container.dataset.activeMode = targetMode;
     deskModeBtn.classList.toggle("is-active", targetMode === "desk");
     catalogModeBtn.classList.toggle("is-active", targetMode === "catalog");
     charModeBtn.classList.toggle("is-active", targetMode === "character");
@@ -5805,8 +6061,6 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     voiceModeBtn.classList.toggle("is-active", targetMode === "voice");
     gameModeBtn.classList.toggle("is-active", targetMode === "game");
 
-    const animCls =
-      targetMode !== "desk" ? "is-switching-to-catalog" : "is-switching-to-desk";
     workspaceStage.classList.remove("is-switching-to-catalog", "is-switching-to-desk");
 
     deskMount.classList.toggle("is-workspace-pane-active", targetMode === "desk");
@@ -5821,16 +6075,6 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     voiceMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "voice");
     gameMount.classList.toggle("is-workspace-pane-active", targetMode === "game");
     gameMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "game");
-
-    if (prevMode !== targetMode) {
-      void workspaceStage.offsetWidth;
-      workspaceStage.classList.add(animCls);
-      setTimeout(() => {
-        if (workspaceStage.isConnected) {
-          workspaceStage.classList.remove(animCls);
-        }
-      }, 320);
-    }
 
     if (targetMode === "catalog") {
       renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
@@ -5873,6 +6117,11 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       );
     } else if (needCatalogRefresh) {
       renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
+    }
+
+    if (prevMode !== targetMode) {
+      const dir = nextIdx >= prevIdx ? 1 : -1;
+      animateWorkspaceGlide(workspaceStage, dir);
     }
 
     renderQuickRibbon();
@@ -5930,9 +6179,12 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     deskOptions: options,
     syncTopbarControls,
     switchWorkspaceMode,
+    wandCallbacks: getWandCallbacks(),
     renderQuickRibbon,
     unifiedWorkspace,
-    deskMount,
+    deskPaneMount: deskMount,
+    v07StageMount,
+    deskMount: deskDetailMount,
     catalogMount,
     characterMount,
     galleryMount,
@@ -5941,10 +6193,28 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     shelvesMount,
     almanacMount
   });
+  const refreshV07Stage = () => {
+    const curItems = state.items || [];
+    if (curItems.length === 0) {
+      v07StageMount.empty();
+      v07StageMount.style.display = "none";
+      deskDetailMount.style.display = "";
+      renderActiveDeskSection(plugin, deskDetailMount, state, runtimeHelpers);
+      return;
+    }
+    deskDetailMount.empty();
+    deskDetailMount.style.display = "none";
+    v07StageMount.style.display = "";
+    const stageCtx = v07Adapters.createAnimeStageContext(plugin, curItems, runtimeHelpers);
+    stageCtx.themeRoot = container;
+    v07Stage.renderAnimeStage(v07StageMount, stageCtx);
+  };
+  runtimeHelpers.refreshV07Stage = refreshV07Stage;
+  runtimeHelpers.refreshStage = refreshV07Stage;
   container._deskRuntime = runtimeHelpers;
 
   renderQuickRibbon();
-  renderActiveDeskSection(plugin, deskMount, state, runtimeHelpers);
+  refreshV07Stage();
   renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
   if (effectiveWorkspaceMode === "character") {
     characterArchiveService.renderCharacterArchiveWorkspace(
@@ -5975,17 +6245,11 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       { wandCallbacks: getWandCallbacks() }
     );
   }
-  if (isZeroAnimeOnboarding) {
-    shelvesMount.empty();
-    shelvesMount.style.display = "none";
-    almanacMount.empty();
-    almanacMount.style.display = "none";
-  } else {
-    shelvesMount.style.display = "";
-    almanacMount.style.display = "";
-    renderCustomShelvesSection(plugin, shelvesMount, state, container, options);
-    renderAlmanacSection(plugin, almanacMount, state, container, options);
-  }
+  // v0.8 单屏收束：退役底部常驻重复展柜与统计长表，统一收拢至可渐进展开的「统计画像」抽屉
+  shelvesMount.empty();
+  shelvesMount.style.display = "none";
+  almanacMount.empty();
+  almanacMount.style.display = "none";
 
   // 挂载或刷新二维洛琪希馆藏记录员（低打扰、可最小化、可暂时隐藏、可永久关闭）
   roxyMascotService.mountRoxy2DMascot(plugin, container, state, runtimeHelpers);
@@ -6101,12 +6365,12 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
     });
   }
 
-  // 4. 若观看状态、标签或观片手札变更，局部刷新案头追番席与目录区，不触碰顶栏和滚动条
+  // 4. 若观看状态、标签或观片手札变更，局部刷新目录区，不触碰顶栏和滚动条
   if (updates.state !== undefined || updates.addTag || updates.removeTag || updates.reviewsUpdated) {
     if (updates.state === "在看") {
       state.deskTab = "watching";
     }
-    if (runtime.deskMount) {
+    if (runtime.deskMount && (state.items || []).length === 0) {
       renderActiveDeskSection(plugin, runtime.deskMount, state, runtime);
     }
     if (
@@ -6121,9 +6385,16 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
     }
   }
 
-  // 5. 原地刷新底部年鉴摘要条（若年鉴正处于展开状态则局部刷新年鉴内部）
-  if (runtime.almanacMount) {
-    renderAlmanacSection(plugin, runtime.almanacMount, state, container, state.options);
+  // 5. 原地局部刷新首屏追番主舞台（零闪烁，不销毁侧栏洛琪希插画与右下角像素挂件）
+  if (
+    runtime.v07StageMount &&
+    runtime.v07StageMount._bm7StageController &&
+    typeof runtime.v07StageMount._bm7StageController.applyItemMutation === "function" &&
+    (state.items || []).length > 0
+  ) {
+    runtime.v07StageMount._bm7StageController.applyItemMutation(item, updates);
+  } else if (typeof runtime.refreshV07Stage === "function") {
+    runtime.refreshV07Stage();
   }
 
   // 6. 向二维洛琪希馆藏记录员发送真实状态反馈（内置冷却与去重）
@@ -6155,7 +6426,7 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
         category: "开始追番",
         priority: roxyMascotService.PRIORITY.HIGH,
         dedupeKey: `state:watching:${item.file?.path || item.name}`,
-        message: `好的，我已经帮您把《${item.name}》放到案头「在看」席位了，接下来的连载进度就交给我来记录吧。`
+        message: `好的，我已经帮您把《${item.name}》放进「在看」追番列表了，接下来的连载进度就交给我来记录吧。`
       });
     } else if (updates.state !== undefined) {
       roxyMascotService.emitRoxyEvent(plugin, {
@@ -6164,7 +6435,7 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
         category: "状态变更",
         priority: roxyMascotService.PRIORITY.NORMAL,
         dedupeKey: `state:${updates.state}:${item.file?.path || item.name}`,
-        message: `明白了，我已经把《${item.name}》的编目状态改成了「${item.state || "未设置"}」。`
+        message: `明白了，我已经把《${item.name}》的观看状态改成了「${item.state || "未设置"}」。`
       });
     } else if (updates.watchedEpisodes !== undefined) {
       roxyMascotService.emitRoxyEvent(plugin, {
@@ -6220,20 +6491,21 @@ function getCuratorDeskStyles() {
     ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-header .view-header-title-container{visibility:hidden !important;pointer-events:none !important;}",
     ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view{padding:4px 14px 28px !important;overflow-x:hidden !important;}",
     /* 容器级响应式工作台（宽屏提升约 14% 有效编目面积，同时保留两侧纸本台面呼吸留白，绝不产生横向溢出） */
-    ".bangumi-score-dashboard{width:100%;max-width:100%;box-sizing:border-box;container-type:inline-size;container-name:curator-desk;}",
-    ".curator-desk-root{width:min(98.5%, 2240px);max-width:2240px;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;}",
+    ".bangumi-score-dashboard{width:100%;max-width:100%;box-sizing:border-box;container-type:inline-size;container-name:curator-desk-outer;}",
+    ".curator-desk-root{width:min(98.5%, 2240px);max-width:2240px;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;container-type:inline-size;container-name:curator-desk;}",
+    ".is-wand-charging{user-select:none !important;-webkit-user-select:none !important;}",
     ".curator-mono{font-variant-numeric:tabular-nums;font-family:var(--font-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace);}",
-    /* 1. 统一单一顶栏 */
+    /* 1. 统一单一顶栏（支持 Obsidian 左右侧边栏单开/双开下的容器级自适应网格，彻底杜绝 6 行窄条高塔挤压） */
     ".curator-desk-topbar{position:relative;z-index:5;margin:0 0 18px;padding:14px 18px;border-radius:12px;border:1px solid color-mix(in srgb, #b8966c 34%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 94%, #f4efe6 6%);box-shadow:0 6px 20px rgba(42,32,22,0.06);display:flex;flex-direction:column;gap:12px;}",
-    ".curator-topbar-row1{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}",
-    ".curator-brand-col{min-width:210px;}",
-    ".curator-brand-kicker{font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--text-faint);font-weight:600;margin-bottom:2px;}",
-    ".curator-brand-title{margin:0;font-size:1.26em;font-weight:700;letter-spacing:0.02em;color:var(--text-normal);}",
-    ".curator-summary-strip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;justify-content:center;}",
-    ".curator-summary-pill{display:inline-flex;align-items:baseline;gap:6px;padding:4px 10px;border-radius:6px;background:color-mix(in srgb, var(--background-secondary) 82%, #efe8dc 18%);border:1px solid var(--background-modifier-border);font-size:12px;}",
-    ".curator-summary-label{color:var(--text-muted);font-size:11px;}",
-    ".curator-summary-val{font-weight:700;color:var(--text-normal);font-size:12.5px;}",
-    ".curator-topbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex-shrink:0;}",
+    ".curator-topbar-row1{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px 16px;}",
+    ".curator-brand-col{min-width:172px;}",
+    ".curator-brand-kicker{font-size:10px;letter-spacing:0.12em;color:var(--text-faint);font-weight:600;margin-bottom:2px;}",
+    ".curator-brand-title{margin:0;font-size:1.26em;font-weight:700;letter-spacing:0.02em;color:var(--text-normal);white-space:nowrap;}",
+    ".curator-summary-strip{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:center;min-width:0;}",
+    ".curator-summary-pill{display:inline-flex;align-items:baseline;justify-content:space-between;gap:6px;padding:4px 10px;border-radius:6px;background:color-mix(in srgb, var(--background-secondary) 82%, #efe8dc 18%);border:1px solid var(--background-modifier-border);font-size:12px;white-space:nowrap;min-width:0;}",
+    ".curator-summary-label{color:var(--text-muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;}",
+    ".curator-summary-val{font-weight:700;color:var(--text-normal);font-size:12.5px;flex-shrink:0;}",
+    ".curator-topbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;flex-shrink:0;}",
     ".curator-top-btn{cursor:pointer;padding:5px 11px;font-size:12px;font-weight:600;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);transition:all .14s ease;}",
     ".curator-top-btn:hover{border-color:#9e784b;color:#9e784b;background:var(--background-modifier-hover);}",
     ".curator-top-btn.is-subtle{font-weight:500;color:var(--text-muted);background:transparent;}",
@@ -6538,10 +6810,11 @@ function getCuratorDeskStyles() {
     ".curator-empty-sub{font-size:12px;color:var(--text-muted);}",
     ".curator-mini-btn{cursor:pointer;padding:3px 10px;font-size:11.5px;border-radius:5px;border:1px solid var(--background-modifier-border);background:var(--background-primary);color:var(--text-normal);}",
     ".curator-mini-btn.is-accent{border-color:#8f683d;color:#8f683d;font-weight:600;}",
-    /* 6. 容器级响应式适配（宽屏 / 左侧文件树展开中等宽度 / 窄窗口分屏 / Markdown 嵌入） */
-    "@container curator-desk (max-width: 1180px){.curator-desk-grid.is-standby-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.curator-almanac-summary-strip{grid-template-columns:repeat(3,minmax(0,1fr));}}",
-    "@container curator-desk (max-width: 860px){.curator-desk-root{width:100%;padding:4px 4px 32px;}.curator-desk-topbar{padding:11px 12px;}.curator-summary-strip{justify-content:flex-start;}.curator-desk-grid.is-watching-grid,.curator-desk-grid.is-standby-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.curator-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;}.curator-almanac-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr));}}",
-    "@container curator-desk (max-width: 580px){.curator-desk-grid.is-watching-grid,.curator-desk-grid.is-standby-grid{grid-template-columns:1fr;}.curator-almanac-summary-strip{grid-template-columns:1fr;}}",
+    /* 6. 容器级响应式适配（宽屏 / 左侧或右侧侧边栏单开 / 双侧边栏齐开 / 窄窗口分屏 / Markdown 嵌入） */
+    "@container curator-desk (max-width: 1180px){.curator-topbar-row1{grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;}.curator-brand-col{order:1;min-width:0;}.curator-topbar-actions{order:2;justify-content:flex-end;}.curator-summary-strip{grid-column:1 / -1;order:3;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;justify-content:stretch;}.curator-summary-pill.is-onboarding-pill{grid-column:1 / -1;justify-content:flex-start;}.curator-desk-grid.is-standby-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.curator-almanac-summary-strip{grid-template-columns:repeat(3,minmax(0,1fr));}}",
+    "@container curator-desk (max-width: 860px){.curator-desk-root{width:100%;padding:4px 4px 32px;}.curator-desk-topbar{padding:11px 12px;}.curator-summary-strip{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;}.curator-workspace-mode-bar{flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px;}.curator-workspace-quick-ribbon{margin-left:0;width:100%;justify-content:space-between;}.curator-desk-grid.is-watching-grid,.curator-desk-grid.is-standby-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.curator-gallery-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px;}.curator-almanac-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr));}}",
+    "@container curator-desk (max-width: 660px){.curator-topbar-row1{grid-template-columns:1fr;gap:8px;}.curator-topbar-actions{justify-content:flex-start;}.curator-workspace-mode-tabs{display:flex;width:100%;max-width:100%;box-sizing:border-box;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:thin;padding-bottom:2px;}.curator-workspace-mode-btn{flex:0 0 auto;padding:6px 10px;}.curator-workspace-stage{padding:10px 12px 14px;}.curator-desk-grid.is-watching-grid,.curator-desk-grid.is-standby-grid{grid-template-columns:1fr;}.curator-almanac-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr));}}",
+    "@container curator-desk (max-width: 480px){.curator-summary-strip{grid-template-columns:repeat(2,minmax(0,1fr));}.curator-almanac-summary-strip{grid-template-columns:1fr;}.curator-gallery-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}}",
     /* 7. 追番下载与单集 RSS 工作台弹窗 + 季度席位管理弹窗 */
     ".curator-download-modal{display:flex;flex-direction:column;gap:12px;color:var(--text-normal);}",
     ".curator-dl-header{padding-bottom:8px;border-bottom:1px solid var(--background-modifier-border);}",
@@ -6613,6 +6886,16 @@ function getCuratorDeskStyles() {
     ".curator-dl-empty-box{padding:22px 14px;text-align:center;border-radius:8px;border:1px dashed var(--background-modifier-border);background:var(--background-primary);display:flex;flex-direction:column;align-items:center;gap:6px;}",
     ".curator-dl-empty-title{font-size:13px;font-weight:700;color:var(--text-normal);}",
     ".curator-dl-empty-sub{font-size:11.5px;color:var(--text-muted);max-width:640px;line-height:1.45;}",
+    ".curator-dl-folder-error-box{margin-top:6px;padding:8px 10px;border-radius:7px;border:1px solid rgba(212,130,42,0.52);background:rgba(212,130,42,0.09);display:flex;flex-direction:column;gap:6px;}",
+    ".curator-dl-folder-error-text{font-size:11.5px;line-height:1.45;color:#b35c0e;font-weight:600;word-break:break-word;}",
+    ".curator-dl-folder-error-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}",
+    ".curator-dl-custom-folder-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;}",
+    ".curator-dl-stream-head-btns{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}",
+    ".curator-dl-gap-warn-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:9px 12px;margin-bottom:8px;border-radius:8px;border:1px solid rgba(212,130,42,0.52);background:rgba(212,130,42,0.09);}",
+    ".curator-dl-gap-warn-text{flex:1 1 360px;font-size:11.5px;line-height:1.48;color:var(--text-normal);}",
+    ".curator-dl-packs-section{display:flex;flex-direction:column;gap:6px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--background-modifier-border);}",
+    ".curator-dl-packs-list{display:flex;flex-direction:column;gap:6px;max-height:24vh;overflow-y:auto;padding-right:4px;}",
+    ".curator-dl-pack-pill{font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(143,104,61,0.16);color:#8f683d;}",
     /* 季度管理弹窗 */
     ".curator-season-mgr-desc{font-size:12px;color:var(--text-muted);margin-top:0;line-height:1.45;}",
     ".curator-season-mgr-box{padding:10px 12px;margin-bottom:10px;border-radius:8px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);display:flex;flex-direction:column;gap:8px;}",
@@ -7084,11 +7367,12 @@ function getCuratorDeskStyles() {
     ".curator-char-delete-note-label{font-size:12px;font-weight:700;color:#b83b37;}",
     ".curator-char-modal-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--background-modifier-border);}",
     /* 15. 角色典藏画廊多视图切换、立绘取景换图工坊与等身标尺陈列架 */
-    ".curator-char-gallery-toolbar-left{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}",
-    ".curator-char-view-switcher{display:inline-flex;align-items:center;gap:3px;padding:3px;border-radius:8px;border:1px solid color-mix(in srgb, #8f683d 32%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 75%, #f5ede0 25%);}",
-    ".curator-char-view-btn{cursor:pointer;padding:4px 10px;font-size:11.5px;font-weight:700;border-radius:6px;border:none;background:transparent;color:var(--text-muted);transition:all .18s cubic-bezier(0.22,1,0.36,1);}",
-    ".curator-char-view-btn:hover{color:var(--text-normal);background:rgba(143,104,61,0.1);}",
-    ".curator-char-view-btn.is-active{background:linear-gradient(135deg,#8f683d,#b08450);color:#fffdf9;box-shadow:0 2px 6px rgba(143,104,61,0.28);}",
+    ".curator-char-gallery-toolbar-left{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}",
+    ".curator-char-view-switcher{display:inline-flex;align-items:center;gap:2px;padding:3px;border-radius:10px;border:1px solid var(--bm7-line, var(--background-modifier-border));background:var(--bm7-seg-bg, var(--background-secondary));box-shadow:inset 0 1px 2px rgba(0,0,0,0.05);}",
+    ".curator-char-view-btn{cursor:pointer;height:28px;padding:0 11px;font-size:12px;font-weight:600;border-radius:7px;border:none;background:transparent;color:var(--bm7-ink-2, var(--text-muted));transition:all .18s cubic-bezier(0.22,1,0.36,1);}",
+    ".curator-char-view-btn:hover{color:var(--bm7-ink, var(--text-normal));background:color-mix(in srgb,var(--bm7-seg-active-bg, #ffffff) 48%,transparent);}",
+    ".curator-char-view-btn.is-active{background:var(--bm7-seg-active-bg, #ffffff);color:var(--bm7-seg-active-ink, var(--text-normal));font-weight:700;box-shadow:var(--bm7-seg-active-shadow, 0 1px 4px rgba(0,0,0,0.1));}",
+    ".curator-dl-mini-btn.is-char-more-btn{display:inline-flex;align-items:center;justify-content:center;padding:3px 7px;margin-left:auto;}",
     ".curator-char-card-avatar.is-clickable-portrait,.curator-char-draft-poster.is-clickable-portrait{cursor:pointer;position:relative;transition:transform .2s cubic-bezier(0.22,1,0.36,1), box-shadow .2s ease, border-color .2s ease;}",
     ".curator-char-card-avatar.is-clickable-portrait:hover,.curator-char-draft-poster.is-clickable-portrait:hover{border-color:#8f683d;box-shadow:0 4px 12px rgba(143,104,61,0.22);}",
     ".curator-char-card-avatar.is-fit-contain,.curator-char-draft-poster.is-fit-contain,.curator-studio-viewport.is-fit-contain,.curator-char-detail-poster.is-fit-contain{background:radial-gradient(circle at 50% 35%, color-mix(in srgb, #f7df9c 18%, var(--background-secondary)), color-mix(in srgb, #241b12 10%, var(--background-secondary)));}",
@@ -7265,7 +7549,21 @@ function getCuratorDeskStyles() {
     ".curator-starter-title{margin:0;font-size:20px;font-weight:800;color:var(--text-normal);}",
     ".curator-starter-sub{font-size:13px;color:var(--text-muted);line-height:1.55;}",
     ".curator-starter-grid{display:grid;grid-template-columns:repeat(3, minmax(0, 1fr));gap:14px;align-items:stretch;}",
+    "@container curator-desk (max-width: 960px){.curator-starter-grid{grid-template-columns:1fr;}}",
     "@media (max-width: 1020px){.curator-starter-grid{grid-template-columns:1fr;}}",
+    /* 多维评分与改编类型分布 —— 暖金矿物色阶（告别刺眼默认主题紫） */
+    ".curator-unified-dist-list .bangumi-type-track{height:9px !important;border-radius:999px !important;background:color-mix(in srgb, #8f683d 12%, var(--background-modifier-border)) !important;overflow:hidden;box-shadow:inset 0 1px 2px rgba(34,24,14,0.08);}",
+    ".curator-unified-dist-list .bangumi-type-bar{height:100% !important;border-radius:999px !important;background:linear-gradient(90deg, #8f683d, #c89b62) !important;transition:width 360ms cubic-bezier(0.22,1,0.36,1);}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-score-tier-5{background:linear-gradient(90deg, #9c6b2e, #d4a350) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-score-tier-4{background:linear-gradient(90deg, #387860, #5ca489) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-score-tier-3{background:linear-gradient(90deg, #355f8a, #5a8ec2) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-score-tier-2{background:linear-gradient(90deg, #8a6d4b, #b3926b) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-score-tier-1{background:linear-gradient(90deg, #8c544c, #b3746b) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-type-original{background:linear-gradient(90deg, #9c6b2e, #d4a350) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-type-manga{background:linear-gradient(90deg, #355f8a, #5d91c4) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-type-novel{background:linear-gradient(90deg, #387860, #5da489) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-type-game{background:linear-gradient(90deg, #7d5678, #a6789f) !important;}",
+    ".curator-unified-dist-list .bangumi-type-bar.is-type-other{background:linear-gradient(90deg, #787066, #9b9286) !important;}",
     ".curator-starter-card{display:flex;flex-direction:column;gap:10px;padding:16px 16px 15px;border-radius:11px;border:1px solid var(--background-modifier-border);background:var(--background-primary);transition:border-color .18s ease, box-shadow .18s ease;}",
     ".curator-starter-card:hover{border-color:color-mix(in srgb, #8f683d 48%, var(--background-modifier-border));box-shadow:0 6px 18px rgba(38,26,14,0.06);}",
     ".curator-starter-card.is-sample-card{background:linear-gradient(180deg, color-mix(in srgb, #f7df9c 14%, var(--background-primary)), var(--background-primary));border-color:color-mix(in srgb, #c8943c 38%, var(--background-modifier-border));}",
@@ -7282,18 +7580,99 @@ function getCuratorDeskStyles() {
     reviewStudioService.getReviewStudioStyles(),
     roxyMascotService.getRoxy2DMascotStyles(),
     multiHallArchiveService.getMultiHallStyles(),
-    /* Android / 移动端窄屏触控适配（置于级联末尾以确保覆盖子模块桌面间距） */
+    v07Styles.getV07Styles(),
+    /* v0.8 顶栏、凹槽悬浮药丸导航条、快速题材标签栏与单屏无套娃舞台强化 */
+    ".curator-desk-root[data-bm7-theme] .curator-desk-topbar,.curator-desk-root .curator-desk-topbar{border-radius:16px;border:1px solid var(--bm7-line, var(--background-modifier-border));background:var(--bm7-surface, var(--background-primary));box-shadow:var(--bm7-shadow);padding:12px 16px;margin-bottom:14px;}",
+    ".curator-brand-kicker{font-size:12px !important;letter-spacing:0.06em !important;color:var(--bm7-ink-3, var(--text-faint)) !important;}",
+    ".curator-brand-title{color:var(--bm7-ink, var(--text-normal)) !important;font-size:1.3em !important;letter-spacing:-0.01em !important;}",
+    ".curator-summary-strip{display:flex;align-items:center;flex-wrap:wrap;gap:6px !important;}",
+    ".curator-summary-pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px !important;border-radius:999px !important;background:var(--bm7-surface-2, var(--background-secondary));border:1px solid var(--bm7-line, var(--background-modifier-border));font-size:12px !important;white-space:nowrap;transition:transform .16s ease,border-color .16s ease,background-color .16s ease,box-shadow .16s ease;}",
+    ".curator-summary-label{font-size:12px !important;color:var(--bm7-ink-2, var(--text-muted)) !important;}",
+    ".curator-summary-val{font-size:12.5px !important;color:var(--bm7-ink, var(--text-normal)) !important;}",
+    ".curator-summary-pill.is-interactive{cursor:pointer;user-select:none;}",
+    ".curator-summary-pill.is-interactive:hover{border-color:color-mix(in srgb,var(--bm7-accent, #8f683d) 46%,var(--bm7-line));background:var(--bm7-surface, var(--background-primary));transform:translateY(-1px);}",
+    ".curator-summary-pill.is-insights-trigger{justify-content:center !important;gap:5px !important;color:var(--bm7-accent, #8f683d) !important;font-weight:650;border-color:color-mix(in srgb,var(--bm7-accent, #8f683d) 36%,var(--bm7-line));background:var(--bm7-accent-soft, rgba(143,104,61,0.12));}",
+    ".curator-summary-pill.is-insights-trigger svg,.curator-summary-pill.is-onboarding-pill svg,.curator-top-btn svg,.curator-sample-preview-badge svg{width:14px;height:14px;flex-shrink:0;}",
+    ".curator-top-btn{display:inline-flex !important;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 11px !important;font-size:12.5px !important;border-radius:9px !important;border:1px solid var(--bm7-line, var(--background-modifier-border)) !important;background:var(--bm7-surface, var(--background-secondary)) !important;color:var(--bm7-ink-2, var(--text-normal)) !important;box-shadow:none !important;}",
+    ".curator-top-btn:hover{color:var(--bm7-ink, var(--text-normal)) !important;border-color:color-mix(in srgb,var(--bm7-accent, #8f683d) 48%,var(--bm7-line)) !important;background:var(--bm7-surface-2, var(--background-modifier-hover)) !important;}",
+    ".curator-top-btn.is-subtle{background:transparent !important;}",
+    ".curator-top-btn.is-3d-entry{background:var(--bm7-accent, #8f683d) !important;border-color:var(--bm7-accent, #8f683d) !important;color:var(--bm7-accent-ink, #fffdf9) !important;box-shadow:0 4px 12px color-mix(in srgb,var(--bm7-accent, #8f683d) 28%,transparent) !important;}",
+    /* 顶栏 6 大模块导航：凹槽底座 + 亮暗双态高对比悬浮药丸 */
+    ".curator-unified-workspace{border:none !important;background:transparent !important;box-shadow:none !important;padding:0 !important;margin-bottom:12px !important;overflow:visible !important;}",
+    ".curator-workspace-mode-bar{padding:0 0 12px 0 !important;margin-bottom:4px !important;background:transparent !important;border-bottom:none !important;}",
+    ".curator-workspace-mode-tabs{display:inline-flex !important;align-items:center;flex-wrap:wrap;gap:3px !important;padding:4px !important;border-radius:13px !important;background:var(--bm7-seg-bg, color-mix(in srgb,var(--background-secondary) 88%,rgba(0,0,0,0.06))) !important;border:1px solid var(--bm7-line, rgba(0,0,0,0.08)) !important;box-shadow:inset 0 1px 2px rgba(0,0,0,0.06) !important;}",
+    ".curator-workspace-mode-btn{display:inline-flex !important;align-items:center;gap:7px !important;height:34px;padding:0 13px !important;border-radius:9px !important;border:none !important;background:transparent !important;color:var(--bm7-ink-2, var(--text-muted)) !important;font-size:13px !important;font-weight:600 !important;box-shadow:none !important;transition:background-color .18s cubic-bezier(.22,1,.36,1),color .18s ease,box-shadow .18s ease !important;}",
+    ".curator-workspace-mode-btn:hover{color:var(--bm7-ink, var(--text-normal)) !important;background:color-mix(in srgb,var(--bm7-seg-active-bg, #ffffff) 48%,transparent) !important;}",
+    ".curator-workspace-mode-btn.is-active{background:var(--bm7-seg-active-bg, #ffffff) !important;color:var(--bm7-seg-active-ink, var(--text-normal)) !important;font-weight:700 !important;box-shadow:var(--bm7-seg-active-shadow, 0 2px 8px rgba(15,18,24,0.1)) !important;}",
+    ".curator-ws-mode-icon{display:inline-flex;align-items:center;justify-content:center;color:currentColor;opacity:0.86;}",
+    ".curator-ws-mode-icon svg{width:15px;height:15px;}",
+    ".curator-workspace-mode-btn.is-active .curator-ws-mode-icon{color:var(--bm7-accent, currentColor);opacity:1;}",
+    ".curator-ws-mode-badge{font-family:inherit !important;font-variant-numeric:tabular-nums !important;font-size:12px !important;padding:1px 7px !important;border-radius:999px !important;background:color-mix(in srgb,var(--bm7-ink, #1c1b1a) 8%,transparent) !important;color:var(--bm7-ink-2, var(--text-muted)) !important;font-weight:600 !important;}",
+    ".curator-workspace-mode-btn.is-active .curator-ws-mode-badge{background:var(--bm7-accent-soft, rgba(143,104,61,0.16)) !important;color:var(--bm7-accent, #8f683d) !important;font-weight:700 !important;}",
+    ".curator-ws-quick-jump-btn{height:32px;padding:0 12px !important;font-size:12px !important;border-radius:999px !important;border:1px solid var(--bm7-line, var(--background-modifier-border)) !important;background:var(--bm7-surface, var(--background-primary)) !important;color:var(--bm7-ink-2, var(--text-muted)) !important;}",
+    ".curator-ws-quick-jump-btn:hover,.curator-ws-quick-jump-btn.is-active{background:var(--bm7-accent-soft) !important;border-color:color-mix(in srgb,var(--bm7-accent) 45%,var(--bm7-line)) !important;color:var(--bm7-accent) !important;}",
+    ".curator-workspace-stage{padding:0 !important;}",
+    ".curator-unified-workspace[data-active-mode]:not([data-active-mode='desk']) .curator-workspace-stage{padding:14px 16px 16px !important;border-radius:16px;border:1px solid var(--bm7-line, var(--background-modifier-border));background:var(--bm7-surface, var(--background-primary));box-shadow:var(--bm7-shadow);}",
+    ".bm7-stage-mount{margin-bottom:6px;}",
+    /* 全部番剧：凹槽视图切换器、>=12px 字号底线与精简卡片底栏 */
+    ".curator-desk-root{overflow-x:clip !important;}",
+    ".curator-topbar-row1{display:flex !important;align-items:center !important;justify-content:space-between !important;flex-wrap:wrap !important;gap:10px 16px !important;}",
+    ".curator-summary-strip:empty{display:none !important;}",
+    ".curator-section-header{flex-wrap:wrap !important;gap:8px !important;}",
+    ".curator-view-controls,.curator-catalog-header-controls,.curator-section-header-controls{display:flex;flex-wrap:wrap !important;flex-shrink:1 !important;max-width:100% !important;gap:8px !important;min-width:0;}",
+    ".curator-section-badge,.curator-mini-btn,.curator-dl-mini-btn,.curator-starter-step,.curator-starter-chip-label,.curator-starter-chip,.curator-char-header-sub,.curator-char-rank-subtitle,.curator-char-attr-chip,.curator-char-moe-tag,.curator-char-moe-empty,.curator-char-anime-chip{font-size:12px !important;}",
+    ".bangumi-grid-state-badge,.bangumi-grid-score-badge,.bangumi-grid-ep-label,.bangumi-grid-meta,.curator-gallery-edition-badge,.curator-gallery-distinguisher,.bangumi-grid-tags,.bangumi-grid-tags *,.bangumi-grid-tag-chip,.bangumi-grid-tag-chip span,.bangumi-grid-add-tag-btn,.curator-gallery-add-tag,.bangumi-grid-tag-del,.curator-gallery-quiet-link{font-size:12px !important;}",
+    ".curator-gallery-footer{display:flex !important;flex-direction:column !important;align-items:stretch !important;gap:6px !important;}",
+    ".curator-gallery-quiet-actions{display:flex !important;align-items:center;justify-content:flex-start;gap:6px !important;flex-wrap:nowrap;width:100%;padding-top:4px;border-top:1px dashed var(--bm7-line, var(--background-modifier-border));}",
+    ".curator-gallery-quiet-link.is-more-btn{display:inline-flex;align-items:center;justify-content:center;padding:2px 6px !important;min-width:24px;margin-left:auto;}",
+    ".curator-search-icon{display:inline-flex;align-items:center;justify-content:center;color:var(--bm7-ink-3, var(--text-faint));}",
+    ".curator-search-icon svg{width:14px;height:14px;}",
+    ".curator-mode-toggle-group{display:inline-flex !important;align-items:center;gap:2px;padding:3px !important;border-radius:10px !important;background:var(--bm7-seg-bg, var(--background-secondary)) !important;border:1px solid var(--bm7-line, var(--background-modifier-border)) !important;box-shadow:inset 0 1px 2px rgba(0,0,0,0.05);}",
+    ".curator-mode-btn{display:inline-flex !important;align-items:center;gap:5px;height:28px;padding:0 10px !important;font-size:12px !important;border-radius:7px !important;color:var(--bm7-ink-2, var(--text-muted)) !important;background:transparent !important;}",
+    ".curator-mode-btn svg{width:14px;height:14px;}",
+    ".curator-mode-btn.is-active{background:var(--bm7-seg-active-bg, #ffffff) !important;color:var(--bm7-seg-active-ink, var(--text-normal)) !important;font-weight:700 !important;box-shadow:var(--bm7-seg-active-shadow, 0 1px 4px rgba(0,0,0,0.1)) !important;}",
+    ".curator-filter-pill{font-size:12px !important;}",
+    ".curator-pill-count{font-size:12px !important;}",
+    ".curator-catalog-tagbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-4px 0 12px;padding:7px 12px;border-radius:10px;border:1px solid var(--bm7-line, var(--background-modifier-border));background:var(--bm7-surface-2, var(--background-secondary));}",
+    ".curator-catalog-tagbar-label{font-size:12px;font-weight:650;color:var(--bm7-ink-3, var(--text-muted));margin-right:2px;}",
+    ".curator-catalog-tagchip{cursor:pointer;height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--bm7-line, var(--background-modifier-border));background:var(--bm7-surface, var(--background-primary));color:var(--bm7-ink-2, var(--text-normal));font-size:12px;font-weight:600;transition:all .14s ease;}",
+    ".curator-catalog-tagchip:hover{border-color:var(--bm7-accent, #8f683d);color:var(--bm7-accent, #8f683d);}",
+    ".curator-catalog-tagchip.is-active{background:var(--bm7-accent, #8f683d);border-color:var(--bm7-accent, #8f683d);color:var(--bm7-accent-ink, #fffdf9);}",
+    /* 容器窄宽度（左右侧边栏展开）与移动端窄屏触控自适应（置于级联末尾以确保覆盖子模块桌面间距） */
+    "@container curator-desk-outer (max-width: 768px){",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:10px 10px 88px !important;box-sizing:border-box !important;}",
+    "}",
+    "@container curator-desk (max-width: 760px){",
+    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
+    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:4px 0 10px !important;margin-bottom:0 !important;min-width:0 !important;}",
+    "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
+    "  .curator-workspace-mode-btn{width:100% !important;justify-content:center !important;padding:0 6px !important;font-size:12px !important;gap:4px !important;}",
+    "  .curator-ws-mode-badge{padding:1px 5px !important;}",
+    "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
+    "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;flex-wrap:wrap !important;}",
+    "  .curator-ws-ribbon-hint{display:none !important;}",
+    "  .curator-workspace-stage{padding:10px 12px 14px !important;min-width:0 !important;}",
+    "  .curator-catalog-header-controls{margin-left:0 !important;width:100% !important;}",
+    "  .curator-gallery-grid{grid-template-columns:repeat(auto-fill, minmax(136px, 1fr)) !important;gap:10px !important;}",
+    "  .curator-desk-grid.is-watching-grid, .curator-desk-grid.is-standby-grid{grid-template-columns:1fr !important;}",
+    "  .curator-starter-desk{padding:15px 14px;}",
+    "  .curator-starter-inline-row{flex-direction:column;align-items:stretch;}",
+    "}",
     "@media (max-width: 768px){",
     "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:10px 10px 88px !important;box-sizing:border-box !important;}",
-    "  .curator-topbar-row1{flex-direction:column;align-items:stretch !important;gap:10px !important;}",
-    "  .curator-topbar-actions{display:flex;flex-wrap:wrap;gap:6px !important;}",
+    "  .curator-topbar-row1{display:grid !important;grid-template-columns:1fr !important;gap:8px !important;}",
+    "  .curator-summary-strip{display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;gap:6px !important;}",
+    "  .curator-summary-pill{justify-content:space-between !important;}",
+    "  .curator-summary-pill.is-insights-trigger{grid-column:1 / -1;justify-content:center !important;}",
+    "  .curator-topbar-actions{display:flex;flex-wrap:wrap;justify-content:flex-start !important;gap:6px !important;}",
     "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
-    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:10px 12px !important;margin-bottom:0 !important;min-width:0 !important;}",
-    "  .curator-workspace-mode-tabs{display:flex !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:2px;}",
-    "  .curator-workspace-mode-tabs::-webkit-scrollbar{display:none;}",
-    "  .curator-workspace-mode-btn{flex:0 0 auto !important;padding:7px 11px !important;}",
+    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:4px 0 10px !important;margin-bottom:0 !important;min-width:0 !important;}",
+    "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
+    "  .curator-workspace-mode-btn{width:100% !important;min-width:0 !important;overflow:hidden !important;justify-content:center !important;padding:0 4px !important;gap:3px !important;font-size:12px !important;}",
+    "  .curator-workspace-mode-btn .curator-ws-mode-icon{display:none !important;}",
+    "  .curator-workspace-mode-btn .curator-ws-mode-badge{padding:1px 4px !important;letter-spacing:-0.015em !important;max-width:100% !important;overflow:hidden !important;text-overflow:ellipsis !important;}",
     "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
-    "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;}",
+    "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;flex-wrap:wrap !important;}",
     "  .curator-ws-ribbon-hint{display:none !important;}",
     "  .curator-workspace-stage{padding:10px 12px 14px !important;min-width:0 !important;}",
     "  .curator-gallery-grid{grid-template-columns:repeat(2, minmax(0, 1fr)) !important;gap:10px !important;}",

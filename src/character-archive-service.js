@@ -1,7 +1,9 @@
-const { requestUrl, Notice, Modal } = require("obsidian");
+const { requestUrl, Notice, Modal, Menu } = require("obsidian");
 const noteManager = require("./note-manager.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const multiHallArchiveService = require("./multi-hall-archive-service.js");
+const v07Core = require("./v07-core.js");
+const { paperSlipSwap } = require("./v08-motion-and-lens.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -1801,25 +1803,25 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
       const header = contentEl.createDiv("curator-dl-header");
       header.createDiv({
         cls: "curator-dl-kicker",
-        text: "MOEGIRL WIKI LIVE EXTRACTOR · 萌娘百科实时寻访与免验证直通器"
+        text: "萌娘百科角色资料查询"
       });
       const titleEl = header.createEl("h3", {
         cls: "curator-dl-title",
-        text: `🌐 萌娘百科词条寻访与提取：《${cleanName}》`
+        text: `萌娘百科词条提取：《${cleanName}》`
       });
 
       const statusBanner = contentEl.createDiv("curator-rss-check-prompt");
       statusBanner.style.marginBottom = "10px";
       const statusText = statusBanner.createDiv({
         cls: "curator-rss-check-prompt-q",
-        text: "⚡ 正在通过萌娘百科 API 免验证通道检索角色资料栏（div.moe-infobox）与相近词条…"
+        text: "正在检索萌娘百科角色资料栏与相近词条…"
       });
       statusBanner.createDiv({
         cls: "curator-rss-inline-hint",
-        text: "提示：上方「API 免验证直通车」可直接穿透 Cloudflare 提取萌点；若角色名有同音/错别字（如「槻木沙」→「槻木汐」），点击下方候选词条即可一键提取。"
+        text: "提示：优先通过官方词条接口直接提取萌点与资料；若角色名有同音或简繁差异，点击下方候选词条即可一键提取。"
       });
 
-      // 免验证候选词条直通车容器
+      // 免验证候选词条快捷提取容器
       const fastTrackBar = contentEl.createDiv("curator-moegirl-fasttrack-bar");
       fastTrackBar.style.cssText =
         "display:none;margin-bottom:10px;padding:10px 12px;border-radius:8px;background:rgba(122,162,247,0.12);border:1px solid rgba(122,162,247,0.35);align-items:center;gap:8px;flex-wrap:wrap;";
@@ -1833,31 +1835,73 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
       });
       urlInput.value = cleanName;
 
+      const hasDesktopWebview = isDesktopNodeAvailable();
       const goBtn = bar.createEl("button", {
         cls: "curator-btn",
-        text: "🔍 检索 / 跳转词条"
+        text: "检索 / 跳转词条"
       });
       const extractNowBtn = bar.createEl("button", {
         cls: "curator-btn is-primary",
-        text: "✦ 立即提取当前页面萌点"
+        text: hasDesktopWebview ? "立即提取当前页面萌点" : "API 直接提取萌点"
       });
       const extBrowserBtn = bar.createEl("button", {
         cls: "curator-btn",
-        text: "🌍 系统浏览器打开"
+        text: "系统浏览器打开"
       });
       extBrowserBtn.title = "在系统默认浏览器中打开该词条（您也可以直接复制网页上的萌点或 HTML 粘贴回插件）";
 
-      const webviewWrap = contentEl.createDiv();
-      webviewWrap.style.cssText =
-        "width:100%;height:480px;border:1px solid var(--background-modifier-border);border-radius:10px;overflow:hidden;background:var(--background-primary);position:relative;";
+      let webview = null;
+      if (hasDesktopWebview) {
+        const webviewWrap = contentEl.createDiv();
+        webviewWrap.style.cssText =
+          "width:100%;height:480px;border:1px solid var(--background-modifier-border);border-radius:10px;overflow:hidden;background:var(--background-primary);position:relative;";
 
-      const cleanUa = ensureMoegirlPartitionUserAgent();
-      const webview = document.createElement("webview");
-      webview.setAttribute("partition", "persist:moegirl");
-      webview.setAttribute("useragent", cleanUa);
-      webview.style.cssText = "width:100%;height:100%;border:0;";
-      webview.src = targetUrl;
-      webviewWrap.appendChild(webview);
+        const cleanUa = ensureMoegirlPartitionUserAgent();
+        webview = document.createElement("webview");
+        webview.setAttribute("partition", "persist:moegirl");
+        webview.setAttribute("useragent", cleanUa);
+        webview.style.cssText = "width:100%;height:100%;border:0;";
+        webview.src = targetUrl;
+        webviewWrap.appendChild(webview);
+      } else {
+        const mobileFallbackBox = contentEl.createDiv();
+        mobileFallbackBox.style.cssText =
+          "width:100%;padding:12px;border:1px solid var(--background-modifier-border);border-radius:10px;background:var(--background-secondary);display:flex;flex-direction:column;gap:8px;";
+        mobileFallbackBox.createDiv({
+          text: "移动端提示：已自动启用上方免验证 API 直连检索；若个别词条受网络验证拦截，可点击「系统浏览器打开」复制词条网页内容或源码粘贴至下方一键解析：",
+          attr: { style: "font-size:12px;line-height:1.5;color:var(--text-muted);" }
+        });
+        const pasteArea = mobileFallbackBox.createEl("textarea", {
+          cls: "curator-input",
+          attr: {
+            rows: "5",
+            placeholder: "在此粘贴从浏览器复制的萌娘百科角色资料栏文字或网页 HTML…",
+            style: "width:100%;resize:vertical;min-height:96px;"
+          }
+        });
+        const parsePasteBtn = mobileFallbackBox.createEl("button", {
+          cls: "curator-btn is-primary",
+          text: "解析粘贴内容并提取萌点"
+        });
+        parsePasteBtn.onclick = (ev) => {
+          ev.preventDefault();
+          const rawPaste = String(pasteArea.value || "").trim();
+          if (!rawPaste) {
+            if (Notice) new Notice("请先粘贴萌娘百科角色资料内容");
+            return;
+          }
+          const parsed = parseMoegirlInfoboxHtml(rawPaste);
+          if (parsed && (parsed.found || (parsed.moePoints && parsed.moePoints.length > 0))) {
+            finishWithParsedData(
+              parsed,
+              extractPageTitleFromUrlOrName(urlInput.value.trim() || cleanName),
+              targetUrl
+            );
+          } else if (Notice) {
+            new Notice("未能从粘贴内容中识别到角色萌点，请尝试复制包含「萌点」一栏的资料表格");
+          }
+        };
+      }
 
       this._webview = webview;
       this._autoExtracted = false;
@@ -1887,8 +1931,8 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
       const tryApiDirectOrSuggest = async (queryOrUrl) => {
         const kw = extractPageTitleFromUrlOrName(queryOrUrl);
         if (!kw) return;
-        titleEl.setText(`🌐 萌娘百科词条寻访与提取：《${kw}》`);
-        statusText.setText(`⚡ 正在通过 API 免验证通道检索《${kw}》…`);
+        titleEl.setText(`萌娘百科词条寻访与提取：《${kw}》`);
+        statusText.setText(`正在通过 API 免验证通道检索《${kw}》…`);
 
         try {
           const directRes = await fetchMoegirlCharacterData([kw], {
@@ -1910,13 +1954,13 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
             fastTrackBar.empty();
             fastTrackBar.style.display = "flex";
             const labelSpan = fastTrackBar.createSpan({
-              text: `✨ 免验证近似词条直通车（未找到「${kw}」，点击下列词条可直接提取萌点，无需下方网页验证）：`
+              text: `免验证近似词条快速提取（未找到「${kw}」，点击下列词条可直接提取萌点，无需下方网页验证）：`
             });
             labelSpan.style.cssText = "font-size:12px;font-weight:600;color:var(--text-normal);";
             for (const candTitle of suggestions) {
               const chip = fastTrackBar.createEl("button", {
                 cls: "curator-dl-mini-btn is-accent",
-                text: `✦ 提取《${candTitle}》`
+                text: `提取《${candTitle}》`
               });
               chip.onclick = async (ev) => {
                 ev.preventDefault();
@@ -1934,14 +1978,16 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
                   );
                 } else {
                   chip.disabled = false;
-                  chip.textContent = `✦ 提取《${candTitle}》`;
+                  chip.textContent = `提取《${candTitle}》`;
                   urlInput.value = candTitle;
-                  webview.src = `https://moegirl.uk/${encodeURIComponent(candTitle)}`;
+                  if (webview) {
+                    webview.src = `https://moegirl.uk/${encodeURIComponent(candTitle)}`;
+                  }
                 }
               };
             }
             statusText.setText(
-              `💡 萌娘百科中暂无《${kw}》词条，但为您找到了近似词条（如上方蓝色按钮），点击即可免验证直接提取！`
+              `萌娘百科中暂无《${kw}》词条，但为您找到了近似词条（如上方蓝色按钮），点击即可免验证直接提取。`
             );
           }
         } catch (_) {}
@@ -1978,7 +2024,7 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
           if (data.isChallenge) {
             if (fastTrackBar.style.display === "none") {
               statusText.setText(
-                "🛡️ 下方网页触发了 Cloudflare 验证（建议优先使用上方搜索栏检索准确角色名走 API 免验证直通车，或在下方点击验证框等待自动跳转）…"
+                "下方网页触发了 Cloudflare 验证（建议优先使用上方搜索栏检索准确角色名走 API 免验证通道，或在下方点击验证框等待自动跳转）…"
               );
             }
             return;
@@ -1991,7 +2037,7 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
           } else if (data.readyState === "complete") {
             if (fastTrackBar.style.display === "none") {
               statusText.setText(
-                "📖 页面已加载（当前可能为同名消歧义页或词条不存在），可在上方输入框修改角色名点击「🔍 检索 / 跳转词条」或点击网页内的具体词条链接。"
+                "页面已加载（当前可能为同名消歧义页或词条不存在），可在上方输入框修改角色名点击「检索 / 跳转词条」或点击网页内的具体词条链接。"
               );
             }
             if (isManualClick && Notice) {
@@ -2014,7 +2060,9 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
         const nextUrl = /^https?:\/\//i.test(raw)
           ? raw
           : `https://moegirl.uk/${encodeURIComponent(pageTitle)}`;
-        webview.src = nextUrl;
+        if (webview) {
+          webview.src = nextUrl;
+        }
         tryApiDirectOrSuggest(pageTitle);
       };
 
@@ -2047,22 +2095,24 @@ function openMoegirlBrowserExtractModal(plugin, initialName, onExtracted, option
         window.open(openUrl, "_blank");
       };
 
-      webview.addEventListener("did-navigate", (ev) => {
-        if (ev && ev.url && !ev.url.includes("__cf_chl")) {
-          const navTitle = extractPageTitleFromUrlOrName(ev.url);
-          if (navTitle && navTitle !== "moegirl.uk") {
-            urlInput.value = navTitle;
+      if (webview) {
+        webview.addEventListener("did-navigate", (ev) => {
+          if (ev && ev.url && !ev.url.includes("__cf_chl")) {
+            const navTitle = extractPageTitleFromUrlOrName(ev.url);
+            if (navTitle && navTitle !== "moegirl.uk") {
+              urlInput.value = navTitle;
+            }
           }
-        }
-      });
+        });
 
-      // 仅在加载停止时延迟检查一次，绝不在 Cloudflare 验证页开启高频定时器注入脚本
-      webview.addEventListener("did-stop-loading", () => {
-        if (this._checkTimeout) clearTimeout(this._checkTimeout);
-        this._checkTimeout = setTimeout(() => {
-          tryExtractFromWebview(false);
-        }, 650);
-      });
+        // 仅在加载停止时延迟检查一次，绝不在 Cloudflare 验证页开启高频定时器注入脚本
+        webview.addEventListener("did-stop-loading", () => {
+          if (this._checkTimeout) clearTimeout(this._checkTimeout);
+          this._checkTimeout = setTimeout(() => {
+            tryExtractFromWebview(false);
+          }, 650);
+        });
+      }
 
       // 打开弹窗时立即启动 API 免验证通道检索
       tryApiDirectOrSuggest(cleanName);
@@ -4124,17 +4174,17 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
       });
       titleLeft.createEl("h3", {
         cls: "curator-dl-title",
-        text: `🖼️ 《${charRecord.name || "角色"}》立绘取景、换图与等身校准`
+        text: `《${charRecord.name || "角色"}》立绘取景、换图与等身校准`
       });
 
       const tabSwitchBar = header.createDiv("curator-studio-tab-bar");
       const tabFrameBtn = tabSwitchBar.createEl("button", {
         cls: `curator-dl-mini-btn ${draftState.activeTab === "frame" ? "is-active" : ""}`,
-        text: "🎞️ 画框取景与换图"
+        text: "画框取景与换图"
       });
       const tabHeightBtn = tabSwitchBar.createEl("button", {
         cls: `curator-dl-mini-btn ${draftState.activeTab === "height" ? "is-active" : ""}`,
-        text: "📏 等身标尺与脚底校准"
+        text: "等身标尺与脚底校准"
       });
 
       const bodyWrap = contentEl.createDiv("curator-studio-body");
@@ -4165,7 +4215,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
             if (savedPath) {
               draftState.localAvatar = savedPath;
               draftState.hasCustomAvatar = true;
-              if (Notice) new Notice("✨ 已从剪贴板粘贴并应用自定义角色立绘！");
+              if (Notice) new Notice("已从剪贴板粘贴并应用自定义角色立绘");
               renderActiveTabContent();
             }
             return;
@@ -4205,7 +4255,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         stageCol.createDiv({
           cls: "curator-studio-stage-caption",
-          text: "💡 鼠标按住立绘可直接拖拽选定位置，滚动滚轮可缩放大小；支持直接拖拽图片文件或按 Ctrl+V 粘贴换图"
+          text: "鼠标按住立绘可直接拖拽选定位置，滚动滚轮可缩放大小；支持直接拖拽图片文件或按 Ctrl+V 粘贴换图"
         });
 
         const previewPair = stageCol.createDiv("curator-studio-preview-pair");
@@ -4214,7 +4264,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const mainViewportWrap = previewPair.createDiv("curator-studio-viewport-wrap");
         mainViewportWrap.createDiv({
           cls: "curator-studio-sub-label",
-          text: "📐 交互式取景视窗（拖拽平移 / 滚轮缩放）"
+          text: "交互式取景视窗（拖拽平移 / 滚轮缩放）"
         });
         const viewportBox = mainViewportWrap.createDiv("curator-studio-viewport");
         const viewImg = viewportBox.createEl("img", {
@@ -4228,7 +4278,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const miniCardWrap = previewPair.createDiv("curator-studio-minicard-wrap");
         miniCardWrap.createDiv({
           cls: "curator-studio-sub-label",
-          text: "📇 档案卡片预览"
+          text: "档案卡片预览"
         });
         const miniCard = miniCardWrap.createDiv("curator-studio-minicard");
         const miniAvatarBox = miniCard.createDiv("curator-char-card-avatar curator-studio-mini-ava");
@@ -4254,7 +4304,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const fullOrigInfo = fullOrigBar.createDiv("curator-studio-orig-info");
         fullOrigInfo.createDiv({
           cls: "curator-studio-orig-title",
-          text: "🔍 导入原图完整全览（100% 无裁切原貌参考）"
+          text: "导入原图完整全览（100% 无裁切原貌参考）"
         });
         const fullOrigDimText = fullOrigInfo.createDiv({
           cls: "curator-studio-orig-dims curator-mono",
@@ -4263,11 +4313,11 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const fullOrigQuickBtns = fullOrigInfo.createDiv("curator-studio-orig-quick-btns");
         const quickFullBodyBtn = fullOrigQuickBtns.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "🧍 卡片显示完整全身"
+          text: "卡片显示完整全身"
         });
         const quickHeadFocusBtn = fullOrigQuickBtns.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "🎯 卡片聚焦头部半身"
+          text: "卡片聚焦头部半身"
         });
 
         let xSlider = null;
@@ -4435,7 +4485,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
             if (savedPath) {
               draftState.localAvatar = savedPath;
               draftState.hasCustomAvatar = true;
-              if (Notice) new Notice(`✨ 已替换角色立绘为《${file.name}》！`);
+              if (Notice) new Notice(`已替换角色立绘为《${file.name}》`);
               syncFrameVisuals(true);
             }
           }
@@ -4448,11 +4498,11 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         coverModeBtn = modeBtnGroup.createEl("button", {
           cls: `curator-dl-mini-btn ${draftState.fitMode === "cover" ? "is-active" : ""}`,
-          text: "🖼️ 智能填充取景 (Cover · 聚焦头部/半身且支持无损缩放)"
+          text: "智能填充取景 (Cover · 聚焦头部/半身且支持无损缩放)"
         });
         containModeBtn = modeBtnGroup.createEl("button", {
           cls: `curator-dl-mini-btn ${draftState.fitMode === "contain" ? "is-active" : ""}`,
-          text: "🧍 全图完整呈现 (Contain · 100% 完整展示全身立绘)"
+          text: "全图完整呈现 (Contain · 100% 完整展示全身立绘)"
         });
 
         coverModeBtn.onclick = (e) => {
@@ -4476,10 +4526,10 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const presetRow = focusSec.createDiv("curator-studio-preset-row");
 
         const presets = [
-          { label: "🎯 头部黄金对焦", fitMode: "cover", cropX: 50, cropY: 14, cropScale: 1.0 },
-          { label: "✨ 面部特写", fitMode: "cover", cropX: 50, cropY: 10, cropScale: 1.45 },
-          { label: "🧍 全身完整呈现", fitMode: "contain", cropX: 50, cropY: 50, cropScale: 1.0 },
-          { label: "↺ 重置", fitMode: "cover", cropX: 50, cropY: 14, cropScale: 1.0 }
+          { label: "头部黄金对焦", fitMode: "cover", cropX: 50, cropY: 14, cropScale: 1.0 },
+          { label: "面部特写", fitMode: "cover", cropX: 50, cropY: 10, cropScale: 1.45 },
+          { label: "全身完整呈现", fitMode: "contain", cropX: 50, cropY: 50, cropScale: 1.0 },
+          { label: "重置", fitMode: "cover", cropX: 50, cropY: 14, cropScale: 1.0 }
         ];
         presets.forEach((p) => {
           const pb = presetRow.createEl("button", {
@@ -4580,7 +4630,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         const pickLocalBtn = uploadBtnRow.createEl("button", {
           cls: "curator-dl-mini-btn is-accent",
-          text: "📁 选择本地图片文件…"
+          text: "选择本地图片文件…"
         });
         pickLocalBtn.onclick = (e) => {
           e.preventDefault();
@@ -4596,14 +4646,14 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
           if (savedPath) {
             draftState.localAvatar = savedPath;
             draftState.hasCustomAvatar = true;
-            if (Notice) new Notice(`✨ 已导入自定义角色图片《${file.name}》！`);
+            if (Notice) new Notice(`已导入自定义角色图片《${file.name}》`);
             syncFrameVisuals(true);
           }
         };
 
         const fetchMoeFullImgBtn = uploadBtnRow.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "🌐 获取萌娘百科全身立绘"
+          text: "获取萌娘百科全身立绘"
         });
         fetchMoeFullImgBtn.title = "从萌娘百科词条自动提取高清全身/封面立绘并同步角色身高";
         fetchMoeFullImgBtn.onclick = async (e) => {
@@ -4629,14 +4679,14 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
               draftState.localAvatar = savedInfo.localAvatar;
               draftState.avatar = savedInfo.avatar || moeRes.imageUrl;
               draftState.hasCustomAvatar = true;
-              if (Notice) new Notice("✨ 已切换为萌娘百科角色立绘！");
+              if (Notice) new Notice("已切换为萌娘百科角色立绘");
               syncFrameVisuals(true);
             } else if (Notice) {
               new Notice("未在萌娘百科资料栏中找到独立图片链接，可使用本地文件或粘贴换图。");
             }
           } finally {
             fetchMoeFullImgBtn.disabled = false;
-            fetchMoeFullImgBtn.textContent = "🌐 获取萌娘百科全身立绘";
+            fetchMoeFullImgBtn.textContent = "获取萌娘百科全身立绘";
           }
         };
 
@@ -4663,7 +4713,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
             draftState.avatar = res.avatar || val;
             draftState.hasCustomAvatar = true;
             syncFrameVisuals(true);
-            if (Notice) new Notice("✨ 已应用新的角色图片！");
+            if (Notice) new Notice("已应用新的角色图片");
           } finally {
             applyUrlBtn.disabled = false;
             applyUrlBtn.textContent = "应用图片";
@@ -4681,7 +4731,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         stageCol.createDiv({
           cls: "curator-studio-stage-caption",
-          text: "📏 在下方等身标尺台中直接上下拖拽立绘或滚轮缩放，使人物脚底踩在「0 cm 基准线」、头顶对齐「目标身高线」（与画廊等身标尺架 1:1 完全同步）"
+          text: "在下方等身标尺台中直接上下拖拽立绘或滚轮缩放，使人物脚底踩在「0 cm 基准线」、头顶对齐「目标身高线」（与画廊等身标尺架 1:1 完全同步）"
         });
 
         const allMaxCm = Math.max(
@@ -4843,6 +4893,41 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
           { passive: false }
         );
 
+        let studioPinchDist = 0;
+        let studioPinchBase = 1;
+        canvasArea.addEventListener(
+          "touchstart",
+          (ev) => {
+            if (ev.touches.length === 2) {
+              draggingFig = false;
+              const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+              const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+              studioPinchDist = Math.hypot(dx, dy);
+              studioPinchBase = draftState.heightScale;
+            }
+          },
+          { passive: true }
+        );
+        canvasArea.addEventListener(
+          "touchmove",
+          (ev) => {
+            if (ev.touches.length === 2 && studioPinchDist > 12) {
+              ev.preventDefault();
+              const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+              const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+              const d = Math.hypot(dx, dy);
+              if (d > 8) {
+                draftState.heightScale = Math.max(
+                  0.35,
+                  Math.min(2.6, Math.round(studioPinchBase * (d / studioPinchDist) * 100) / 100)
+                );
+                syncHeightCalibrationVisuals();
+              }
+            }
+          },
+          { passive: false }
+        );
+
         const heightSec = ctrlCol.createDiv("curator-studio-panel-sec");
         heightSec.createDiv({ cls: "curator-studio-sec-title", text: "1. 角色真实身高设定 (cm)" });
         const hInputRow = heightSec.createDiv("curator-studio-url-row");
@@ -4866,7 +4951,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         const syncHBtn = hInputRow.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "🔄 同步百科身高"
+          text: "同步百科身高"
         });
         syncHBtn.onclick = async (e) => {
           e.preventDefault();
@@ -4883,13 +4968,13 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
               draftState.heightRawText = moeRes.height;
               cmInput.value = String(p.cm);
               syncHeightCalibrationVisuals();
-              if (Notice) new Notice(`✨ 已从萌娘百科读取身高：${moeRes.height}`);
+              if (Notice) new Notice(`已从萌娘百科读取身高：${moeRes.height}`);
             } else if (Notice) {
               new Notice("百科词条未单独标注身高数字，可手动输入。");
             }
           } finally {
             syncHBtn.disabled = false;
-            syncHBtn.textContent = "🔄 同步百科身高";
+            syncHBtn.textContent = "同步百科身高";
           }
         };
 
@@ -4951,7 +5036,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         const quickCalibRow = calibSec.createDiv("curator-studio-preset-row");
         const autoTrimBtn = quickCalibRow.createEl("button", {
           cls: "curator-dl-mini-btn is-accent",
-          text: "✨ 智能消除图片留白对齐头脚"
+          text: "智能消除图片留白对齐头脚"
         });
         autoTrimBtn.title = "自动扫描立绘上下透明/纯白边缘，使人物头顶对齐目标身高线、脚底踩在 0cm 线";
         autoTrimBtn.onclick = (e) => {
@@ -4965,14 +5050,14 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
           syncHeightCalibrationVisuals();
           if (Notice) {
             new Notice(
-              `✨ 已自动识别有效人物边界（比例 ${Math.round(bounds.heightScale * 100)}% · 偏移 ${bounds.footOffsetPx}px）`
+              `已自动识别有效人物边界（比例 ${Math.round(bounds.heightScale * 100)}% · 偏移 ${bounds.footOffsetPx}px）`
             );
           }
         };
 
         const resetCalibBtn = quickCalibRow.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "↺ 恢复标准全身基准 (100% · 0px)"
+          text: "恢复标准全身基准 (100% · 0px)"
         });
         resetCalibBtn.onclick = (e) => {
           e.preventDefault();
@@ -4984,7 +5069,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
 
         const halfBodyAlignBtn = quickCalibRow.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: "👤 半身像头顶对齐预设"
+          text: "半身像头顶对齐预设"
         });
         halfBodyAlignBtn.onclick = (e) => {
           e.preventDefault();
@@ -5001,9 +5086,9 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         });
         const bgModeRow = bgSec.createDiv("curator-studio-preset-row");
         const bgModes = [
-          { id: "auto", label: "🪄 自动识别纯色底（推荐）", desc: "跟随标尺架全局去底开关，自动去除白底/灰底并保护角色内部颜色" },
-          { id: "on", label: "✨ 强制去除背景", desc: "即使标尺架全局关闭，也对该角色立绘执行边缘漫水去背景" },
-          { id: "off", label: "🖼️ 保持原图背景", desc: "对该角色保留原始背景不抠图" }
+          { id: "auto", label: "自动识别纯色底（推荐）", desc: "跟随标尺架全局去底开关，自动去除白底/灰底并保护角色内部颜色" },
+          { id: "on", label: "强制去除背景", desc: "即使标尺架全局关闭，也对该角色立绘执行边缘漫水去背景" },
+          { id: "off", label: "保持原图背景", desc: "对该角色保留原始背景不抠图" }
         ];
         const bgModeBtns = [];
         bgModes.forEach((bm) => {
@@ -5074,7 +5159,7 @@ function openCharacterPortraitStudioModal(plugin, charRecord, onAfterSaved, init
         }
         this.close();
         if (Notice) {
-          new Notice(`✨ 已更新《${charRecord.name}》的立绘取景与等身标尺参数！`);
+          new Notice(`已更新《${charRecord.name}》的立绘取景与等身标尺参数`);
         }
         if (typeof onAfterSaved === "function") {
           onAfterSaved(charRecord);
@@ -5146,7 +5231,7 @@ function openCharacterDetailModal(plugin, charRecord, vaultAnimeByTitle, onFullR
 
         const posterOverlayBtn = posterFrame.createEl("button", {
           cls: "curator-char-poster-edit-pill",
-          text: "🖼️ 调整取景 / 更换图片 / 校准身高"
+          text: "调整取景 / 更换图片 / 校准身高"
         });
         posterOverlayBtn.onclick = (e) => {
           e.preventDefault();
@@ -5183,24 +5268,24 @@ function openCharacterDetailModal(plugin, charRecord, vaultAnimeByTitle, onFullR
           cell.createSpan({ cls: "curator-char-detail-attr-v", text: value });
         };
 
-        addAttrItem("📐 身高", charRecord.height || heightInfo.displayLabel);
-        addAttrItem("🎨 发色", charRecord.hairColor);
-        addAttrItem("👁️ 瞳色", charRecord.eyeColor);
-        addAttrItem("🎙️ 声优 (CV)", charRecord.cv);
-        addAttrItem("🎂 生日", charRecord.birthday);
+        addAttrItem("身高", charRecord.height || heightInfo.displayLabel);
+        addAttrItem("发色", charRecord.hairColor);
+        addAttrItem("瞳色", charRecord.eyeColor);
+        addAttrItem("声优 (CV)", charRecord.cv);
+        addAttrItem("生日", charRecord.birthday);
         if (Array.isArray(charRecord.aliases) && charRecord.aliases.length > 0) {
-          addAttrItem("🏷️ 别号", charRecord.aliases.slice(0, 4).join("、"));
+          addAttrItem("别号", charRecord.aliases.slice(0, 4).join("、"));
         }
 
         if (Array.isArray(charRecord.appearances) && charRecord.appearances.length > 0) {
           const appBlock = infoCol.createDiv("curator-char-detail-block");
-          appBlock.createDiv({ cls: "curator-char-detail-block-title", text: "🎬 代表出演作品" });
+          appBlock.createDiv({ cls: "curator-char-detail-block-title", text: "代表出演作品" });
           const appRow = appBlock.createDiv("curator-char-card-appearances");
           charRecord.appearances.forEach((appTitle) => {
             const matchedAnime = vaultAnimeByTitle?.get(String(appTitle).trim().toLowerCase());
             const appChip = appRow.createEl(matchedAnime ? "button" : "span", {
               cls: `curator-char-anime-chip ${matchedAnime ? "is-in-vault" : ""}`,
-              text: `🎬 《${appTitle}》`
+              text: `《${appTitle}》`
             });
             if (matchedAnime?.file) {
               appChip.title = "点击打开馆藏中的该部动画笔记";
@@ -5215,7 +5300,7 @@ function openCharacterDetailModal(plugin, charRecord, vaultAnimeByTitle, onFullR
         }
 
         const moeBlock = infoCol.createDiv("curator-char-detail-block");
-        moeBlock.createDiv({ cls: "curator-char-detail-block-title", text: "✦ 萌娘百科萌点标签" });
+        moeBlock.createDiv({ cls: "curator-char-detail-block-title", text: "萌娘百科萌点标签" });
         const moeWrap = moeBlock.createDiv("curator-char-card-moepoints");
         if (Array.isArray(charRecord.moePoints) && charRecord.moePoints.length > 0) {
           charRecord.moePoints.forEach((mp) => {
@@ -5255,7 +5340,7 @@ function openCharacterDetailModal(plugin, charRecord, vaultAnimeByTitle, onFullR
         const footer = contentEl.createDiv("curator-rss-check-footer curator-char-detail-footer");
         const studioBtn = footer.createEl("button", {
           cls: "curator-dl-btn is-primary",
-          text: "🖼️ 立绘取景 / 换图 / 身高校准"
+          text: "立绘取景 / 换图 / 身高校准"
         });
         studioBtn.onclick = (e) => {
           e.preventDefault();
@@ -5268,7 +5353,7 @@ function openCharacterDetailModal(plugin, charRecord, vaultAnimeByTitle, onFullR
         const existingNote = resolveCharacterNoteFile(plugin, charRecord);
         const noteBtn = footer.createEl("button", {
           cls: "curator-dl-btn",
-          text: existingNote ? "📄 打开角色笔记" : "📄 生成角色笔记"
+          text: existingNote ? "打开角色笔记" : "生成角色笔记"
         });
         noteBtn.onclick = async (e) => {
           e.preventDefault();
@@ -5337,7 +5422,7 @@ function openDuplicateCharacterConfirmModal(plugin, matchInfo, incomingDraft, ca
       const header = contentEl.createDiv("curator-dl-header");
       header.createDiv({
         cls: "curator-dl-kicker",
-        text: "CHARACTER ARCHIVE DEDUPLICATION · 角色典藏查重提醒"
+        text: "角色典藏查重提醒"
       });
       header.createEl("h3", {
         cls: "curator-dl-title",
@@ -5370,8 +5455,8 @@ function openDuplicateCharacterConfirmModal(plugin, matchInfo, incomingDraft, ca
         });
       };
 
-      renderMiniCol("🏛️ 馆藏既有角色档案", existingChar);
-      renderMiniCol("✨ 本次待收录角色数据", incomingDraft);
+      renderMiniCol("馆藏既有角色档案", existingChar);
+      renderMiniCol("本次待收录角色数据", incomingDraft);
 
       const footer = contentEl.createDiv("curator-rss-check-footer curator-char-dupe-footer");
 
@@ -5482,7 +5567,7 @@ function openCharacterDeleteConfirmModal(plugin, charRecord, cardEl, onAfterDele
       });
       header.createEl("h3", {
         cls: "curator-dl-title",
-        text: noteFile ? `🗑️ 移除角色「${charRecord.name}」与关联笔记` : `🗑️ 移除角色「${charRecord.name}」`
+        text: noteFile ? `移除角色「${charRecord.name}」与关联笔记` : `移除角色「${charRecord.name}」`
       });
 
       const promptBox = contentEl.createDiv("curator-rss-check-prompt");
@@ -5511,7 +5596,7 @@ function openCharacterDeleteConfirmModal(plugin, charRecord, cardEl, onAfterDele
       if (noteFile) {
         const delBothBtn = footer.createEl("button", {
           cls: "curator-dl-btn is-primary is-danger-btn",
-          text: "🗑️ 一并移除档案与角色笔记"
+          text: "一并移除档案与角色笔记"
         });
         delBothBtn.dataset.deleteAction = "delete-both";
         delBothBtn.onclick = async (e) => {
@@ -5533,7 +5618,7 @@ function openCharacterDeleteConfirmModal(plugin, charRecord, cardEl, onAfterDele
       } else {
         const confirmBtn = footer.createEl("button", {
           cls: "curator-dl-btn is-primary is-danger-btn",
-          text: "🗑️ 确认移除"
+          text: "确认移除"
         });
         confirmBtn.dataset.deleteAction = "confirm";
         confirmBtn.onclick = async (e) => {
@@ -5593,7 +5678,7 @@ async function mergeAllDuplicateCharactersInGallery(plugin, onRefresh) {
   plugin.settings.characterCollection = list.filter((c) => !removeIds.has(c.id));
   await plugin.saveSettings();
   if (Notice) {
-    new Notice(`✨ 已智能合并 ${groups.length} 组相似角色，清理了 ${mergedCount} 张重复角色卡片！`);
+    new Notice(`已智能合并 ${groups.length} 组相似角色，清理了 ${mergedCount} 张重复角色卡片`);
   }
   if (typeof onRefresh === "function") {
     onRefresh();
@@ -5653,18 +5738,26 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
     if (anime.name) vaultAnimeByTitle.set(String(anime.name).trim().toLowerCase(), anime);
   }
 
+  if (typeof document !== "undefined") {
+    document
+      .querySelectorAll('[data-stat-role="workspace-char-badge"]')
+      .forEach((el) => {
+        el.textContent = String(characters.length);
+      });
+  }
+
   // 顶部栏：典藏统计 + 搜索 + 收录新角色按钮
   const headerBar = container.createDiv("curator-char-header-bar");
   const titleSide = headerBar.createDiv("curator-char-header-left");
   titleSide.createSpan({
     cls: "curator-char-header-title",
     text: options.compactAlmanacMode
-      ? "👑 角色典藏与萌娘百科萌点偏好洞察"
-      : "👑 角色典藏 · 角色履历与萌娘百科萌点偏好洞察"
+      ? "角色典藏与萌点偏好排行"
+      : "角色典藏 · 角色档案与萌点偏好排行"
   });
   titleSide.createSpan({
     cls: "curator-char-header-sub curator-mono",
-    text: `已典藏 ${characters.length} 位角色 · 汇聚 Bangumi 角色履历与萌娘百科萌点档案`
+    text: `已收录 ${characters.length} 位角色 · 汇总 Bangumi 角色履历与萌娘百科萌点标签`
   });
 
   const actionSide = headerBar.createDiv("curator-char-header-actions");
@@ -5682,9 +5775,14 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
   }
 
   const addCharBtn = actionSide.createEl("button", {
-    cls: `curator-btn ${uiState.showAddDrawer ? "is-active" : "is-primary"}`,
-    text: uiState.showAddDrawer ? "▴ 收起角色收录台" : "＋ 搜索 / 录入喜爱角色"
+    cls: `curator-btn ${uiState.showAddDrawer ? "is-active" : "is-primary"}`
   });
+  v07Core.setBtnIconLabel(
+    addCharBtn,
+    uiState.showAddDrawer ? "chevronUp" : "plus",
+    uiState.showAddDrawer ? "收起收录台" : "录入角色",
+    14
+  );
   addCharBtn.onclick = (e) => {
     e.preventDefault();
     uiState.showAddDrawer = !uiState.showAddDrawer;
@@ -5705,13 +5803,13 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
     });
     emptyBox.createDiv({
       cls: "curator-char-empty-desc",
-      text: "点击上方「＋ 搜索 / 录入喜爱角色」，输入角色名或 Bangumi 角色页链接，即可自动寻访角色立绘、声优、出演作品，并同步萌娘百科「萌点 / 发色 / 瞳色」生成专属角色属性偏好排行！"
+      text: "点击右上角「录入角色」，输入角色名或 Bangumi 角色页链接，即可自动获取角色立绘、声优、出演作品，并同步萌娘百科萌点、发色与瞳色。"
     });
     const quickRow = emptyBox.createDiv("curator-char-empty-actions");
     const presetRoxyBtn = quickRow.createEl("button", {
-      cls: "curator-btn is-primary",
-      text: "✦ 一键收录示例：洛琪希·米格路迪亚（10.0分）"
+      cls: "curator-btn is-primary"
     });
+    v07Core.setBtnIconLabel(presetRoxyBtn, "sparkles", "一键收录示例：洛琪希·米格路迪亚", 14);
     presetRoxyBtn.onclick = async (e) => {
       e.preventDefault();
       const roxy = createPresetRoxyCharacterRecord();
@@ -5730,7 +5828,7 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
 
     const openSearchBtn = quickRow.createEl("button", {
       cls: "curator-btn",
-      text: "🔍 搜索其他角色"
+      text: "搜索其他角色"
     });
     openSearchBtn.onclick = (e) => {
       e.preventDefault();
@@ -5740,42 +5838,69 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
     return;
   }
 
-  // 第一部分：最喜爱的角色属性 / 萌点偏好排行榜面板
+  // 第一部分：最喜爱的角色属性 / 萌点偏好排行榜面板（局部平滑翻页刷新）
   const allRankedTraits = computeMoeAttributeRanking(characters);
-  renderMoePreferenceRankingSection(
-    plugin,
-    container,
-    allRankedTraits,
-    uiState,
-    options,
-    () => renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options)
-  );
-
-  // 第二部分：角色典藏画廊
+  const rankHost = container.createDiv("curator-char-rank-host");
   const galleryHost = container.createDiv("curator-char-gallery-host");
-  const renderGalleryOnly = () => {
-    renderCharacterGallerySection(
-      plugin,
-      galleryHost,
-      characters,
-      vaultAnimeByTitle,
-      uiState,
-      options,
-      () => renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options)
-    );
+
+  const renderGalleryOnly = (animOpts = null) => {
+    const doRender = () => {
+      renderCharacterGallerySection(
+        plugin,
+        galleryHost,
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        () => renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options)
+      );
+    };
+    if (animOpts) {
+      paperSlipSwap(galleryHost, doRender, animOpts);
+    } else {
+      doRender();
+    }
   };
-  renderGalleryOnly();
+
+  const renderRankAndSync = (animMode = "none") => {
+    const paintRank = () => {
+      rankHost.empty();
+      renderMoePreferenceRankingSection(
+        plugin,
+        rankHost,
+        allRankedTraits,
+        uiState,
+        options,
+        (triggerKind = "tab") => {
+          if (triggerKind === "trait") {
+            renderRankAndSync("none");
+            renderGalleryOnly({ small: true });
+          } else {
+            renderRankAndSync("rank");
+          }
+        }
+      );
+    };
+    if (animMode === "rank") {
+      paperSlipSwap(rankHost, paintRank, { small: true });
+    } else {
+      paintRank();
+    }
+  };
+
+  renderRankAndSync("none");
+  renderGalleryOnly(null);
 }
 
 /**
- * 渲染「🔭 角色寻访与档案收录台」
+ * 渲染「角色寻访与档案收录台」
  */
 function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
   const drawer = container.createDiv("curator-char-add-drawer");
   const head = drawer.createDiv("curator-char-add-head");
   head.createDiv({
     cls: "curator-char-add-title",
-    text: "🔭 角色寻访与档案收录台"
+    text: "角色寻访与档案收录台"
   });
   head.createDiv({
     cls: "curator-char-add-sub",
@@ -5790,7 +5915,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
   });
   const searchBtn = searchBar.createEl("button", {
     cls: "curator-btn is-primary",
-    text: "🔍 搜索 Bangumi 角色"
+    text: "搜索 Bangumi 角色"
   });
   const manualBtn = searchBar.createEl("button", {
     cls: "curator-btn",
@@ -5878,7 +6003,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
     if (existingMatches.length > 0 && !forceNewMode) {
       const warnBar = editorCard.createDiv("curator-char-dupe-inline-banner");
       warnBar.createSpan({
-        text: `⚠️ 馆藏中已存在相似角色「${existingMatches[0].existing.name}」（${existingMatches[0].reason}）。点击下方保存时可选择合并更新或独立添加。`
+        text: `馆藏中已存在相似角色「${existingMatches[0].existing.name}」（${existingMatches[0].reason}）。点击下方保存时可选择合并更新或独立添加。`
       });
     }
 
@@ -5897,14 +6022,15 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
         applyCharacterPortraitFrameToImg(img, posterCol, profileDraft);
         img.onerror = () => {
           img.remove();
-          posterCol.setText("👤");
+          posterCol.empty();
+          posterCol.appendChild(v07Core.icon("user", 26));
         };
       } else {
-        posterCol.setText("👤");
+        posterCol.appendChild(v07Core.icon("user", 26));
       }
       posterCol.createDiv({
         cls: "curator-char-avatar-hover-pill",
-        text: "🖼️ 取景/换图"
+        text: "取景/换图"
       });
     };
     renderDraftPoster();
@@ -5979,13 +6105,13 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
 
     const webExtractMoeBtn = moeQuickLinks.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: "🌐 网页提取萌点"
+      text: "网页提取萌点"
     });
     webExtractMoeBtn.title = "在内置萌娘百科视图或粘贴 HTML 源码一键解析该角色的萌点、发色、瞳色与声优";
 
     const retryMoeBtn = moeQuickLinks.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: "🔄 重新同步萌娘百科"
+      text: "重新同步萌娘百科"
     });
 
     const moeInput = moeRow.createEl("textarea", {
@@ -6046,7 +6172,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
           moeInput.value = "";
           applyParsedMoegirlToDraftInputs(parsed);
           if (Notice) {
-            new Notice(`✨ 已从粘贴的萌娘百科 HTML 中自动解析出 ${parsed.moePoints.length} 个萌点及角色属性！`);
+            new Notice(`已从粘贴的萌娘百科 HTML 中自动解析出 ${parsed.moePoints.length} 个萌点及角色属性`);
           }
         }
       }
@@ -6089,11 +6215,11 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
             { reason: "cloudflare" }
           );
         } else if (Notice) {
-          new Notice("未自动检索到同名角色资料栏，可点击「🌐 网页提取萌点」查找词条一键提取。");
+          new Notice("未自动检索到同名角色资料栏，可点击「网页提取萌点」查找词条一键提取。");
         }
       } finally {
         retryMoeBtn.disabled = false;
-        retryMoeBtn.textContent = "🔄 重新同步萌娘百科";
+        retryMoeBtn.textContent = "重新同步萌娘百科";
       }
     };
 
@@ -6315,7 +6441,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
       }
     } finally {
       searchBtn.disabled = false;
-      searchBtn.textContent = "🔍 搜索 Bangumi 角色";
+      searchBtn.textContent = "搜索 Bangumi 角色";
     }
   };
 
@@ -6365,7 +6491,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
   const titleWrap = rankHead.createDiv("curator-char-rank-title-wrap");
   titleWrap.createSpan({
     cls: "curator-char-rank-title",
-    text: "🏆 最喜爱的角色属性与萌点偏好排行"
+    text: "最喜爱的角色属性与萌点偏好排行"
   });
   titleWrap.createSpan({
     cls: "curator-char-rank-subtitle",
@@ -6373,16 +6499,21 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
   });
 
   const controlsWrap = rankHead.createDiv("curator-char-rank-controls");
+  const dossierTabs = controlsWrap.createDiv("bm8-dossier-tabs");
   const catTabs = [
     { id: "all", label: "全部属性" },
-    { id: "moe", label: "✦ 萌点特征" },
-    { id: "appearance", label: "🎨 发色 & 瞳色" },
-    { id: "cv", label: "🎙️ 声优 (CV)" }
+    { id: "moe", label: "萌点特征" },
+    { id: "appearance", label: "发色·瞳色" },
+    { id: "cv", label: "声优" }
   ];
   catTabs.forEach((tab) => {
-    const btn = controlsWrap.createEl("button", {
-      cls: `curator-dl-mini-btn ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
-      text: tab.label
+    const btn = dossierTabs.createEl("button", {
+      cls: `bm8-dossier-tab ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
+      text: tab.label,
+      attr: {
+        type: "button",
+        "aria-pressed": String(uiState.rankCategory === tab.id)
+      }
     });
     btn.onclick = (e) => {
       e.preventDefault();
@@ -6392,8 +6523,9 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
   });
 
   const sortToggle = controlsWrap.createEl("button", {
-    cls: "curator-dl-mini-btn",
-    text: uiState.rankSortMode === "weighted" ? "排序：喜爱度加权 ▾" : "排序：出现频次 ▾"
+    cls: "curator-dl-mini-btn bm8-dossier-meta-btn",
+    text: uiState.rankSortMode === "weighted" ? "按喜爱度加权 ▾" : "按出现频次 ▾",
+    attr: { type: "button" }
   });
   sortToggle.onclick = (e) => {
     e.preventDefault();
@@ -6404,12 +6536,12 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
   if (uiState.activeTraitFilter) {
     const clearBtn = controlsWrap.createEl("button", {
       cls: "curator-dl-mini-btn is-accent",
-      text: `✕ 清除筛选：${uiState.activeTraitFilter.label}`
+      text: `清除筛选：${uiState.activeTraitFilter.label} ×`
     });
     clearBtn.onclick = (e) => {
       e.preventDefault();
       uiState.activeTraitFilter = null;
-      onRefresh();
+      onRefresh("trait");
     };
   }
 
@@ -6460,7 +6592,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
           category: trait.category
         };
       }
-      onRefresh();
+      onRefresh("trait");
     };
 
     const topRow = barCard.createDiv("curator-char-rank-bar-top");
@@ -6521,7 +6653,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
         uiState.activeTraitFilter = isSelected
           ? null
           : { key: trait.key, label: trait.label, category: trait.category };
-        onRefresh();
+        onRefresh("trait");
       };
     });
   }
@@ -6601,14 +6733,14 @@ function renderCharacterGallerySection(
       : `角色典藏画廊（共 ${filtered.length} 位）`
   });
 
-  // 画廊呈现模式切换器（档案卡片 / 等身标尺陈列架；原画报照片墙已独立升格为顶栏「🖼️ 画册典藏阁」）
+  // 画廊呈现模式切换器（档案卡片 / 等身标尺陈列架；原画报照片墙已独立升格为顶栏「画册典藏」）
   const viewSwitcher = leftBarGroup.createDiv("curator-char-view-switcher");
   if (uiState.galleryViewMode === "photo-wall") {
     uiState.galleryViewMode = "cards";
   }
   [
-    { id: "cards", label: "📇 档案卡片", title: "经典角色履历与萌点档案卡片视图" },
-    { id: "height-lineup", label: "📏 等身标尺架", title: "按角色真实身高比例并列陈列对比，支持标尺参考线、脚底基准校准与身高排序" }
+    { id: "cards", label: "角色卡片", title: "角色履历与萌点设定集视图" },
+    { id: "height-lineup", label: "等身标尺", title: "按角色真实身高比例并列陈列对比，支持标尺参考线、脚底基准校准与身高排序" }
   ].forEach((vm) => {
     const vBtn = viewSwitcher.createEl("button", {
       cls: `curator-char-view-btn ${uiState.galleryViewMode === vm.id ? "is-active" : ""}`,
@@ -6617,27 +6749,39 @@ function renderCharacterGallerySection(
     vBtn.title = vm.title;
     vBtn.onclick = (e) => {
       e.preventDefault();
+      if (uiState.galleryViewMode === vm.id) return;
+      const dir = vm.id === "height-lineup" ? 1 : -1;
       uiState.galleryViewMode = vm.id;
       if (vm.id === "height-lineup" && !uiState.selectedHeightCharId && filtered.length > 0) {
         uiState.selectedHeightCharId = filtered[0].id;
       }
-      renderCharacterGallerySection(
-        plugin,
+      paperSlipSwap(
         galleryHost,
-        characters,
-        vaultAnimeByTitle,
-        uiState,
-        options,
-        onFullRefresh
+        () =>
+          renderCharacterGallerySection(
+            plugin,
+            galleryHost,
+            characters,
+            vaultAnimeByTitle,
+            uiState,
+            options,
+            onFullRefresh
+          ),
+        { dir, small: true }
       );
     };
   });
 
-  const jumpIllustHallBtn = viewSwitcher.createEl("button", {
-    cls: "curator-char-view-btn",
-    text: "🖼️ 画册典藏 ↗"
+  const jumpIllustHallBtn = leftBarGroup.createEl("button", {
+    cls: "curator-dl-mini-btn",
+    attr: {
+      type: "button",
+      title: "切换至「画册典藏」面板浏览插画画集"
+    }
   });
-  jumpIllustHallBtn.title = "前往独立升格的「🖼️ 画册典藏」（支持 Aves 画报照片墙、本地保存路径配置与在线搜图入库）";
+  jumpIllustHallBtn.createSpan({ text: "前往画册典藏" });
+  const illJumpCue = jumpIllustHallBtn.createSpan({ cls: "bm8-jump-cue" });
+  illJumpCue.appendChild(v07Core.icon("arrowUpRight", 12));
   jumpIllustHallBtn.onclick = (e) => {
     e.preventDefault();
     const deskRoot = galleryHost.closest(".curator-desk-root");
@@ -6653,7 +6797,7 @@ function renderCharacterGallerySection(
   if (dupeGroups.length > 0) {
     const cleanDupeBtn = sortWrap.createEl("button", {
       cls: "curator-dl-mini-btn is-accent curator-char-dedupe-btn",
-      text: `✨ 发现 ${dupeGroups.length} 组重复角色 · 一键合并清理`
+      text: `发现 ${dupeGroups.length} 组重复角色 · 一键合并`
     });
     cleanDupeBtn.title = `检测到馆藏中存在重复或相似译名的角色（如：${dupeGroups.map((g) => g.map((x) => x.name).join(" / ")).join("；")}），点击一键智能合并萌点并清理重复卡片`;
     cleanDupeBtn.onclick = async (e) => {
@@ -6662,28 +6806,40 @@ function renderCharacterGallerySection(
     };
   }
 
+  const caliperStrip = sortWrap.createDiv("bm8-caliper-strip");
+  caliperStrip.createSpan({ cls: "bm8-caliper-label", text: "排序" });
   [
-    { id: "score-desc", label: "★ 喜爱度" },
-    { id: "height-desc", label: "📐 身高↓" },
-    { id: "height-asc", label: "📐 身高↑" },
-    { id: "date-desc", label: "🕒 最近收录" },
-    { id: "name-asc", label: "🔤 姓名" }
+    { id: "score-desc", label: "喜爱度" },
+    { id: "height-desc", label: "身高↓" },
+    { id: "height-asc", label: "身高↑" },
+    { id: "date-desc", label: "最近收录" },
+    { id: "name-asc", label: "姓名" }
   ].forEach((mode) => {
-    const b = sortWrap.createEl("button", {
-      cls: `curator-dl-mini-btn ${uiState.gallerySortMode === mode.id ? "is-active" : ""}`,
-      text: mode.label
+    const b = caliperStrip.createEl("button", {
+      cls: `bm8-caliper-btn ${uiState.gallerySortMode === mode.id ? "is-active" : ""}`,
+      text: mode.label,
+      attr: {
+        type: "button",
+        "aria-pressed": String(uiState.gallerySortMode === mode.id)
+      }
     });
     b.onclick = (e) => {
       e.preventDefault();
+      if (uiState.gallerySortMode === mode.id) return;
       uiState.gallerySortMode = mode.id;
-      renderCharacterGallerySection(
-        plugin,
+      paperSlipSwap(
         galleryHost,
-        characters,
-        vaultAnimeByTitle,
-        uiState,
-        options,
-        onFullRefresh
+        () =>
+          renderCharacterGallerySection(
+            plugin,
+            galleryHost,
+            characters,
+            vaultAnimeByTitle,
+            uiState,
+            options,
+            onFullRefresh
+          ),
+        { small: true }
       );
     };
   });
@@ -6758,7 +6914,7 @@ function renderCharacterGallerySection(
 
     const lensHint = avatarBox.createDiv({
       cls: "curator-char-avatar-hover-pill",
-      text: "🖼️ 取景/换图"
+      text: "取景/换图"
     });
     lensHint.onclick = (ev) => {
       ev.preventDefault();
@@ -6819,17 +6975,12 @@ function renderCharacterGallerySection(
       nameTitleWrap.createSpan({ cls: "curator-char-card-jp", text: ch.nameJp });
     }
 
-    // 右上角魔杖关联按钮与克制直观的快速移除按钮
+    // 右上角克制直观的快速移除按钮；长按或右键卡片打开关联收藏检索
     const topRightBtns = nameRow.createDiv();
     topRightBtns.style.display = "inline-flex";
     topRightBtns.style.alignItems = "center";
     topRightBtns.style.gap = "4px";
 
-    const wandBtn = topRightBtns.createEl("button", {
-      cls: "curator-char-top-remove-btn",
-      text: "🪄"
-    });
-    wandBtn.title = `长按卡片或点击打开「${ch.name}」的洛琪希魔杖全馆同源关联谱`;
     const triggerCharWand = () => {
       const deskRoot = galleryHost.closest(".curator-desk-root");
       const rt = deskRoot && deskRoot._deskRuntime;
@@ -6852,23 +7003,47 @@ function renderCharacterGallerySection(
         }
       );
     };
-    wandBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      triggerCharWand();
-    };
     multiHallArchiveService.bindMagicWandLongPress(card, triggerCharWand);
 
-    const topRemoveBtn = topRightBtns.createEl("button", {
-      cls: "curator-char-top-remove-btn",
-      text: "×"
+    card.addEventListener("contextmenu", (ev) => {
+      try {
+        if (typeof Menu === "function") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const menu = new Menu();
+          menu.addItem((mi) =>
+            mi
+              .setTitle("查看角色完整档案")
+              .onClick(() => openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh))
+          );
+          menu.addItem((mi) => mi.setTitle("查看关联收藏").onClick(triggerCharWand));
+          menu.addItem((mi) =>
+            mi
+              .setTitle("立绘取景 / 换图 / 身高校准")
+              .onClick(() =>
+                openCharacterPortraitStudioModal(plugin, ch, () => {
+                  renderCharacterGallerySection(
+                    plugin,
+                    galleryHost,
+                    characters,
+                    vaultAnimeByTitle,
+                    uiState,
+                    options,
+                    onFullRefresh
+                  );
+                })
+              )
+          );
+          menu.addSeparator();
+          menu.addItem((mi) =>
+            mi
+              .setTitle("移除该位角色")
+              .onClick(() => openCharacterDeleteConfirmModal(plugin, ch, card, onFullRefresh))
+          );
+          menu.showAtMouseEvent(ev);
+        }
+      } catch (_) {}
     });
-    topRemoveBtn.title = `从典藏画廊中移除「${ch.name}」`;
-    topRemoveBtn.onclick = (ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      openCharacterDeleteConfirmModal(plugin, ch, card, onFullRefresh);
-    };
 
     // 外观与基础属性胶囊行
     const traitsRow = infoBox.createDiv("curator-char-card-traits");
@@ -6876,7 +7051,7 @@ function renderCharacterGallerySection(
     if (ch.height || !parsedH.isEstimated) {
       const hChip = traitsRow.createSpan({
         cls: "curator-char-attr-chip is-height curator-mono",
-        text: `📐 ${ch.height || parsedH.displayLabel}`
+        text: `${ch.height || parsedH.displayLabel}`
       });
       hChip.title = "点击打开等身标尺与身高校准工坊";
       hChip.onclick = (ev) => {
@@ -6901,16 +7076,16 @@ function renderCharacterGallerySection(
       };
     }
     if (ch.hairColor) {
-      traitsRow.createSpan({ cls: "curator-char-attr-chip is-hair", text: `🎨 ${ch.hairColor}` });
+      traitsRow.createSpan({ cls: "curator-char-attr-chip is-hair", text: ch.hairColor });
     }
     if (ch.eyeColor) {
-      traitsRow.createSpan({ cls: "curator-char-attr-chip is-eye", text: `👁️ ${ch.eyeColor}` });
+      traitsRow.createSpan({ cls: "curator-char-attr-chip is-eye", text: ch.eyeColor });
     }
     if (ch.cv) {
-      traitsRow.createSpan({ cls: "curator-char-attr-chip is-cv", text: `🎙️ ${ch.cv}` });
+      traitsRow.createSpan({ cls: "curator-char-attr-chip is-cv", text: `CV: ${ch.cv}` });
     }
     if (ch.birthday) {
-      traitsRow.createSpan({ cls: "curator-char-attr-chip", text: `🎂 ${ch.birthday}` });
+      traitsRow.createSpan({ cls: "curator-char-attr-chip", text: ch.birthday });
     }
 
     // 出演作品行
@@ -6919,11 +7094,13 @@ function renderCharacterGallerySection(
       ch.appearances.slice(0, 2).forEach((appTitle) => {
         const matchedAnime = vaultAnimeByTitle.get(String(appTitle).trim().toLowerCase());
         const appChip = appRow.createEl(matchedAnime ? "button" : "span", {
-          cls: `curator-char-anime-chip ${matchedAnime ? "is-in-vault" : ""}`,
-          text: `🎬 《${appTitle}》`
+          cls: `curator-char-anime-chip ${matchedAnime ? "is-in-vault" : ""}`
         });
+        appChip.createSpan({ text: `《${appTitle}》` });
         if (matchedAnime?.file) {
-          appChip.title = "点击打开馆藏中的该部动画笔记";
+          const cue = appChip.createSpan({ cls: "bm8-jump-cue" });
+          cue.appendChild(v07Core.icon("arrowUpRight", 11));
+          appChip.title = `在新建标签页打开《${appTitle}》动画笔记`;
           appChip.onclick = async (ev) => {
             ev.preventDefault();
             const leaf = plugin.app.workspace.getLeaf(true);
@@ -6957,7 +7134,7 @@ function renderCharacterGallerySection(
     } else {
       moeWrap.createSpan({
         cls: "curator-char-moe-empty",
-        text: "暂无萌点标签 · 点击下方「✎ 评分/萌点」补充"
+        text: "暂无萌点标签 · 点击下方「评分/萌点」补充"
       });
     }
 
@@ -7033,7 +7210,7 @@ function renderCharacterGallerySection(
             moeEditInput.value = "";
             applyInlineParsedMoe(parsed);
             if (Notice) {
-              new Notice(`✨ 已从粘贴的 HTML 中提取 ${parsed.moePoints.length} 个萌点！`);
+              new Notice(`已从粘贴的 HTML 中提取 ${parsed.moePoints.length} 个萌点`);
             }
           }
         }
@@ -7049,7 +7226,7 @@ function renderCharacterGallerySection(
       const editBtns = editBox.createDiv("curator-char-inline-btns");
       const webExtractInlineBtn = editBtns.createEl("button", {
         cls: "curator-dl-mini-btn",
-        text: "🌐 网页提取"
+        text: "网页提取"
       });
       webExtractInlineBtn.title = "打开内置萌娘百科视图或粘贴 HTML 一键提取萌点";
       webExtractInlineBtn.onclick = (ev) => {
@@ -7061,7 +7238,7 @@ function renderCharacterGallerySection(
 
       const syncMoeBtn = editBtns.createEl("button", {
         cls: "curator-dl-mini-btn",
-        text: "🔄 同步萌娘百科"
+        text: "同步萌娘百科"
       });
       syncMoeBtn.onclick = async (ev) => {
         ev.preventDefault();
@@ -7089,11 +7266,11 @@ function renderCharacterGallerySection(
               { reason: "cloudflare" }
             );
           } else if (Notice) {
-            new Notice("自动请求未返回萌点，可点击左侧「🌐 网页提取」一键提取。");
+            new Notice("自动请求未返回萌点，可点击左侧「网页提取」一键提取。");
           }
         } finally {
           syncMoeBtn.disabled = false;
-          syncMoeBtn.textContent = "🔄 同步萌娘百科";
+          syncMoeBtn.textContent = "同步萌娘百科";
         }
       };
 
@@ -7138,56 +7315,26 @@ function renderCharacterGallerySection(
       };
     }
 
-    // 底部操作条：取景/换图、编辑萌点/评分、角色 Markdown 笔记、萌娘百科、Bangumi 角色页、独立移除按钮
+    // 底部操作条：精简至 <= 2 枚表面文字按钮（角色笔记 + 评分/萌点）+ 1 枚单色更多按钮
     const footRow = card.createDiv("curator-char-card-footer");
-    const frameBtn = footRow.createEl("button", {
-      cls: "curator-dl-mini-btn",
-      text: "🖼️ 取景/换图"
-    });
-    frameBtn.title = "调整角色立绘选定位置、缩放模式、身高标尺校准或更换自定义图片";
-    frameBtn.onclick = (ev) => {
-      ev.preventDefault();
-      openCharacterPortraitStudioModal(plugin, ch, () => {
-        renderCharacterGallerySection(
-          plugin,
-          galleryHost,
-          characters,
-          vaultAnimeByTitle,
-          uiState,
-          options,
-          onFullRefresh
-        );
-      });
-    };
-
-    const editBtn = footRow.createEl("button", {
-      cls: `curator-dl-mini-btn ${uiState.editingCharId === ch.id ? "is-active" : ""}`,
-      text: "✎ 评分/萌点"
-    });
-    editBtn.onclick = (ev) => {
-      ev.preventDefault();
-      uiState.editingCharId = uiState.editingCharId === ch.id ? null : ch.id;
-      renderCharacterGallerySection(
-        plugin,
-        galleryHost,
-        characters,
-        vaultAnimeByTitle,
-        uiState,
-        options,
-        onFullRefresh
-      );
-    };
 
     const existingNoteFile = resolveCharacterNoteFile(plugin, ch);
     const noteBtn = footRow.createEl("button", {
       cls: "curator-dl-mini-btn",
-      text: existingNoteFile ? "📄 打开角色笔记" : "📄 生成角色笔记"
+      attr: {
+        type: "button",
+        title: existingNoteFile
+          ? `在新建标签页打开「${ch.name}」角色笔记`
+          : `生成并在新建标签页打开「${ch.name}」角色笔记`
+      }
     });
+    noteBtn.createSpan({ text: existingNoteFile ? "打开笔记" : "生成笔记" });
+    const noteJumpCue = noteBtn.createSpan({ cls: "bm8-jump-cue" });
+    noteJumpCue.appendChild(v07Core.icon("arrowUpRight", 11));
     noteBtn.onclick = async (ev) => {
       ev.preventDefault();
       let file = resolveCharacterNoteFile(plugin, ch);
       if (file) {
-        // 笔记已存在时，先将用户在 Markdown 笔记中的最新评分与属性同步回角色典藏库，绝不反向覆盖笔记！
         await syncCharacterNoteToCollection(plugin, file);
       } else {
         const notePath = await createOrUpdateCharacterMarkdownNote(plugin, ch);
@@ -7209,51 +7356,90 @@ function renderCharacterGallerySection(
       );
     };
 
-    const moeLinkBtn = footRow.createEl("button", {
-      cls: "curator-dl-mini-btn",
-      text: "↗ 萌娘百科"
+    const editBtn = footRow.createEl("button", {
+      cls: `curator-dl-mini-btn ${uiState.editingCharId === ch.id ? "is-active" : ""}`,
+      text: "评分与萌点"
     });
-    moeLinkBtn.onclick = (ev) => {
+    editBtn.onclick = (ev) => {
       ev.preventDefault();
-      const url =
-        ch.moegirlUrl && ch.moegirlUrl.includes("moegirl.uk")
-          ? ch.moegirlUrl
-          : `https://moegirl.uk/${encodeURIComponent(ch.name)}`;
-      window.open(url, "_blank");
+      uiState.editingCharId = uiState.editingCharId === ch.id ? null : ch.id;
+      renderCharacterGallerySection(
+        plugin,
+        galleryHost,
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        onFullRefresh
+      );
     };
 
-    if (ch.bgmUrl) {
-      const bgmBtn = footRow.createEl("button", {
-        cls: "curator-dl-mini-btn",
-        text: "↗ BGM"
-      });
-      bgmBtn.title = "打开 Bangumi 角色页";
-      bgmBtn.onclick = (ev) => {
-        ev.preventDefault();
-        window.open(ch.bgmUrl, "_blank");
-      };
-    }
-
-    // 显眼、克制的独立删除/移除按钮（支持分级确认是否一并清理关联角色笔记）
-    const deleteCharBtn = footRow.createEl("button", {
-      cls: "curator-dl-mini-btn curator-char-remove-btn",
-      text: "🗑️ 移除"
+    const moreCharBtn = footRow.createEl("button", {
+      cls: "curator-dl-mini-btn is-char-more-btn",
+      attr: { type: "button", "aria-label": "更多角色操作" }
     });
-    deleteCharBtn.dataset.charAction = "delete";
-    deleteCharBtn.title = existingNoteFile
-      ? `移除角色「${ch.name}」（可选择一并清理关联角色笔记《${existingNoteFile.name}》）`
-      : `从画廊中移除角色「${ch.name}」`;
-    deleteCharBtn.onclick = (ev) => {
+    moreCharBtn.appendChild(v07Core.icon("more", 14));
+    moreCharBtn.title = "更多操作（立绘取景与身高、萌娘百科、Bangumi 角色页、移除）";
+    moreCharBtn.onclick = (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      openCharacterDeleteConfirmModal(plugin, ch, card, onFullRefresh);
+      v07Core.popover(
+        moreCharBtn,
+        (box, close) => {
+          const addItem = (ico, label, fn) => {
+            const row = v07Core.h(
+              "button.bm7-menu-item",
+              {
+                attr: { type: "button" },
+                on: {
+                  click: () => {
+                    close();
+                    fn();
+                  }
+                }
+              },
+              [v07Core.icon(ico, 14), v07Core.h("span", { text: label })]
+            );
+            box.appendChild(row);
+          };
+          addItem("crop", "立绘取景与身高校准", () => {
+            openCharacterPortraitStudioModal(plugin, ch, () => {
+              renderCharacterGallerySection(
+                plugin,
+                galleryHost,
+                characters,
+                vaultAnimeByTitle,
+                uiState,
+                options,
+                onFullRefresh
+              );
+            });
+          });
+          addItem("external", "打开萌娘百科词条", () => {
+            const url =
+              ch.moegirlUrl && ch.moegirlUrl.includes("moegirl.uk")
+                ? ch.moegirlUrl
+                : `https://moegirl.uk/${encodeURIComponent(ch.name)}`;
+            window.open(url, "_blank");
+          });
+          if (ch.bgmUrl) {
+            addItem("link", "打开 Bangumi 角色页", () => {
+              window.open(ch.bgmUrl, "_blank");
+            });
+          }
+          addItem("trash", "移除该位角色", () => {
+            openCharacterDeleteConfirmModal(plugin, ch, card, onFullRefresh);
+          });
+        },
+        { width: 220, alignRight: true }
+      );
     };
   });
 }
 
 /**
  * 渲染「📏 等身标尺陈列架（Height Lineup Stage）」
- * 灵感源自「编年魔导书脊陈列架」，按角色真实身高（cm）在统一 0 cm 地平基准线上并列展示角色立绘，
+ * 与「历年收藏书架」呼应，按角色真实身高（cm）在统一 0 cm 地平基准线上并列展示角色立绘，
  * 左侧配备厘米标尺刻度线、可拖拽水平身高对比参考线，顶部配备角色身高对比洞察与选中角色实时校准尺。
  */
 function renderCharacterHeightLineupStage(
@@ -7307,22 +7493,22 @@ function renderCharacterHeightLineupStage(
   const statsLeft = summaryRow.createDiv("curator-height-stats-pills");
   statsLeft.createSpan({
     cls: "curator-height-stat-pill is-gold curator-mono",
-    text: `👑 最高：${tallest.char.name} (${tallest.info.displayLabel})`
+    text: `最高：${tallest.char.name} (${tallest.info.displayLabel})`
   });
   statsLeft.createSpan({
     cls: "curator-height-stat-pill curator-mono",
-    text: `🌱 最娇小：${shortest.char.name} (${shortest.info.displayLabel})`
+    text: `最娇小：${shortest.char.name} (${shortest.info.displayLabel})`
   });
   statsLeft.createSpan({
     cls: "curator-height-stat-pill curator-mono",
-    text: `📐 最大身高差：${maxDiffCm} cm · 平均 ${avgCm} cm`
+    text: `最大身高差：${maxDiffCm} cm · 平均 ${avgCm} cm`
   });
 
   const toolsRight = summaryRow.createDiv("curator-height-tools-right");
 
   // 参考标尺线滑块
   const refCtrl = toolsRight.createDiv("curator-height-ref-ctrl");
-  refCtrl.createSpan({ cls: "curator-height-ref-label", text: "✦ 标尺参考线：" });
+  refCtrl.createSpan({ cls: "curator-height-ref-label", text: "标尺参考线：" });
   const refValBadge = refCtrl.createSpan({
     cls: "curator-height-ref-val curator-mono",
     text: `${uiState.rulerRefCm || 160} cm`
@@ -7340,7 +7526,7 @@ function renderCharacterHeightLineupStage(
   const isAutoRemoveBgOn = plugin.settings?.characterLineupAutoRemoveBg !== false;
   const toggleAutoBgBtn = toolsRight.createEl("button", {
     cls: `curator-dl-mini-btn ${isAutoRemoveBgOn ? "is-active" : ""}`,
-    text: isAutoRemoveBgOn ? "🪄 自动去纯色底：开启" : "🪄 自动去纯色底：关闭"
+    text: isAutoRemoveBgOn ? "自动去纯色底：开启" : "自动去纯色底：关闭"
   });
   toggleAutoBgBtn.title =
     "自动抠除人设图外围纯白/浅灰等纯色背景（仅从四角边缘向内漫水填充，100% 保护人物内部白衬衫与眼白，同时原生支持透明背景 PNG）";
@@ -7362,7 +7548,7 @@ function renderCharacterHeightLineupStage(
   // 2) 一键补全馆藏角色真实身高按钮
   const syncAllHeightsBtn = toolsRight.createEl("button", {
     cls: "curator-dl-mini-btn is-accent",
-    text: "🔄 自动补全馆藏角色身高"
+    text: "自动补全馆藏角色身高"
   });
   syncAllHeightsBtn.title = "从内置档案与萌娘百科自动查询并补全尚未填写身高的馆藏角色";
   syncAllHeightsBtn.onclick = async (e) => {
@@ -7395,7 +7581,7 @@ function renderCharacterHeightLineupStage(
       }
       if (updatedCount > 0) {
         await plugin.saveSettings();
-        if (Notice) new Notice(`✨ 已自动补全 ${updatedCount} 位角色的真实身高数据！`);
+        if (Notice) new Notice(`已自动补全 ${updatedCount} 位角色的真实身高数据`);
         renderCharacterGallerySection(
           plugin,
           galleryHost,
@@ -7411,7 +7597,7 @@ function renderCharacterHeightLineupStage(
     } finally {
       if (syncAllHeightsBtn.isConnected) {
         syncAllHeightsBtn.disabled = false;
-        syncAllHeightsBtn.textContent = "🔄 自动补全馆藏角色身高";
+        syncAllHeightsBtn.textContent = "自动补全馆藏角色身高";
       }
     }
   };
@@ -7424,7 +7610,7 @@ function renderCharacterHeightLineupStage(
   const selTitleBox = activeCalibStrip.createDiv("curator-height-sel-title");
   selTitleBox.createSpan({
     cls: "curator-height-sel-tag",
-    text: "🎯 当前选中校准"
+    text: "当前选中校准"
   });
   selTitleBox.createSpan({
     cls: "curator-height-sel-name",
@@ -7480,7 +7666,7 @@ function renderCharacterHeightLineupStage(
 
   const actionGroup = activeCalibStrip.createDiv("curator-height-sel-actions");
   const getBgModeLabel = (m) =>
-    m === "on" ? "🪄 去底：强制开启" : m === "off" ? "🖼️ 去底：保持原图" : "🪄 去底：自动";
+    m === "on" ? "去底：强制开启" : m === "off" ? "去底：保持原图" : "去底：自动";
   const charBgModeBtn = actionGroup.createEl("button", {
     cls: `curator-dl-mini-btn ${selFrame.removeSolidBg === "on" ? "is-active" : ""}`,
     text: getBgModeLabel(selFrame.removeSolidBg)
@@ -7506,21 +7692,21 @@ function renderCharacterHeightLineupStage(
 
   const autoFitSelBtn = actionGroup.createEl("button", {
     cls: "curator-dl-mini-btn",
-    text: "✨ 智能消除留白"
+    text: "智能消除留白"
   });
   autoFitSelBtn.title = "自动检测立绘图片上下透明或白底留白，使人物头顶对齐身高线、脚底踩在 0cm 线";
 
   const resetSelBtn = actionGroup.createEl("button", {
     cls: "curator-dl-mini-btn",
-    text: "↺ 重置基准"
+    text: "重置基准"
   });
   const openStudioBtn = actionGroup.createEl("button", {
     cls: "curator-dl-mini-btn",
-    text: "🖼️ 换图/精调"
+    text: "换图/精调"
   });
   const openDetailBtn = actionGroup.createEl("button", {
     cls: "curator-dl-mini-btn is-accent",
-    text: "👑 角色档案"
+    text: "角色档案"
   });
 
   openStudioBtn.onclick = (e) => {
@@ -7879,6 +8065,47 @@ function renderCharacterHeightLineupStage(
       ev.stopPropagation();
       openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh);
     };
+
+    const triggerHeightCharWand = () => {
+      const deskRoot = galleryHost.closest(".curator-desk-root");
+      const rt = deskRoot && deskRoot._deskRuntime;
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "character",
+          id: ch.id,
+          name: ch.name,
+          title: ch.name,
+          cv: ch.cv,
+          appearances: ch.appearances || []
+        },
+        Array.from(vaultAnimeByTitle.values()),
+        {
+          onSwitchMode: rt ? rt.switchWorkspaceMode : null,
+          onFilterCatalog: rt
+            ? (kw) => rt.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    multiHallArchiveService.bindMagicWandLongPress(pedestal, triggerHeightCharWand);
+
+    col.addEventListener("contextmenu", (ev) => {
+      try {
+        if (typeof Menu === "function") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const menu = new Menu();
+          menu.addItem((mi) =>
+            mi
+              .setTitle("查看角色完整档案")
+              .onClick(() => openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh))
+          );
+          menu.addItem((mi) => mi.setTitle("查看关联收藏").onClick(triggerHeightCharWand));
+          menu.showAtMouseEvent(ev);
+        }
+      } catch (_) {}
+    });
   });
 
   // 绑定顶部校准条控件与当前选中角色列的实时联动
@@ -7935,7 +8162,7 @@ function renderCharacterHeightLineupStage(
       scheduleSaveCharCalibration(selectedChar);
       if (Notice) {
         new Notice(
-          `✨ 已为《${selectedChar.name}》智能消除图片上下留白（比例 ${Math.round(f.heightScale * 100)}% · 偏移 ${f.footOffsetPx}px）`
+          `已为《${selectedChar.name}》智能消除图片上下留白（比例 ${Math.round(f.heightScale * 100)}% · 偏移 ${f.footOffsetPx}px）`
         );
       }
     };
@@ -7958,12 +8185,12 @@ function renderCharacterHeightLineupStage(
 
   wrap.createDiv({
     cls: "curator-height-stage-footnote",
-    text: "💡 提示：单击任意角色即可选中并在上方快速调整其「真实身高 / 图片比例 / 基准点偏移」或点击「✨ 智能消除留白」；直接在立绘上按住上下拖拽也可实时对齐 0cm 地面基准线，再次点击已选中角色或底部铭牌可打开完整角色典藏档案。"
+    text: "提示：单击任意角色即可选中并在上方快速调整其「真实身高 / 图片比例 / 基准点偏移」或点击「智能消除留白」；直接在立绘上按住上下拖拽也可实时对齐 0cm 地面基准线，再次点击已选中角色或底部铭牌可打开完整角色典藏档案。"
   });
 }
 
 /**
- * 渲染「🖼️ 画报照片墙（Aves 相册风格 · 等高自适应完整无裁切拼图墙）」
+ * 渲染「画报照片墙（Aves 相册风格 · 等高自适应完整无裁切拼图墙）」
  * 根据每张角色图片的真实宽高比动态分配磁贴宽度，100% 完整呈现整张原图（绝不截断头部或脚部），
  * 并支持行高密度切换（紧凑 / 标准 / 舒展）与超长画墙折叠/展开。
  */
@@ -7994,14 +8221,14 @@ function renderCharacterPhotoWallStage(
   const wallBar = wallWrap.createDiv("curator-photowall-toolbar");
   const hintLeft = wallBar.createDiv("curator-photowall-hint");
   hintLeft.createSpan({
-    text: "🖼️ Aves 自适应完整画报墙 · 按原图真实宽高比完整拼贴呈现，点击任意角色查看典藏档案"
+    text: "按原图比例自适应拼贴呈现 · 单击查看角色档案，长按或右键查看关联收藏"
   });
 
   const ctrlRight = wallBar.createDiv("curator-photowall-ctrls");
   [
-    { h: 185, label: "📏 紧凑" },
-    { h: 240, label: "🖼️ 标准" },
-    { h: 310, label: "✨ 舒展" }
+    { h: 185, label: "紧凑" },
+    { h: 240, label: "标准" },
+    { h: 310, label: "舒展" }
   ].forEach((preset) => {
     const b = ctrlRight.createEl("button", {
       cls: `curator-dl-mini-btn ${uiState.photoWallRowHeight === preset.h ? "is-active" : ""}`,
@@ -8024,7 +8251,7 @@ function renderCharacterPhotoWallStage(
 
   const capToggleBtn = ctrlRight.createEl("button", {
     cls: `curator-dl-mini-btn ${uiState.photoWallCaptionMode === "always" ? "is-active" : ""}`,
-    text: uiState.photoWallCaptionMode === "hover" ? "🏷️ 铭牌：悬停浮现" : "📌 铭牌：常驻显示"
+    text: uiState.photoWallCaptionMode === "hover" ? "铭牌：悬停浮现" : "铭牌：常驻显示"
   });
   capToggleBtn.onclick = (e) => {
     e.preventDefault();
@@ -8122,9 +8349,9 @@ function renderCharacterPhotoWallStage(
     });
 
     const cropQuickBtn = topBar.createEl("button", {
-      cls: "curator-char-photowall-cropbtn",
-      text: "🖼️"
+      cls: "curator-char-photowall-cropbtn"
     });
+    cropQuickBtn.appendChild(v07Core.icon("image", 13));
     cropQuickBtn.title = "更换自定义角色图片或调整档案卡片取景";
     cropQuickBtn.onclick = (ev) => {
       ev.preventDefault();
@@ -8163,6 +8390,47 @@ function renderCharacterPhotoWallStage(
       ev.preventDefault();
       openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh);
     };
+
+    const triggerWallCharWand = () => {
+      const deskRoot = galleryHost.closest(".curator-desk-root");
+      const rt = deskRoot && deskRoot._deskRuntime;
+      multiHallArchiveService.openMagicWandRelationModal(
+        plugin,
+        {
+          type: "character",
+          id: ch.id,
+          name: ch.name,
+          title: ch.name,
+          cv: ch.cv,
+          appearances: ch.appearances || []
+        },
+        Array.from(vaultAnimeByTitle.values()),
+        {
+          onSwitchMode: rt ? rt.switchWorkspaceMode : null,
+          onFilterCatalog: rt
+            ? (kw) => rt.switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
+            : null
+        }
+      );
+    };
+    multiHallArchiveService.bindMagicWandLongPress(tile, triggerWallCharWand);
+
+    tile.addEventListener("contextmenu", (ev) => {
+      try {
+        if (typeof Menu === "function") {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const menu = new Menu();
+          menu.addItem((mi) =>
+            mi
+              .setTitle("查看角色完整档案")
+              .onClick(() => openCharacterDetailModal(plugin, ch, vaultAnimeByTitle, onFullRefresh))
+          );
+          menu.addItem((mi) => mi.setTitle("查看关联收藏").onClick(triggerWallCharWand));
+          menu.showAtMouseEvent(ev);
+        }
+      } catch (_) {}
+    });
   });
 
   runCharAvesRelayout();

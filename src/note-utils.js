@@ -51,7 +51,16 @@ function parseFrontmatter(content) {
     }
     const key = line.slice(0, index).trim();
     let value = line.slice(index + 1).trim();
-    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+    if (value.startsWith("[") && value.endsWith("]")) {
+      const inner = value.slice(1, -1).trim();
+      value = inner
+        ? inner
+            .split(",")
+            .map((part) => part.trim().replace(/^["']|["']$/g, "").trim())
+            .filter(Boolean)
+            .join(", ")
+        : "";
+    } else if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1);
     }
     fields[key] = value;
@@ -82,21 +91,64 @@ function extractWatchedEpisodes(content) {
 }
 function extractEpisodeNumberFromFileName(fileName) {
   if (!fileName) return null;
-  const baseName = fileName.replace(/\.[^/.]+$/, "");
-  const epPattern = /(?:ep|episode|e|第)\s*(\d{1,4})(?:\s*话|\s*集|\b)/i;
-  const match1 = baseName.match(epPattern);
-  if (match1 && match1[1]) {
-    return parseInt(match1[1], 10);
+  const baseName = String(fileName).replace(/\.[^/.]+$/, "");
+  const cleaned = baseName
+    .replace(/^\s*\[[^\]]*[A-Za-z\u4e00-\u9fa5][^\]]*\]\s*/, " ")
+    .replace(/\[[0-9a-fA-F]{8}\]/g, " ")
+    .replace(/\[(?:1080|720|2160|1440|576|480)[pPiI]?\]/g, " ")
+    .replace(
+      /\b(?:1920x1080|1280x720|3840x2160|2560x1440|10bit|8bit|Hi10p|Ma10p|YUV420P10|x264|x265|H\.?264|H\.?265|HEVC|AVC|AAC|FLAC|AC3|OPUS|MP4|MKV|AVI|WEB-DL|WebRip|BDRip|BluRay|1080[pP]|720[pP]|2160[pP]|480[pP]|4K)\b/gi,
+      " "
+    );
+
+  // 1. 显式 EP / Episode / S01E05 / 第05话 / 05话
+  const epExplicit = cleaned.match(
+    /(?:^|[\s_\-\[\(])(?:(?:S\d{1,2})?E|EP|Episode)\s*(\d{1,4})(?:v\d+)?(?=$|[\s_\-\]\)]|[话集話])/i
+  );
+  if (epExplicit && epExplicit[1]) {
+    return parseInt(epExplicit[1], 10);
   }
-  const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:[\s_\-\]\)])/;
-  const match2 = baseName.match(delimPattern);
+  const cnEpMatch = cleaned.match(/(?:第\s*(\d{1,4})\s*[话集話]?|(\d{1,3})\s*[话集話])/);
+  if (cnEpMatch && (cnEpMatch[1] || cnEpMatch[2])) {
+    return parseInt(cnEpMatch[1] || cnEpMatch[2], 10);
+  }
+
+  // 2. 字幕组常见横杠格式: " - 05 [", " - 05v2 "
+  const dashMatch = cleaned.match(/-\s*(\d{1,3})(?:v\d+)?(?=\s*[\[\(]|\s+(?:END|Fin)\b|\s*$)/i);
+  if (dashMatch && dashMatch[1]) {
+    const ep = parseInt(dashMatch[1], 10);
+    if (ep >= 0 && ep < 1900) return ep;
+  }
+
+  // 3. 方括号集数格式: "[05]", "[05v2]", "[12 END]"（取最后一个合法集数括号，避开前置年份）
+  const bracketMatches = [
+    ...cleaned.matchAll(/\[(\d{1,3})(?:v\d+)?(?:\s*(?:END|Fin|话|集|話))?\]/gi)
+  ];
+  if (bracketMatches.length > 0) {
+    for (let i = bracketMatches.length - 1; i >= 0; i--) {
+      const ep = parseInt(bracketMatches[i][1], 10);
+      if (ep >= 0 && ep < 1900 && ep !== 480 && ep !== 720) {
+        return ep;
+      }
+    }
+  }
+
+  // 4. 通用分隔符与尾部数字兜底
+  const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:v\d+)?(?:[\s_\-\]\)])/;
+  const match2 = cleaned.match(delimPattern);
   if (match2 && match2[1]) {
-    return parseInt(match2[1], 10);
+    const ep = parseInt(match2[1], 10);
+    if (ep >= 0 && ep !== 480 && ep !== 720 && ep !== 264 && ep !== 265) {
+      return ep;
+    }
   }
-  const tailPattern = /(\d{1,3})$/;
-  const match3 = baseName.match(tailPattern);
+  const tailPattern = /(?:^|[\s_\-])(\d{1,3})(?:v\d+)?$/i;
+  const match3 = cleaned.trim().match(tailPattern);
   if (match3 && match3[1]) {
-    return parseInt(match3[1], 10);
+    const ep = parseInt(match3[1], 10);
+    if (ep >= 0 && ep !== 480 && ep !== 720 && ep !== 264 && ep !== 265) {
+      return ep;
+    }
   }
   return null;
 }
@@ -489,9 +541,16 @@ function updateScoreFields(
   );
 }
 function updateFolderLine(content, result) {
+  const normalizedResult =
+    typeof result === "string"
+      ? {
+          downloadPath: result.trim() && result.trim() !== "无" ? result.trim() : "",
+          error: null
+        }
+      : result || {};
   let folderLine;
-  if (result.downloadPath && !result.error) {
-    const normalized = result.downloadPath.replace(
+  if (normalizedResult.downloadPath && !normalizedResult.error) {
+    const normalized = String(normalizedResult.downloadPath).replace(
       /\\/g,
       "/"
     );
@@ -499,7 +558,7 @@ function updateFolderLine(content, result) {
   } else {
     folderLine = "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A \u672A\u8BBE\u7F6E";
   }
-  const existing = /^\*\*本地文件夹\*\*：.*$/m;
+  const existing = /^\*\*本地文件夹\s*[：:]?\s*\*\*\s*[：:]?.*$/m;
   if (existing.test(content)) {
     return content.replace(
       existing,
@@ -1180,6 +1239,13 @@ function syncNoteCalloutFromFrontmatter(content) {
       updated = updateWatchedEpisodes(updated, ep);
     }
     updated = updateCalloutTableRow(updated, "已观看集数", String(ep));
+  }
+
+  if (parsed.fields["下载路径"] !== undefined) {
+    const dl = cleanValue(parsed.fields["下载路径"]);
+    if (dl && dl !== "无") {
+      updated = updateCalloutTableRow(updated, "下载路径", "`" + dl + "`");
+    }
   }
 
   return updated;
@@ -1868,10 +1934,320 @@ function updateNoteReviewsSection(content, reviews) {
   return `${source.trimEnd()}\n\n# 观片手记与评价\n\n${sectionBody}\n`;
 }
 
+/**
+ * 无损检测并升级旧版本插件生成的动画 Markdown 笔记结构：
+ * - 100% 保留用户已填写的所有评分、标签、观看集数、本地路径、观看网址与手记正文；
+ * - 自动补齐新版所需字段与区块（如 `我的评分`、`下载路径` 双向对齐、`**观看网址**`、Netaba 页面切换控件容器、`# 观片手记与评价` 区块及标准加粗语法）。
+ */
+function inspectAndUpgradeAnimeNoteContent(content, options = {}) {
+  const source = String(content || "");
+  const parsed0 = parseFrontmatter(source);
+  if (!parsed0 || !parsed0.fields) {
+    return {
+      isTargetAnimeNote: false,
+      needsUpgrade: false,
+      reasons: [],
+      upgradedContent: source
+    };
+  }
+
+  const f0 = parsed0.fields;
+  if (
+    f0["角色中文名"] !== undefined ||
+    f0["个人喜爱度评分"] !== undefined ||
+    f0["Bangumi角色页"] !== undefined ||
+    f0["游戏状态"] !== undefined ||
+    f0["游玩时长"] !== undefined ||
+    f0["开发发行"] !== undefined
+  ) {
+    return {
+      isTargetAnimeNote: false,
+      needsUpgrade: false,
+      reasons: [],
+      upgradedContent: source
+    };
+  }
+
+  const hasBangumiTag = String(f0.tags || "").toLowerCase().includes("bangumi");
+  const hasBgmLink = Boolean(cleanValue(f0["BGM链接"]));
+  if (!hasBangumiTag && !hasBgmLink) {
+    return {
+      isTargetAnimeNote: false,
+      needsUpgrade: false,
+      reasons: [],
+      upgradedContent: source
+    };
+  }
+
+  let updated = source;
+  const reasons = [];
+
+  // 1. 升级旧版评分字段别名（如 BGM用户评分 / BGM精确评分 -> 你在 BGM 上的评分）
+  const hasLegacyScoreField =
+    f0["BGM用户评分"] !== undefined ||
+    f0["BGM 用户评分"] !== undefined ||
+    f0["Bangumi用户评分"] !== undefined ||
+    f0["你在BGM上的评分"] !== undefined ||
+    f0["BGM精确评分"] !== undefined;
+  if (hasLegacyScoreField) {
+    const syncedScore = synchronizeBangumiScoreFields(updated, options);
+    if (syncedScore !== updated) {
+      updated = syncedScore;
+      reasons.push("统一旧版 Bangumi 评分字段命名");
+    }
+  }
+
+  // 2. 补齐「我的评分」属性与表格行（优先继承缓存评分）
+  let parsedNow = parseFrontmatter(updated);
+  if (parsedNow && parsedNow.fields && parsedNow.fields["我的评分"] === undefined) {
+    const cachedScore = String(options.cachedPersonalScore || "").trim();
+    const myScoreVal = cachedScore && cachedScore !== "未知" ? cachedScore : "未评分";
+    updated = updateFrontmatterField(updated, "我的评分", myScoreVal);
+    if (!/^\s*(?:>\s*)?\|\s*(?:\*\*)?我的评分(?:\*\*)?\s*\|/m.test(updated)) {
+      const anchorRe = /^(\s*(?:>\s*)?\|\s*(?:\*\*)?(?:你在\s*BGM\s*上的评分|BGM\s*评分)(?:\*\*)?\s*\|[^\r\n]*)$/m;
+      if (anchorRe.test(updated)) {
+        updated = updated.replace(anchorRe, `$1\n| 我的评分 | ${myScoreVal} |`);
+      }
+    }
+    reasons.push("补齐「我的评分」字段");
+  }
+
+  // 3. 规范化「**已观看集数**：」加粗冒号位置（修复旧版 **已观看集数：** 冒号在星号内的问题）
+  if (/\*\*已观看集数\s*[：:]\s*\*\*/.test(updated)) {
+    const curWatched = extractWatchedEpisodes(updated);
+    const fixedWatched = updated.replace(
+      /\*\*已观看集数\s*[：:]\s*\*\*\s*\d+(?:\.\d+)?/,
+      `**已观看集数**： ${curWatched}`
+    );
+    if (fixedWatched !== updated) {
+      updated = fixedWatched;
+      reasons.push("规范「已观看集数」Markdown 语法");
+    }
+  }
+
+  // 4. 双向对齐 Frontmatter「下载路径」与正文「**本地文件夹**」链接
+  parsedNow = parseFrontmatter(updated);
+  if (parsedNow && parsedNow.fields) {
+    const fmDlRaw = cleanValue(parsedNow.fields["下载路径"]);
+    const fmHasRealPath = Boolean(fmDlRaw && fmDlRaw !== "无" && fmDlRaw !== "未设置");
+    const bodyFileUrlMatch = updated.match(
+      /^\*\*本地文件夹\s*[：:]?\s*\*\*\s*[：:]?\s*\[[^\]]*\]\(file:\/\/\/([^)\r\n]+)\)/m
+    );
+    let bodyRecoveredPath = "";
+    if (bodyFileUrlMatch && bodyFileUrlMatch[1]) {
+      try {
+        bodyRecoveredPath = decodeURI(bodyFileUrlMatch[1]).trim();
+      } catch (_) {
+        bodyRecoveredPath = bodyFileUrlMatch[1].trim();
+      }
+    }
+
+    if (!fmHasRealPath && bodyRecoveredPath) {
+      updated = updateFrontmatterField(updated, "下载路径", bodyRecoveredPath);
+      reasons.push("从正文恢复 Frontmatter「下载路径」");
+    } else if (parsedNow.fields["下载路径"] === undefined) {
+      updated = updateFrontmatterField(updated, "下载路径", "无");
+      reasons.push("补齐 Frontmatter「下载路径」字段");
+    }
+
+    const effectivePath = fmHasRealPath ? fmDlRaw : bodyRecoveredPath;
+    if (effectivePath) {
+      const folderUpdated = updateFolderLine(updated, { downloadPath: effectivePath, error: null });
+      if (folderUpdated !== updated) {
+        updated = folderUpdated;
+        reasons.push("同步正文「本地文件夹」快捷打开链接");
+      }
+    } else if (!/^\*\*本地文件夹\s*[：:]?\s*\*\*/m.test(updated)) {
+      updated = updateFolderLine(updated, { downloadPath: "", error: null });
+      reasons.push("补齐正文「本地文件夹」行");
+    }
+  }
+
+  // 5. 补齐「**观看网址**：」行（旧版模板未生成该行）
+  if (!/^\*\*观看网址\s*[：:]?\s*\*\*/m.test(updated)) {
+    const folderLineRe = /^(\*\*本地文件夹[^\r\n]*)$/m;
+    if (folderLineRe.test(updated)) {
+      updated = updated.replace(folderLineRe, "$1\n**观看网址**： ");
+      reasons.push("补齐「观看网址」快捷记录行");
+    }
+  }
+
+  // 6. 升级旧版裸 `<!-- Netaba评分趋势图 -->` 区块为新版带交互控件容器的标准区块（保留原 iframe URL）
+  const hasLegacyNetabaComment = updated.includes("<!-- Netaba评分趋势图 -->");
+  const hasNewNetabaHeading = /^#\s*Netaba评分趋势图\s*$/m.test(updated);
+  if (hasLegacyNetabaComment && !hasNewNetabaHeading) {
+    const legacyBlockRe =
+      /<!--\s*Netaba评分趋势图\s*-->[\s\S]*?<iframe[^>]+src=["']([^"']+)["'][^>]*>\s*<\/iframe>\s*(?:<\/div>\s*)?(?:<\/details>)?/i;
+    const m = updated.match(legacyBlockRe);
+    if (m && m[1]) {
+      const iframeUrl = m[1];
+      const replacement = [
+        "# Netaba评分趋势图",
+        "",
+        '<div class="bangumi-netaba-controls" data-netaba-controls="true"></div>',
+        "",
+        '<div style="width:100%;height:600px;max-width:100%;border:1px solid #ddd;border-radius:5px;overflow:hidden;">',
+        `<iframe src="${iframeUrl}" style="display:block;width:100%;height:600px;border:0;"></iframe>`,
+        "</div>"
+      ].join("\n");
+      updated = updated.replace(legacyBlockRe, replacement);
+      reasons.push("升级「Netaba评分趋势图」页面切换控件区块");
+    }
+  } else if (hasNewNetabaHeading && !updated.includes("bangumi-netaba-controls")) {
+    updated = updated.replace(
+      /^(#\s*Netaba评分趋势图\s*)$/m,
+      '$1\n\n<div class="bangumi-netaba-controls" data-netaba-controls="true"></div>'
+    );
+    reasons.push("补齐 Netaba 页面切换控件挂载点");
+  }
+
+  // 7. 补齐末尾「# 观片手记与评价」区块（若既无「观片手记与评价」也无旧版「个人总结」）
+  if (!/^#+\s*(?:观片手记与评价|个人总结)\s*$/m.test(updated)) {
+    const defaultGuide =
+      '<!-- 观片手札：支持在番剧档案馆「观片手札」面板可视化管理，或直接按 "> [!quote] [吐槽|短评|长评] [全剧|EP01|EP01-03] [12:34]" 格式手写编辑 -->';
+    updated = `${updated.trimEnd()}\n\n# 观片手记与评价\n\n${defaultGuide}\n`;
+    reasons.push("补齐「观片手记与评价」手札区块");
+  }
+
+  // 8. 同步动画信息卡 Callout 与 Frontmatter 一致性
+  const calloutSynced = syncNoteCalloutFromFrontmatter(updated);
+  if (calloutSynced !== updated) {
+    updated = calloutSynced;
+    if (!reasons.includes("同步动画信息表格与属性一致性")) {
+      reasons.push("同步动画信息表格与属性一致性");
+    }
+  }
+
+  return {
+    isTargetAnimeNote: true,
+    needsUpgrade: updated !== source,
+    reasons,
+    upgradedContent: updated
+  };
+}
+
+const TAG_EQUIVALENT_GROUPS = [
+  ["百合", "轻百", "橘里橘气", "yuri", "gl", "girls love", "少女爱"],
+  ["漫改", "漫画改", "漫画改编"],
+  ["轻改", "轻小说改", "小说改", "轻小说改编", "小说改编"],
+  ["游戏改", "游戏改编", "gal改", "galgame改"],
+  ["原创", "原创动画", "original"],
+  ["日常", "空气系", "轻日常"],
+  ["芳文社", "kirara", "きらら"],
+  ["治愈", "治愈系"],
+  ["科幻", "sf", "sci-fi"],
+  ["奇幻", "异世界", "魔法"],
+  ["机战", "萝卜", "mecha"]
+];
+
+function expandTagEquivalents(rawToken) {
+  const clean = String(rawToken || "")
+    .replace(/^#+/, "")
+    .trim()
+    .toLowerCase();
+  if (!clean) return [];
+  const out = new Set([clean]);
+  for (const grp of TAG_EQUIVALENT_GROUPS) {
+    // Only bidirectional-expand exact canonical aliases (first 6 groups are strict synonyms; for broader groups, only expand when exact head matches)
+    const lowerGrp = grp.map((x) => x.toLowerCase());
+    if (lowerGrp[0] === clean) {
+      lowerGrp.forEach((x) => out.add(x));
+    } else if (lowerGrp.slice(0, 5).includes(clean) && ["百合", "漫改", "轻改", "游戏改", "原创", "日常", "芳文社", "治愈", "科幻"].includes(grp[0])) {
+      out.add(lowerGrp[0]);
+      if (grp[0] === "百合") {
+        ["百合", "轻百", "yuri", "gl", "橘里橘气"].forEach((x) => out.add(x));
+      } else {
+        lowerGrp.forEach((x) => out.add(x));
+      }
+    }
+  }
+  return Array.from(out);
+}
+
+function matchesTagOrMetaQuery(item, rawToken) {
+  const equivalents = expandTagEquivalents(rawToken);
+  if (!equivalents.length) return true;
+  const tagStr = String(item?.tags || "").toLowerCase();
+  const tagTokens = tagStr
+    .split(/[,，;；\s#\[\]"'|/]+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const metaHay = [
+    item?.animeType,
+    item?.studio,
+    item?.director,
+    item?.name,
+    item?.japaneseName,
+    item?.year,
+    item?.season
+  ]
+    .filter(Boolean)
+    .join(" | ")
+    .toLowerCase();
+
+  return equivalents.some((eq) => {
+    if (eq.length <= 2 && /^[a-z]+$/.test(eq)) {
+      // Short ASCII alias like 'gl' or 'sf' must match a whole token to avoid false positives in substrings
+      return tagTokens.includes(eq);
+    }
+    return (
+      tagTokens.some((t) => t === eq || t.includes(eq)) ||
+      tagStr.includes(eq) ||
+      metaHay.includes(eq)
+    );
+  });
+}
+
+function extractWatchUrlFromContent(content, fields = null) {
+  if (fields && typeof fields === "object") {
+    const fmRaw = cleanValue(fields.观看网址 || fields.在线观看 || fields.播放链接 || "");
+    if (fmRaw && fmRaw !== "未设置" && fmRaw !== "无") {
+      const md = fmRaw.match(/\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i);
+      if (md && md[1]) return md[1].trim();
+      const bare = fmRaw.match(/(https?:\/\/\S+)/i);
+      if (bare && bare[1]) return bare[1].trim();
+    }
+  }
+  const text = String(content || "");
+  const lineMatch = text.match(/^\*\*观看网址\*\*\s*[：:]\s*(.+)$/m);
+  if (!lineMatch || !lineMatch[1]) return "";
+  const raw = lineMatch[1].trim();
+  if (!raw || raw === "未设置" || raw === "无") return "";
+  const mdLink = raw.match(/\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/i);
+  if (mdLink && mdLink[1]) return mdLink[1].trim();
+  const bareUrl = raw.match(/(https?:\/\/\S+)/i);
+  return bareUrl && bareUrl[1] ? bareUrl[1].trim() : "";
+}
+
+function classifyWatchUrl(rawUrl) {
+  const url = String(rawUrl || "").trim();
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return { kind: "none", url: "", siteLabel: "" };
+  }
+  if (/^https?:\/\/(?:www\.)?(?:bgm\.tv|bangumi\.tv|chii\.in|netaba\.re)\b/i.test(url)) {
+    return { kind: "bangumi_info", url, siteLabel: "Bangumi" };
+  }
+  if (/bilibili\.com|b23\.tv/i.test(url)) return { kind: "streaming", url, siteLabel: "B站" };
+  if (/gamer\.com\.tw/i.test(url)) return { kind: "streaming", url, siteLabel: "动画疯" };
+  if (/acfun\.cn/i.test(url)) return { kind: "streaming", url, siteLabel: "AcFun" };
+  if (/netflix\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "Netflix" };
+  if (/youtube\.com|youtu\.be/i.test(url)) return { kind: "streaming", url, siteLabel: "YouTube" };
+  if (/iqiyi\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "爱奇艺" };
+  if (/v\.qq\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "腾讯视频" };
+  if (/youku\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "优酷" };
+  if (/mgtv\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "芒果TV" };
+  if (/crunchyroll\.com/i.test(url)) return { kind: "streaming", url, siteLabel: "Crunchyroll" };
+  return { kind: "streaming", url, siteLabel: "播放页" };
+}
+
 module.exports = {
   cleanValue,
   parseFrontmatter,
   extractWatchedEpisodes,
+  extractWatchUrlFromContent,
+  classifyWatchUrl,
+  expandTagEquivalents,
+  matchesTagOrMetaQuery,
   inspectLocalFolder,
   getLocalStatusText,
   updateFrontmatterField,
@@ -1902,5 +2278,6 @@ module.exports = {
   normalizeReviewEntry,
   parseNoteReviewsSection,
   formatReviewToMarkdownBlock,
-  updateNoteReviewsSection
+  updateNoteReviewsSection,
+  inspectAndUpgradeAnimeNoteContent
 };

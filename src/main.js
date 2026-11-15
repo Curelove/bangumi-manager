@@ -73,7 +73,8 @@ let {
   addNoteTag,
   removeNoteTag,
   syncNoteCalloutFromFrontmatter,
-  openLocalPathSafely
+  openLocalPathSafely,
+  inspectAndUpgradeAnimeNoteContent
 } = noteUtils;
 
 const netabaTrendService = require("./netaba-trend-service.js");
@@ -96,11 +97,16 @@ const {
 } = require("./onboarding-sample-service.js");
 
 const bangumiApi = require("./bangumi-api.js");
+const noteManager = require("./note-manager.js");
+const bilibiliLiveService = require("./bilibili-live-service.js");
+const animeActivityService = require("./anime-activity-and-random-service.js");
 const importManager = require("./import-manager.js");
 const batchImportManager = require("./batch-import-manager.js");
 const createSettingsTabClass = require("./settings-tab.js");
 const { RatingSyncManager } = require("./rating-sync-manager.js");
 const createNetabaModals = require("./netaba-modals.js");
+const animeDownloadService = require("./anime-download-service.js");
+const v07Core = require("./v07-core.js");
 
 var DEFAULT_SETTINGS = {
   mode: "lazy",
@@ -112,7 +118,7 @@ var DEFAULT_SETTINGS = {
   baseFolderPath: "动画笔记/追番广场",
   baseFolderPathManuallySet: false,
   enableBaseFileGeneration: false,
-  localAnimeRoot: "D:/ACG/Obsidian ACG",
+  localAnimeRoot: "",
   checkIntervalSeconds: 60,
   checkOnStartup: true,
   checkOnSave: true,
@@ -188,6 +194,8 @@ var DEFAULT_SETTINGS = {
   roxyForceLightweight2D: false,
   roxyQuietMode: false,
   roxyPullToTopHintDismissed: false,
+  roxySmartGestureHints: true,
+  roxyGestureMemory: {},
   dashboardScoreRankTab: "personal",
   dashboardScoreRankLimit: 10,
   enableRoxy3DMascot: true,
@@ -198,7 +206,7 @@ var DEFAULT_SETTINGS = {
   deskPinnedSeasonsCustomized: false,
   enableDownloadAssistant: true,
   enableComicatIntegration: true,
-  comicatBaseUrl: "http://www.comicat.org",
+  comicatBaseUrl: "https://www.comicat.org",
   customDownloadSearchUrlTemplate: "https://mikanani.me/Home/Search?searchstr={keyword}",
   enableQbittorrentIntegration: true,
   qbittorrentExecutablePath: "",
@@ -235,13 +243,36 @@ var DEFAULT_SETTINGS = {
   illustRowHeight: 240,
   illustCaptionMode: "hover",
   illustrationCollection: [],
-  voiceArchiveFolder: "附件/台词音声库",
+  voiceArchiveFolder: "附件/音声典藏",
   voiceArchivePadBeforeSec: 0.25,
   voiceArchivePadAfterSec: 0.35,
   voiceCollection: [],
   gameLibraryRootFolder: "",
   gameNoteFolder: "游戏笔记",
   gameCollection: [],
+  gameCustomGroups: [],
+  gameGroups: [],
+  gameUi: {
+    defaultAspect: "2:3",
+    sort: "recent",
+    groupMode: "none",
+    status: "all"
+  },
+  archiveAppearance: {
+    theme: "follow",
+    motion: true,
+    roxyArt: true
+  },
+  v07PickScope: "queue",
+  archiveVisualTheme: "obsidian",
+  archiveDynamicThemeMotion: true,
+  bilibiliLiveInitialized: false,
+  bilibiliLiveRooms: [],
+  bilibiliLiveMonitorEnabled: true,
+  bilibiliLiveSystemNotifyEnabled: true,
+  bilibiliLivePollIntervalSec: 120,
+  bilibiliLiveNotifiedSessions: {},
+  animeActivityLog: [],
   ffmpegCustomPath: ""
 };
 
@@ -329,8 +360,8 @@ var BangumiScoreDashboardView = class extends ItemView {
       filterMode: "watching"
     });
     if (this.space3DInstance && this.space3DInstance.exitButton) {
-      this.space3DInstance.exitButton.textContent = "↖ 返回二维案头编目台";
-      this.space3DInstance.exitButton.title = "返回番剧档案馆 · 二维案头编目台";
+      this.space3DInstance.exitButton.textContent = "← 返回档案馆";
+      this.space3DInstance.exitButton.title = "返回番剧档案馆";
     }
     this.space3DInstance.onExit3D = () => {
       this.exit3D();
@@ -412,6 +443,28 @@ var BangumiScoreDashboardView = class extends ItemView {
     if (this._resizeSettleTimer) {
       clearTimeout(this._resizeSettleTimer);
       this._resizeSettleTimer = null;
+    }
+    if (this.contentEl) {
+      this.contentEl.querySelectorAll(".bm7-root, .curator-desk-root").forEach((el) => {
+        if (el._roxyRigCtrl && typeof el._roxyRigCtrl.destroy === "function") {
+          try { el._roxyRigCtrl.destroy(); } catch (_) {}
+          el._roxyRigCtrl = null;
+        }
+      });
+      this.contentEl.querySelectorAll("[data-has-catalog-ro]").forEach((el) => {
+        if (el._catalogResizeObserver && typeof el._catalogResizeObserver.disconnect === "function") {
+          try { el._catalogResizeObserver.disconnect(); } catch (_) {}
+          el._catalogResizeObserver = null;
+        }
+      });
+    }
+    if (this.plugin && this.plugin._illustWatcherMap instanceof Map && this.contentEl) {
+      for (const [hostEl, cleanup] of Array.from(this.plugin._illustWatcherMap.entries())) {
+        if (!hostEl || !hostEl.isConnected || this.contentEl.contains(hostEl)) {
+          try { cleanup(); } catch (_) {}
+          this.plugin._illustWatcherMap.delete(hostEl);
+        }
+      }
     }
     if (this.plugin && typeof this.plugin._activeIllustWatcherCleanup === "function") {
       try {
@@ -577,8 +630,14 @@ var BangumiManagerPlugin = class extends Plugin {
         this.settings[k] = normVal;
       }
     }
+    if (typeof this.settings.roxySmartGestureHints !== "boolean") {
+      this.settings.roxySmartGestureHints = true;
+    }
+    roxyMascotService.ensureGestureMemory(this);
     this.settings.voiceArchiveFolder =
-      this.normalizeDashboardPath(this.settings.voiceArchiveFolder) || "附件/台词音声库";
+      this.normalizeDashboardPath(
+        multiHallArchiveService.resolveDefaultVoiceArchiveFolder(this)
+      ) || "附件/音声典藏";
     if (typeof this.settings.illustExcludeAI !== "boolean") {
       this.settings.illustExcludeAI = true;
     }
@@ -758,15 +817,51 @@ var BangumiManagerPlugin = class extends Plugin {
     );
     this.addCommand({
       id: "open-score-dashboard",
-      name: "打开番剧档案馆（二维案头编目台）",
+      name: "打开番剧档案馆",
       callback: async () => {
         await this.openScoreDashboardView();
       }
     });
 
     this.addCommand({
+      id: "backfill-bangumi-subject-tags",
+      name: "一键从 Bangumi 补全已有番剧题材标签",
+      callback: async () => {
+        await this.backfillExistingAnimeTagsFromBangumi({ onlyMissing: true });
+      }
+    });
+
+    this.addCommand({
+      id: "pick-random-anime-episode",
+      name: "随机看一集动画（推荐范围）",
+      callback: async () => {
+        const items = await this.collectDashboardItems();
+        const picked = animeActivityService.pickRandomAnimeEpisode(this, items, { scopeId: "default_active" });
+        if (!picked) {
+          new Notice("当前还没有可随机抽取的番剧，请先导入动画笔记。");
+          return;
+        }
+        await animeActivityService.launchPickedAnimeEpisode(this, picked);
+      }
+    });
+
+    this.addCommand({
+      id: "refresh-bilibili-live-rooms",
+      name: "立即刷新关注的 B 站直播间状态",
+      callback: async () => {
+        const list = await bilibiliLiveService.refreshBilibiliLiveRooms(this, { allowNotify: true });
+        const liveNames = list.filter((r) => r.liveStatus === 1).map((r) => r.name);
+        new Notice(
+          liveNames.length > 0
+            ? `直播状态已刷新：${liveNames.join("、")} 正在直播中`
+            : `已刷新 ${list.length} 个关注直播间，当前均未开播`
+        );
+      }
+    });
+
+    this.addCommand({
       id: "open-bangumi-3d-space",
-      name: "打开番剧档案馆（三维原画档案室）",
+      name: "打开番剧档案馆（3D 原画展厅）",
       callback: async () => {
         await this.openScoreDashboardView();
         const leaves = this.app.workspace.getLeavesOfType(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE);
@@ -841,6 +936,13 @@ var BangumiManagerPlugin = class extends Plugin {
         await this.openBatchStatusManager();
       }
     });
+    this.addCommand({
+      id: "inspect-and-upgrade-legacy-notes",
+      name: "检查并兼容升级旧版动画笔记",
+      callback: async () => {
+        await this.inspectAndUpgradeLegacyNotes({ dryRun: false, showNotice: true });
+      }
+    });
     this.registerEvent(
       this.app.vault.on(
         "modify",
@@ -872,10 +974,7 @@ var BangumiManagerPlugin = class extends Plugin {
             return;
           }
 
-          if (
-            this.ratingSync &&
-            this.ratingSync.isSelfWrite(file.path)
-          ) {
+          if (this.isSelfWritingNote(file.path)) {
             return;
           }
 
@@ -885,6 +984,9 @@ var BangumiManagerPlugin = class extends Plugin {
           this.saveCheckTimer = setTimeout(
             async () => {
               try {
+                if (this.isSelfWritingNote(file.path)) {
+                  return;
+                }
                 await this.checkOneLocalStatus(
                   file
                 );
@@ -903,7 +1005,7 @@ var BangumiManagerPlugin = class extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
         if (file && file.extension === "md" && characterArchiveService.isCharacterNotePath(this, file)) {
-          if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) {
+          if (this.isSelfWritingNote(file.path)) {
             return;
           }
           if (!this.characterNoteSyncTimers) {
@@ -928,10 +1030,7 @@ var BangumiManagerPlugin = class extends Plugin {
         if (!this.isTargetNote(file)) {
           return;
         }
-        if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) {
-          return;
-        }
-        if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) {
+        if (this.isSelfWritingNote(file.path)) {
           return;
         }
 
@@ -1022,7 +1121,7 @@ var BangumiManagerPlugin = class extends Plugin {
             document
               .querySelectorAll('[data-stat-role="workspace-gallery-badge"]')
               .forEach((el) => {
-                el.textContent = `画作 ${latestCount} 幅`;
+                el.textContent = `${latestCount}`;
               });
           } catch (_) {}
         }
@@ -1145,10 +1244,36 @@ var BangumiManagerPlugin = class extends Plugin {
           console.warn("[Bangumi Manager] 画册典藏磁盘对账启动同步失败:", e);
         }
         try {
+          const resolvedVoiceDir = multiHallArchiveService.resolveDefaultVoiceArchiveFolder(this);
+          if (resolvedVoiceDir && this.settings.voiceArchiveFolder !== resolvedVoiceDir) {
+            this.settings.voiceArchiveFolder = resolvedVoiceDir;
+            await this.saveData(this.settings);
+          }
+        } catch (_) {}
+        try {
           await this.refreshOpenDashboardViews();
         } catch (e) {
           console.warn("[Bangumi Manager] 启动时刷新已打开档案馆视图失败:", e);
         }
+        this._startupRssTimer = window.setTimeout(async () => {
+          this._startupRssTimer = null;
+          if (this.unloaded) return;
+          const subs = Array.isArray(this.settings?.rssSubscriptions) ? this.settings.rssSubscriptions : [];
+          if (subs.length === 0) return;
+          try {
+            await animeDownloadService.sanitizeDeadQbittorrentComicatRules(this);
+            await animeDownloadService.pollPluginRssSubscriptions(this);
+          } catch (e) {
+            console.warn("[Bangumi Manager] qBittorrent 规则清理与磁力追更轮询异常:", e);
+          }
+        }, 6200);
+        this.registerInterval(
+          window.setInterval(() => {
+            const subs = Array.isArray(this.settings?.rssSubscriptions) ? this.settings.rssSubscriptions : [];
+            if (subs.length === 0) return;
+            animeDownloadService.pollPluginRssSubscriptions(this).catch(() => {});
+          }, 25 * 60 * 1000)
+        );
       });
     }
     if (this.settings.checkOnStartup) {
@@ -1174,20 +1299,42 @@ var BangumiManagerPlugin = class extends Plugin {
     this.refreshManagerRibbon();
     this.refreshDashboardRibbon();
     this.startStatusTimer();
+    this._biliLiveUnloaded = false;
+    bilibiliLiveService.startBilibiliLiveMonitor(this);
   }
   onunload() {
     this.unloaded = true;
+    this._biliLiveUnloaded = true;
+    bilibiliLiveService.stopBilibiliLiveMonitor(this);
 
     this.stopStatusTimer();
     clearTimeout(this.saveCheckTimer);
     clearTimeout(this.startupTimer);
+    clearTimeout(this._startupRssTimer);
     clearTimeout(this.dashboardAutoRefreshTimer);
     clearTimeout(this._galleryVaultSyncTimer);
+    if (this._illustWatcherMap instanceof Map) {
+      for (const cleanup of this._illustWatcherMap.values()) {
+        try { cleanup(); } catch (_) {}
+      }
+      this._illustWatcherMap.clear();
+    }
     if (typeof this._activeIllustWatcherCleanup === "function") {
       try {
         this._activeIllustWatcherCleanup();
       } catch (_) {}
       this._activeIllustWatcherCleanup = null;
+    }
+    if (typeof document !== "undefined") {
+      for (const styleId of [
+        "atelier-cel-style",
+        "bangumi-roxy-3d-style",
+        "bangumi-settings-spotlight-styles",
+        "bm7-portal-host"
+      ]) {
+        const node = document.getElementById(styleId);
+        if (node) node.remove();
+      }
     }
     if (this.calloutSyncTimers) {
       for (const t of this.calloutSyncTimers.values()) {
@@ -1218,7 +1365,10 @@ var BangumiManagerPlugin = class extends Plugin {
     }
 
     await this.saveData(this.settings);
-    this.startStatusTimer();
+    const nextSeconds = Math.max(10, Number(this.settings.checkIntervalSeconds) || 60);
+    if (!this.statusTimer || this._activeStatusIntervalSec !== nextSeconds) {
+      this.startStatusTimer();
+    }
   }
   startStatusTimer() {
     if (this.unloaded) {
@@ -1232,6 +1382,7 @@ var BangumiManagerPlugin = class extends Plugin {
         this.settings.checkIntervalSeconds
       ) || 60
     );
+    this._activeStatusIntervalSec = seconds;
     this.statusTimer = window.setInterval(
       async () => {
         await this.checkAllLocalStatus(false);
@@ -1390,7 +1541,8 @@ getCurrentSeasonName() {
       this.settings.gameImageFolder || "附件/游戏封面"
     );
     await this.ensureVaultFolder(
-      this.settings.voiceArchiveFolder || "附件/台词音声库"
+      this.settings.voiceArchiveFolder ||
+        multiHallArchiveService.resolveDefaultVoiceArchiveFolder(this)
     );
     if (this.settings.enableBaseFileGeneration === true) {
       await this.createBaseFileIfMissing(false);
@@ -1501,7 +1653,7 @@ getCurrentSeasonName() {
   }
 
   /**
-   * 自动化路径迁移引擎：支持所有图片分类目录、台词音声目录、动画笔记目录、角色典藏笔记目录、游戏笔记目录、追番看板路径等变更时的自动迁移与引用同步
+   * 自动化路径迁移引擎：支持所有图片分类目录、音声典藏目录、动画笔记目录、角色典藏笔记目录、游戏笔记目录、追番看板路径等变更时的自动迁移与引用同步
    */
   async migrateVaultFolderPath(categoryKeyOrObj, oldRawPath, newRawPath, options = {}) {
     let categoryKey = categoryKeyOrObj;
@@ -1534,7 +1686,7 @@ getCurrentSeasonName() {
       reviewImageFolder: "观片手札图片目录",
       illustrationGalleryFolder: "画册典藏图片目录",
       gameImageFolder: "游戏典藏封面目录",
-      voiceArchiveFolder: "台词音声保存目录",
+      voiceArchiveFolder: "音声典藏保存目录",
       unifiedImageFolder: "全部图片附件目录"
     };
     const categoryLabel = options.categoryLabel || CATEGORY_LABELS[categoryKey] || categoryKey;
@@ -1560,7 +1712,7 @@ getCurrentSeasonName() {
     this.emitPathMigrationState();
 
     if (options.showNotice !== false) {
-      new Notice(`🔄 正在自动迁移「${categoryLabel}」(${oldPath} → ${newPath})...`, 4000);
+      new Notice(`正在自动迁移「${categoryLabel}」(${oldPath} → ${newPath})...`, 4000);
     }
 
     try {
@@ -2025,7 +2177,7 @@ getCurrentSeasonName() {
 
       if (options.showNotice !== false) {
         new Notice(
-          `✅ 「${categoryLabel}」自动迁移完成：已迁移 ${this.pathMigrationState.movedFiles} 个文件，同步更新 ${this.pathMigrationState.updatedNotes} 篇笔记引用。`,
+          `「${categoryLabel}」自动迁移完成：已迁移 ${this.pathMigrationState.movedFiles} 个文件，同步更新 ${this.pathMigrationState.updatedNotes} 篇笔记引用。`,
           5500
         );
       }
@@ -2046,7 +2198,7 @@ getCurrentSeasonName() {
       this.emitPathMigrationState();
 
       if (options.showNotice !== false) {
-        new Notice(`❌ 「${categoryLabel}」路径迁移失败：${msg}`, 7000);
+        new Notice(`「${categoryLabel}」路径迁移失败：${msg}`, 7000);
       }
       return { success: false, error: msg };
     }
@@ -2612,6 +2764,20 @@ views:
     if (!isDesktopNodeAvailable()) {
       return "skipped";
     }
+    // 优先通过内存 metadataCache 快速短路，避免对无本地目录的笔记每 60s 重复读盘
+    const cachedMeta = this.app?.metadataCache?.getFileCache?.(file)?.frontmatter;
+    if (cachedMeta) {
+      const rawTags = cachedMeta.tags;
+      const tagStr = Array.isArray(rawTags) ? rawTags.join(",") : String(rawTags || "");
+      if (!tagStr.includes("bangumi")) {
+        return "skipped";
+      }
+      const cachedDl = cleanValue(cachedMeta["\u4E0B\u8F7D\u8DEF\u5F84"]);
+      const cachedStatus = cleanValue(cachedMeta["\u672C\u5730\u66F4\u65B0\u72B6\u6001"]);
+      if ((!cachedDl || cachedDl === "\u65E0") && cachedStatus === "\u672A\u8BBE\u7F6E\u4E0B\u8F7D\u8DEF\u5F84") {
+        return "skipped";
+      }
+    }
     const content = await this.app.vault.read(file);
     const frontmatter = parseFrontmatter(content);
     if (!frontmatter) {
@@ -2642,10 +2808,7 @@ views:
     if (newContent === content) {
       return "skipped";
     }
-    await this.app.vault.modify(
-      file,
-      newContent
-    );
+    await this.modifyNoteSafely(file, newContent, 2600);
     return "updated";
   }
   async generateSeasonViews(showNotice) {
@@ -3082,8 +3245,105 @@ if (this.settings.seasonViewMode === "current") {
       : null;
   }
 
+  getSubjectTagsCacheFilePath() {
+    if (!isDesktopNodeAvailable()) return "";
+    const fs = tryRequireNode("fs");
+    const path = tryRequireNode("path");
+    if (!fs || !path) return "";
+    const vaultBase =
+      this.app?.vault?.adapter && typeof this.app.vault.adapter.getBasePath === "function"
+        ? this.app.vault.adapter.getBasePath()
+        : "";
+    if (!vaultBase) return "";
+    const configDir = String(this.app?.vault?.configDir || ".obsidian");
+    return path.join(vaultBase, configDir, "plugins", "bangumi-manager", ".cache", "subject-tags.json");
+  }
+
+  loadSubjectTagsCache() {
+    if (this._subjectTagsCacheObj && typeof this._subjectTagsCacheObj === "object") {
+      return this._subjectTagsCacheObj;
+    }
+    this._subjectTagsCacheObj = {};
+    const cacheFile = this.getSubjectTagsCacheFilePath();
+    if (cacheFile) {
+      const fs = tryRequireNode("fs");
+      try {
+        if (fs && fs.existsSync(cacheFile)) {
+          const parsed = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+          if (parsed && typeof parsed === "object") {
+            this._subjectTagsCacheObj = parsed;
+          }
+        }
+      } catch (e) {
+        console.warn("[Bangumi Manager] 读取题材标签本地缓存失败:", e);
+      }
+    }
+    return this._subjectTagsCacheObj;
+  }
+
+  saveSubjectTagsCache() {
+    const cacheFile = this.getSubjectTagsCacheFilePath();
+    if (!cacheFile || !this._subjectTagsCacheObj) return;
+    const fs = tryRequireNode("fs");
+    const path = tryRequireNode("path");
+    if (!fs || !path) return;
+    try {
+      const dir = path.dirname(cacheFile);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(this._subjectTagsCacheObj, null, 2), "utf8");
+    } catch (e) {
+      console.warn("[Bangumi Manager] 保存题材标签本地缓存失败:", e);
+    }
+  }
+
+  async ensureSubjectTagsCacheHydrated(items) {
+    if (this._isHydratingSubjectTagsCache || !Array.isArray(items) || items.length === 0) return;
+    const cacheObj = this.loadSubjectTagsCache();
+    const missingIds = [];
+    const seen = new Set();
+    for (const it of items) {
+      const sid = String(it?.subjectId || "").trim();
+      if (!sid || !/^\d+$/.test(sid) || seen.has(sid)) continue;
+      seen.add(sid);
+      if (!cacheObj[sid] || !Array.isArray(cacheObj[sid].tags)) {
+        missingIds.push(sid);
+      }
+    }
+    if (missingIds.length === 0) return;
+
+    this._isHydratingSubjectTagsCache = true;
+    try {
+      const fetchedMap = await bangumiApi.getSubjectTagsBatch(missingIds, {
+        concurrency: 5,
+        delayMs: 90
+      });
+      let addedCount = 0;
+      for (const sid of missingIds) {
+        const entry = fetchedMap.get(sid);
+        if (entry && (Array.isArray(entry.tags) || entry.date)) {
+          cacheObj[sid] = {
+            tags: Array.isArray(entry.tags) ? entry.tags : [],
+            date: String(entry.date || ""),
+            updatedAt: Date.now()
+          };
+          addedCount++;
+        }
+      }
+      if (addedCount > 0) {
+        this.saveSubjectTagsCache();
+        await this.refreshOpenDashboardViews().catch(() => {});
+      }
+    } catch (err) {
+      console.warn("[Bangumi Manager] 自动预热番剧题材标签缓存异常:", err);
+    } finally {
+      this._isHydratingSubjectTagsCache = false;
+    }
+  }
+
   async collectDashboardItems() {
     const result = [];
+    const subjectTagsCache = this.loadSubjectTagsCache();
+    let hasUncachedSubjectTags = false;
 
     for (const file of this.app.vault.getMarkdownFiles()) {
       if (!this.isTargetNote(file)) {
@@ -3097,31 +3357,80 @@ if (this.settings.seasonViewMode === "current") {
         continue;
       }
 
-      let rawTags = cleanValue(parsed.fields.tags || "");
+      const bgmLink = cleanValue(parsed.fields.BGM链接);
+      const subjectId = bangumiApi.getSubjectId(bgmLink);
+
+      const tagBucket = [];
+      const pushRawTagString = (str) => {
+        if (!str) return;
+        String(str)
+          .split(/[,，;；#\[\]"']+/)
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .forEach((t) => tagBucket.push(t));
+      };
+
+      pushRawTagString(cleanValue(parsed.fields.tags || ""));
+      pushRawTagString(cleanValue(parsed.fields.标签 || ""));
+      pushRawTagString(cleanValue(parsed.fields.题材 || ""));
 
       if (this.app.metadataCache) {
         const cache = this.app.metadataCache.getFileCache(file);
         if (cache && cache.frontmatter && cache.frontmatter.tags) {
           const cacheTags = cache.frontmatter.tags;
           if (Array.isArray(cacheTags)) {
-            const joined = cacheTags.join(", ");
-            rawTags = rawTags ? `${rawTags}, ${joined}` : joined;
+            cacheTags.forEach((t) => pushRawTagString(t));
           } else if (typeof cacheTags === "string" && cacheTags) {
-            rawTags = rawTags ? `${rawTags}, ${cacheTags}` : cacheTags;
+            pushRawTagString(cacheTags);
           }
+        }
+        if (cache && Array.isArray(cache.tags) && cache.tags.length > 0) {
+          cache.tags.forEach((t) => pushRawTagString(String((t && t.tag) || "").replace(/^#/, "")));
         }
       }
 
-      if (!String(rawTags).includes("bangumi")) {
+      const hasBangumiMarker =
+        tagBucket.some((t) => t.toLowerCase().includes("bangumi")) || Boolean(subjectId);
+      if (!hasBangumiMarker) {
         continue;
       }
 
-      const bgmLink = cleanValue(parsed.fields.BGM链接);
-      const subjectId = bangumiApi.getSubjectId(bgmLink);
+      const cachedMeta = subjectId ? subjectTagsCache[String(subjectId)] : null;
+      if (subjectId) {
+        if (cachedMeta && Array.isArray(cachedMeta.tags)) {
+          cachedMeta.tags.forEach((t) => pushRawTagString(t));
+        } else {
+          hasUncachedSubjectTags = true;
+        }
+      }
+
+      const dedupTags = [];
+      const seenLower = new Set();
+      for (const tk of tagBucket) {
+        const lw = tk.toLowerCase();
+        if (seenLower.has(lw)) continue;
+        seenLower.add(lw);
+        dedupTags.push(tk);
+      }
+      if (!seenLower.has("bangumi")) {
+        dedupTags.unshift("bangumi");
+      }
+      const rawTags = dedupTags.join(", ");
+
       const airDateMatch = String(content || "").match(/^\|\s*开播日期\s*\|\s*([^|\r\n]+?)\s*\|/m);
       const airDateText =
         cleanValue(parsed.fields.开播日期) ||
-        (airDateMatch ? cleanValue(airDateMatch[1]) : "");
+        (airDateMatch ? cleanValue(airDateMatch[1]) : "") ||
+        (cachedMeta?.date || "");
+      let resolvedYear = cleanValue(parsed.fields.开播年份);
+      let resolvedSeason = cleanValue(parsed.fields.开播季度);
+      if ((!resolvedYear || !resolvedSeason || resolvedSeason === "未知季度") && airDateText) {
+        const inferred = noteManager.getSeasonInfo(airDateText);
+        if (!resolvedYear && inferred.year) resolvedYear = inferred.year;
+        if ((!resolvedSeason || resolvedSeason === "未知季度") && inferred.season) {
+          resolvedSeason = inferred.season;
+        }
+      }
 
       result.push({
         file,
@@ -3161,9 +3470,11 @@ if (this.settings.seasonViewMode === "current") {
           parsed.fields.BGM评分 ||
           parsed.fields["BGM 评分"]
         ),
-        year: cleanValue(parsed.fields.开播年份),
-        season: cleanValue(parsed.fields.开播季度),
+        year: resolvedYear,
+        season: resolvedSeason,
         airDate: airDateText,
+        recordDate: cleanValue(parsed.fields.记录日期),
+        watchUrl: noteUtils.extractWatchUrlFromContent(content, parsed.fields),
         tags: rawTags,
         totalEpisodes: cleanValue(parsed.fields.总集数),
         watchedEpisodes: extractWatchedEpisodes(content),
@@ -3187,6 +3498,9 @@ if (this.settings.seasonViewMode === "current") {
         setSamplePreviewActive(this, false);
       }
       this._samplePreviewItemsCache = null;
+      if (hasUncachedSubjectTags) {
+        this.ensureSubjectTagsCacheHydrated(result).catch(() => {});
+      }
       return result;
     }
 
@@ -3274,7 +3588,7 @@ if (this.settings.seasonViewMode === "current") {
 
             await leaf.openFile(item.file);
           } else if (item.isSamplePreviewItem) {
-            new Notice("✨ 当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
+            new Notice("当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
           }
         };
 
@@ -3803,11 +4117,11 @@ if (this.settings.seasonViewMode === "current") {
     const linkedStage = barWrap.createDiv("curator-watchstate-linked-stage");
 
     const statesConfig = [
-      { key: "已看", color: "var(--color-green, #28a745)", label: "已看" },
-      { key: "在看", color: "var(--interactive-accent)", label: "在看" },
-      { key: "想看", color: "var(--color-orange, #ff9900)", label: "想看" },
-      { key: "抛弃", color: "var(--text-muted, #6c757d)", label: "抛弃" },
-      { key: "未设置", color: "var(--background-modifier-border, #888888)", label: "未设置" }
+      { key: "已看", stateCls: "is-state-已看", label: "已看" },
+      { key: "在看", stateCls: "is-state-在看", label: "在看" },
+      { key: "想看", stateCls: "is-state-想看", label: "想看" },
+      { key: "抛弃", stateCls: "is-state-抛弃", label: "抛弃" },
+      { key: "未设置", stateCls: "is-state-未设置", label: "未设置" }
     ];
 
     // 默认选中「已看」，若「已看」为0则选当前占比最高的状态
@@ -3957,10 +4271,9 @@ if (this.settings.seasonViewMode === "current") {
       const pct = ((count / items.length) * 100).toFixed(1);
 
       if (count > 0) {
-        const seg = stackedBar.createDiv("bangumi-stacked-segment is-interactive");
+        const seg = stackedBar.createDiv(`bangumi-stacked-segment is-interactive ${cfg.stateCls}`);
         seg.dataset.stateKey = cfg.key;
         seg.style.width = `${pct}%`;
-        seg.style.backgroundColor = cfg.color;
         seg.title = `点击查看「${cfg.label}」状态详情：${count} 部 (${pct}%)`;
         seg.onclick = (e) => {
           e.preventDefault();
@@ -3974,8 +4287,7 @@ if (this.settings.seasonViewMode === "current") {
       if (count > 0 || cfg.key !== "未设置") {
         const itemEl = legendWrap.createDiv("bangumi-stacked-legend-item is-interactive");
         itemEl.dataset.stateKey = cfg.key;
-        const dot = itemEl.createSpan("bangumi-legend-dot");
-        dot.style.backgroundColor = cfg.color;
+        itemEl.createSpan(`bangumi-legend-dot ${cfg.stateCls}`);
         itemEl.createSpan({ text: `${cfg.label} ${count} 部 (${pct}%)` });
         itemEl.title = `点击查看「${cfg.label}」联动详情`;
         itemEl.onclick = (e) => {
@@ -4038,19 +4350,19 @@ if (this.settings.seasonViewMode === "current") {
     let deltaDesc = "";
     let deltaBadgeClass = "is-balanced";
     if (avgDelta >= 0.5) {
-      deltaDesc = "✨ 粉丝偏好/宽容包容型：对作品包容度高，显著高于大众评分基准。";
+      deltaDesc = "宽容偏爱型：对作品包容度高，显著高于大众评分基准。";
       deltaBadgeClass = "is-generous";
     } else if (avgDelta > 0.1) {
-      deltaDesc = "🌟 略高于大众：整体评价普遍略高于 Bangumi 大众基准。";
+      deltaDesc = "略高于大众：整体评价普遍略高于 Bangumi 大众基准。";
       deltaBadgeClass = "is-generous";
     } else if (avgDelta >= -0.1) {
-      deltaDesc = "🎯 口碑严密契合：个人审美偏好与 Bangumi 大众评分基准高度一致。";
+      deltaDesc = "口碑严密契合：个人审美偏好与 Bangumi 大众评分基准高度一致。";
       deltaBadgeClass = "is-balanced";
     } else if (avgDelta > -0.5) {
-      deltaDesc = "🔍 略严于大众：评分较为克制审慎，略低于大众均分。";
+      deltaDesc = "略严于大众：评分较为克制审慎，略低于大众均分。";
       deltaBadgeClass = "is-strict";
     } else {
-      deltaDesc = "⚔️ 严格理性型：标准严苛，去滤镜直击核心，明显低于大众评分。";
+      deltaDesc = "严格理性型：标准严苛，去滤镜直击核心，明显低于大众评分。";
       deltaBadgeClass = "is-strict";
     }
 
@@ -4112,6 +4424,7 @@ if (this.settings.seasonViewMode === "current") {
       const listEl = panel.createDiv("bangumi-delta-list");
       listItems.forEach((c, idx) => {
         const row = listEl.createDiv("bangumi-delta-row");
+        this.bindAnimeItemQuickInteractions(row, c.item);
 
         row.createDiv({
           cls: "bangumi-delta-index",
@@ -4246,7 +4559,7 @@ if (this.settings.seasonViewMode === "current") {
 
       const head = drawer.createDiv("curator-chrono-header");
       head.createSpan({
-        text: `🌿 「${labelTitle}」收录作品时间树（共 ${groupItems.length} 部 · 按较前年份 → 较后年份排列）`
+        text: `「${labelTitle}」收录作品时间线（共 ${groupItems.length} 部 · 按早到晚排列）`
       });
       head.createSpan({
         cls: "curator-mono",
@@ -4377,6 +4690,13 @@ if (this.settings.seasonViewMode === "current") {
     if (totalTyped > 0) {
       const typeList = typeSection.createDiv("bangumi-type-list");
       const typeKeys = ["原创", "漫画改", "轻小说改", "游戏改", "其他"];
+      const typeClsMap = {
+        "原创": "is-type-original",
+        "漫画改": "is-type-manga",
+        "轻小说改": "is-type-novel",
+        "游戏改": "is-type-game",
+        "其他": "is-type-other"
+      };
 
       typeKeys.forEach((key) => {
         const groupItems = typeItemsMap[key] || [];
@@ -4392,7 +4712,7 @@ if (this.settings.seasonViewMode === "current") {
         });
 
         const track = row.createDiv("bangumi-type-track");
-        const bar = track.createDiv("bangumi-type-bar");
+        const bar = track.createDiv(`bangumi-type-bar ${typeClsMap[key] || "is-type-other"}`);
         bar.style.width = `${pct}%`;
 
         const countBtn = row.createEl("button", {
@@ -4475,22 +4795,27 @@ if (this.settings.seasonViewMode === "current") {
       return [];
     }
 
-    const targetTag = String(config.tag || "")
-      .trim()
-      .replace(/^#/, "")
-      .toLowerCase();
+    const rawTagQuery = String(config.tag || "").trim();
+    const requiredTags = rawTagQuery
+      ? rawTagQuery
+          .split(/[,，;；\s]+/)
+          .map((t) => t.replace(/^#/, "").trim().toLowerCase())
+          .filter(Boolean)
+      : [];
     const targetStatus = String(config.watchStatus || "").trim();
     const minMyScore = Number(config.minMyScore) || 0;
     const minBgmScore = Number(config.minBgmScore) || 0;
     const targetYear = String(config.year || "").trim();
     const targetSeason = String(config.season || "").trim();
+    const normalizeSeasonKey = (val) =>
+      String(val || "")
+        .trim()
+        .replace(/^0(\d月)/, "$1");
 
     return items.filter((item) => {
-      if (targetTag) {
-        const itemTags = String(item.tags || "").toLowerCase();
-        const tokens = itemTags.split(/[,;\s#\[\]"']+/).filter(Boolean);
-        const hasTag = tokens.some((t) => t === targetTag) || itemTags.includes(targetTag);
-        if (!hasTag) {
+      if (requiredTags.length > 0) {
+        const matchedAll = requiredTags.every((req) => noteUtils.matchesTagOrMetaQuery(item, req));
+        if (!matchedAll) {
           return false;
         }
       }
@@ -4523,13 +4848,141 @@ if (this.settings.seasonViewMode === "current") {
       }
 
       if (targetSeason) {
-        if (!item.season || !String(item.season).includes(targetSeason)) {
+        const normItemSeason = normalizeSeasonKey(item.season);
+        const normTargetSeason = normalizeSeasonKey(targetSeason);
+        if (!normItemSeason || !normItemSeason.includes(normTargetSeason)) {
           return false;
         }
       }
 
       return true;
     });
+  }
+
+  collectVaultGenreTagCloud(items, maxTags = 28) {
+    const counts = new Map();
+    const displayMap = new Map();
+    for (const it of Array.isArray(items) ? items : []) {
+      if (!it) continue;
+      const raw = String(it.tags || "");
+      const tokens = raw.split(/[,;\s#\[\]"']+/).map((t) => t.trim()).filter(Boolean);
+      const seenInNote = new Set();
+      for (const tk of tokens) {
+        const lower = tk.toLowerCase();
+        if (lower === "bangumi") continue;
+        if (seenInNote.has(lower)) continue;
+        seenInNote.add(lower);
+        counts.set(lower, (counts.get(lower) || 0) + 1);
+        if (!displayMap.has(lower)) displayMap.set(lower, tk);
+      }
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))
+      .slice(0, maxTags)
+      .map(([lower, count]) => ({ tag: displayMap.get(lower) || lower, count }));
+  }
+
+  async backfillExistingAnimeTagsFromBangumi(options = {}) {
+    if (this._isBackfillingBangumiTags) {
+      new Notice("正在从 Bangumi 补全番剧标签，请稍候...");
+      return { updated: 0, skipped: 0, total: 0 };
+    }
+    this._isBackfillingBangumiTags = true;
+    const onlyMissing = options.onlyMissing !== false;
+    const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+
+    try {
+      const files = this.app.vault.getMarkdownFiles().filter((f) => this.isTargetNote(f));
+      const targets = [];
+
+      for (const file of files) {
+        const content = await this.app.vault.read(file);
+        const parsed = parseFrontmatter(content);
+        if (!parsed || !parsed.fields) continue;
+        const rawTags = cleanValue(parsed.fields.tags || "");
+        if (!rawTags.toLowerCase().includes("bangumi") && !parsed.fields["BGM链接"]) continue;
+        const bgmLink = cleanValue(parsed.fields["BGM链接"] || "");
+        const subjectId = bangumiApi.getSubjectId(bgmLink);
+        if (!subjectId) continue;
+
+        const existingTokens = rawTags
+          .split(/[,;\s#\[\]"']+/)
+          .map((t) => t.trim())
+          .filter((t) => t && t.toLowerCase() !== "bangumi");
+
+        if (onlyMissing && existingTokens.length >= 2) {
+          continue;
+        }
+        targets.push({ file, subjectId, existingTokens });
+      }
+
+      if (targets.length === 0) {
+        new Notice("所有番剧卡片均已包含题材标签，无需重复补全。");
+        return { updated: 0, skipped: files.length, total: files.length, targetsCount: 0 };
+      }
+
+      new Notice(`开始为 ${targets.length} 篇番剧卡片从 Bangumi 补全题材标签（不会改动您的评分与手札）...`, 5000);
+      const uniqueIds = Array.from(new Set(targets.map((t) => t.subjectId)));
+      const tagResults = await bangumiApi.getSubjectTagsBatch(uniqueIds, {
+        concurrency: 4,
+        delayMs: 130,
+        onProgress: (prog) => {
+          if (onProgress) {
+            onProgress(prog);
+          }
+        }
+      });
+
+      let updated = 0;
+      const cacheObj = this.loadSubjectTagsCache();
+      for (const entry of targets) {
+        const fetched = tagResults.get(entry.subjectId);
+        if (!fetched || (!fetched.tags.length && !fetched.date)) continue;
+        cacheObj[String(entry.subjectId)] = {
+          tags: Array.from(new Set(fetched.tags || [])),
+          date: String(fetched.date || ""),
+          updatedAt: Date.now()
+        };
+        try {
+          const latestContent = await this.app.vault.read(entry.file);
+          let nextContent = latestContent;
+          if (fetched.tags && fetched.tags.length > 0) {
+            const merged = Array.from(new Set(["bangumi", ...entry.existingTokens, ...fetched.tags]));
+            nextContent = updateFrontmatterField(nextContent, "tags", merged);
+          }
+          const parsedNow = parseFrontmatter(nextContent);
+          if (parsedNow && parsedNow.fields && fetched.date) {
+            const curYear = cleanValue(parsedNow.fields["开播年份"] || "");
+            const curSeason = cleanValue(parsedNow.fields["开播季度"] || "");
+            if (!curYear || !curSeason || curSeason === "未知季度") {
+              const info = noteManager.getSeasonInfo(fetched.date);
+              if (!curYear && info.year) {
+                nextContent = updateFrontmatterField(nextContent, "开播年份", info.year);
+              }
+              if ((!curSeason || curSeason === "未知季度") && info.season && info.season !== "未知季度") {
+                nextContent = updateFrontmatterField(nextContent, "开播季度", info.season);
+              }
+            }
+          }
+          if (nextContent !== latestContent) {
+            await this.modifyNoteSafely(entry.file, nextContent);
+            updated += 1;
+          }
+        } catch (err) {
+          console.error("[Bangumi Manager] 补全标签写入失败:", entry.file?.path, err);
+        }
+      }
+      this.saveSubjectTagsCache();
+
+      if (updated > 0) {
+        await this.refreshOpenDashboardViews().catch(() => {});
+        await this.refreshScoreDashboard(false).catch(() => {});
+      }
+      new Notice(`标签补全完成：已为 ${updated} 篇番剧笔记写入题材标签（如百合、原创、日常等）。`, 6500);
+      return { updated, total: targets.length, targetsCount: targets.length };
+    } finally {
+      this._isBackfillingBangumiTags = false;
+    }
   }
 
   sortCustomQueryItems(items, sortBy = "myScore_desc") {
@@ -4583,6 +5036,52 @@ if (this.settings.seasonViewMode === "current") {
     return list;
   }
 
+  bindAnimeItemQuickInteractions(targetEl, item) {
+    if (!targetEl || !item) return;
+    if (multiHallArchiveService && typeof multiHallArchiveService.bindMagicWandLongPress === "function") {
+      multiHallArchiveService.bindMagicWandLongPress(this, targetEl, {
+        sourceType: "anime",
+        title: item.name,
+        jpName: item.japaneseName || item.jpName || "",
+        subjectId: item.subjectId || "",
+        studio: item.studio || "",
+        notePath: item.file?.path || item.filePath || ""
+      });
+    }
+    targetEl.addEventListener("contextmenu", (e) => {
+      if (e.target && e.target.closest && e.target.closest("input, textarea, select")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const menu = new Menu();
+      menu.addItem((mi) =>
+        mi.setTitle("查看关联收藏").onClick(() => {
+          multiHallArchiveService.openMagicWandRelationModal(this, {
+            sourceType: "anime",
+            title: item.name,
+            jpName: item.japaneseName || item.jpName || "",
+            subjectId: item.subjectId || "",
+            studio: item.studio || "",
+            notePath: item.file?.path || item.filePath || ""
+          });
+        })
+      );
+      menu.addItem((mi) =>
+        mi.setTitle("打开观片手札").onClick(() => {
+          reviewStudioService.openReviewStudioModal(this, item);
+        })
+      );
+      if (item.file) {
+        menu.addItem((mi) =>
+          mi.setTitle("打开动画笔记").onClick(async () => {
+            const leaf = this.app.workspace.getLeaf(true);
+            await leaf.openFile(item.file);
+          })
+        );
+      }
+      menu.showAtMouseEvent(e);
+    });
+  }
+
   renderCustomGrid(container, items, config) {
     if (!items.length) {
       container.createDiv({
@@ -4597,6 +5096,7 @@ if (this.settings.seasonViewMode === "current") {
     for (const item of items) {
       const card = grid.createDiv("bangumi-grid-card");
       card.dataset.filePath = item.file?.path || item.filePath || "";
+      this.bindAnimeItemQuickInteractions(card, item);
 
       card.onclick = async (e) => {
         e.preventDefault();
@@ -4605,7 +5105,7 @@ if (this.settings.seasonViewMode === "current") {
           const leaf = this.app.workspace.getLeaf(true);
           await leaf.openFile(item.file);
         } else if (item.isSamplePreviewItem) {
-          new Notice("✨ 当前为示例样片预览，收录真实动画后点击卡片即可直达本地笔记。", 2800);
+          new Notice("当前为示例样片预览，收录真实动画后点击卡片即可直达本地笔记。", 2800);
         }
       };
 
@@ -4716,9 +5216,9 @@ if (this.settings.seasonViewMode === "current") {
       };
 
       const btnTrend = epBar.createEl("button", {
-        cls: "bangumi-grid-ep-btn is-trend",
-        text: "📈"
+        cls: "bangumi-grid-ep-btn is-trend"
       });
+      btnTrend.appendChild(v07Core.icon("trend", 13));
       btnTrend.title = "查看 Netaba 播出期间评分趋势与个人评分对比";
       btnTrend.onclick = (e) => {
         e.preventDefault();
@@ -4755,8 +5255,8 @@ if (this.settings.seasonViewMode === "current") {
           const capsule = localBar.createSpan({
             cls: `bangumi-local-capsule ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
             text: localResult.newCount > 0
-              ? `📁 本地 +${localResult.newCount}话`
-              : `📁 本地 ${localResult.fileCount}话`
+              ? `本地 +${localResult.newCount}话`
+              : `本地 ${localResult.fileCount}话`
           });
           capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
           capsule.onclick = async (e) => {
@@ -4769,7 +5269,7 @@ if (this.settings.seasonViewMode === "current") {
             const nextEpNum = localResult.nextEpisodeNumber || (Number(item.watchedEpisodes || 0) + 1);
             const playBtn = localBar.createEl("button", {
               cls: "bangumi-local-action-btn is-play",
-              text: `▶ 第${nextEpNum}话`
+              text: `播放第${nextEpNum}话`
             });
             playBtn.title = `调用系统默认播放器打开第 ${nextEpNum} 话`;
             playBtn.onclick = async (e) => {
@@ -4793,9 +5293,9 @@ if (this.settings.seasonViewMode === "current") {
           }
 
           const folderBtn = localBar.createEl("button", {
-            cls: "bangumi-local-action-btn is-folder",
-            text: "📂"
+            cls: "bangumi-local-action-btn is-folder"
           });
+          folderBtn.appendChild(v07Core.icon("folder", 13));
           folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
           folderBtn.onclick = async (e) => {
             e.preventDefault();
@@ -4843,10 +5343,8 @@ if (this.settings.seasonViewMode === "current") {
 
   renderPosterPlaceholder(container, item) {
     const ph = container.createDiv("bangumi-grid-poster-placeholder");
-    ph.createDiv({
-      cls: "bangumi-grid-poster-icon",
-      text: "🎬"
-    });
+    const iconBox = ph.createDiv("bangumi-grid-poster-icon");
+    iconBox.appendChild(v07Core.icon("tv", 22));
     ph.createDiv({
       cls: "bangumi-grid-poster-text",
       text: item.name
@@ -4871,6 +5369,7 @@ if (this.settings.seasonViewMode === "current") {
       const row = list.createDiv("bangumi-dashboard-rank-row");
       const itemPath = item.file?.path || item.filePath || "";
       row.dataset.filePath = itemPath;
+      this.bindAnimeItemQuickInteractions(row, item);
 
       row.createDiv({
         text: String(index + 1),
@@ -4893,7 +5392,7 @@ if (this.settings.seasonViewMode === "current") {
           const leaf = this.app.workspace.getLeaf(true);
           await leaf.openFile(item.file);
         } else if (item.isSamplePreviewItem) {
-          new Notice("✨ 当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
+          new Notice("当前为示例样片预览，收录真实动画后点击标题即可直达本地笔记。", 2800);
         }
       };
 
@@ -5009,7 +5508,7 @@ if (this.settings.seasonViewMode === "current") {
     if (!items || items.length === 0) {
       const emptyDiv = container.createDiv({
         cls: "bangumi-dashboard-empty bangumi-collection-empty",
-        text: "展柜内暂无动画。"
+        text: "片单内暂无动画。"
       });
       const addBtn = emptyDiv.createEl("button", {
         cls: "bangumi-collection-empty-add-btn",
@@ -5032,6 +5531,7 @@ if (this.settings.seasonViewMode === "current") {
       card.dataset.filePath = item.file ? item.file.path : "";
       card.dataset.collectionIndex = String(index);
       card.setAttribute("draggable", "true");
+      this.bindAnimeItemQuickInteractions(card, item);
 
       card.ondragstart = (e) => {
         e.stopPropagation();
@@ -5074,7 +5574,7 @@ if (this.settings.seasonViewMode === "current") {
             if (dashboardContainer) {
               await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
             }
-            new Notice(`已调整《${item.name}》在展柜中的位置。`);
+            new Notice(`已调整《${item.name}》在片单中的顺序。`);
           }
         }
       };
@@ -5189,9 +5689,9 @@ if (this.settings.seasonViewMode === "current") {
       };
 
       const btnTrend = epBar.createEl("button", {
-        cls: "bangumi-grid-ep-btn is-trend",
-        text: "📈"
+        cls: "bangumi-grid-ep-btn is-trend"
       });
+      btnTrend.appendChild(v07Core.icon("trend", 13));
       btnTrend.title = "查看 Netaba 播出期间评分趋势与个人评分对比";
       btnTrend.onclick = (e) => {
         e.preventDefault();
@@ -5228,8 +5728,8 @@ if (this.settings.seasonViewMode === "current") {
           const capsule = localBar.createSpan({
             cls: `bangumi-local-capsule ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
             text: localResult.newCount > 0
-              ? `📁 本地 +${localResult.newCount}话`
-              : `📁 本地 ${localResult.fileCount}话`
+              ? `本地 +${localResult.newCount}话`
+              : `本地 ${localResult.fileCount}话`
           });
           capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
           capsule.onclick = async (e) => {
@@ -5242,7 +5742,7 @@ if (this.settings.seasonViewMode === "current") {
             const nextEpNum = localResult.nextEpisodeNumber || (Number(item.watchedEpisodes || 0) + 1);
             const playBtn = localBar.createEl("button", {
               cls: "bangumi-local-action-btn is-play",
-              text: `▶ 第${nextEpNum}话`
+              text: `播放第${nextEpNum}话`
             });
             playBtn.title = `调用系统默认播放器打开第 ${nextEpNum} 话`;
             playBtn.onclick = async (e) => {
@@ -5266,9 +5766,9 @@ if (this.settings.seasonViewMode === "current") {
           }
 
           const folderBtn = localBar.createEl("button", {
-            cls: "bangumi-local-action-btn is-folder",
-            text: "📂"
+            cls: "bangumi-local-action-btn is-folder"
           });
+          folderBtn.appendChild(v07Core.icon("folder", 13));
           folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
           folderBtn.onclick = async (e) => {
             e.preventDefault();
@@ -5312,13 +5812,13 @@ if (this.settings.seasonViewMode === "current") {
         new QuickAddTagModal(this.app, this, item).open();
       };
 
-      // 6. 移出展柜按钮
+      // 6. 移出片单按钮
       const shelfActionRow = info.createDiv("bangumi-grid-shelf-action-row");
       const removeBtn = shelfActionRow.createEl("button", {
         cls: "bangumi-grid-shelf-del-btn",
-        text: "移出展柜"
+        text: "移出片单"
       });
-      removeBtn.title = `从展柜“${collectionConfig.title}”中移出《${item.name}》`;
+      removeBtn.title = `从片单“${collectionConfig.title}”中移出《${item.name}》`;
       removeBtn.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -5334,7 +5834,7 @@ if (this.settings.seasonViewMode === "current") {
           if (dashboardContainer) {
             await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
           }
-          new Notice(`已将《${item.name}》移出展柜“${collectionConfig.title}”。`);
+          new Notice(`已将《${item.name}》移出片单“${collectionConfig.title}”。`);
         }
       };
     });
@@ -5344,7 +5844,7 @@ if (this.settings.seasonViewMode === "current") {
     if (!items || items.length === 0) {
       const emptyDiv = container.createDiv({
         cls: "bangumi-dashboard-empty bangumi-collection-empty",
-        text: "展柜内暂无动画。"
+        text: "片单内暂无动画。"
       });
       const addBtn = emptyDiv.createEl("button", {
         cls: "bangumi-collection-empty-add-btn",
@@ -5367,6 +5867,7 @@ if (this.settings.seasonViewMode === "current") {
       row.dataset.filePath = item.file ? item.file.path : "";
       row.dataset.collectionIndex = String(index);
       row.setAttribute("draggable", "true");
+      this.bindAnimeItemQuickInteractions(row, item);
 
       row.ondragstart = (e) => {
         e.stopPropagation();
@@ -5409,7 +5910,7 @@ if (this.settings.seasonViewMode === "current") {
             if (dashboardContainer) {
               await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
             }
-            new Notice(`已调整《${item.name}》在展柜中的位置。`);
+            new Notice(`已调整《${item.name}》在片单中的顺序。`);
           }
         }
       };
@@ -5525,9 +6026,9 @@ if (this.settings.seasonViewMode === "current") {
 
       const removeBtn = metaRow.createEl("button", {
         cls: "bangumi-list-remove-btn",
-        text: "移出展柜"
+        text: "移出片单"
       });
-      removeBtn.title = `从展柜“${collectionConfig.title}”中移出`;
+      removeBtn.title = `从片单“${collectionConfig.title}”中移出`;
       removeBtn.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -5543,7 +6044,7 @@ if (this.settings.seasonViewMode === "current") {
           if (dashboardContainer) {
             await this.renderScoreDashboard(dashboardContainer, dashboardOptions);
           }
-          new Notice(`已将《${item.name}》移出展柜。`);
+          new Notice(`已将《${item.name}》移出片单。`);
         }
       };
     });
@@ -5559,7 +6060,7 @@ if (this.settings.seasonViewMode === "current") {
       state: "warn2",
       category: "删除确认",
       priority: roxyMascotService.PRIORITY.HIGH,
-      message: `请稍微确认一下，真的要移除查询分区“${section.title}”吗？不过请放心，这不会删掉您的动画笔记本身。`
+      message: `请稍微确认一下，真的要移除智能筛选“${section.title}”吗？不过请放心，这不会删掉您的动画笔记本身。`
     });
     new ConfirmDeleteSectionModal(this.app, section.title, async () => {
       this.settings.customQuerySections = (this.settings.customQuerySections || []).filter(
@@ -5582,7 +6083,7 @@ if (this.settings.seasonViewMode === "current") {
       if (typeof onDeleted === "function") {
         await onDeleted();
       }
-      new Notice(`已删除自定义分区“${section.title}”。`);
+      new Notice(`已删除智能筛选“${section.title}”。`);
     }).open();
   }
 
@@ -5600,7 +6101,7 @@ if (this.settings.seasonViewMode === "current") {
       state: "warn2",
       category: "删除确认",
       priority: roxyMascotService.PRIORITY.HIGH,
-      message: `请确认一下，要移除收藏展柜“${collectionConfig.title}”吗？展柜里的动画笔记文件都会安全保留下来的。`
+      message: `请确认一下，要移除精选片单“${collectionConfig.title}”吗？片单里的动画笔记文件都会安全保留下来的。`
     });
     new ConfirmDeleteSectionModal(
       this.app,
@@ -5627,9 +6128,9 @@ if (this.settings.seasonViewMode === "current") {
         if (typeof onDeleted === "function") {
           await onDeleted();
         }
-        new Notice(`已删除收藏展柜“${collectionConfig.title}”。`);
+        new Notice(`已删除精选片单“${collectionConfig.title}”。`);
       },
-      `确定要删除收藏展柜“${collectionConfig.title}”吗？展柜内的笔记不会受到任何影响，仅移除展柜展示。`
+      `确定要删除精选片单“${collectionConfig.title}”吗？片单内的笔记不会受到任何影响，仅移除片单展示。`
     ).open();
   }
 
@@ -5692,16 +6193,47 @@ if (this.settings.seasonViewMode === "current") {
     }
 
     if (settingsNeedSave) {
-      this.saveSettings().catch((e) => console.error("保存展柜自愈路径失败:", e));
+      this.saveSettings().catch((e) => console.error("保存片单自愈路径失败:", e));
     }
 
     return resolved;
   }
 
+  markNoteSelfWrite(filePath, durationMs = 2800) {
+    if (!filePath || typeof filePath !== "string") return;
+    if (!this.isPluginWritingNote) {
+      this.isPluginWritingNote = new Set();
+    }
+    if (!this._selfWriteGuardTimers) {
+      this._selfWriteGuardTimers = new Map();
+    }
+    this.isPluginWritingNote.add(filePath);
+    if (this._selfWriteGuardTimers.has(filePath)) {
+      clearTimeout(this._selfWriteGuardTimers.get(filePath));
+    }
+    const timer = setTimeout(() => {
+      if (this._selfWriteGuardTimers) {
+        this._selfWriteGuardTimers.delete(filePath);
+      }
+      if (this.isPluginWritingNote) {
+        this.isPluginWritingNote.delete(filePath);
+      }
+    }, Math.max(1200, Number(durationMs) || 2800));
+    this._selfWriteGuardTimers.set(filePath, timer);
+  }
+
+  isSelfWritingNote(filePath) {
+    if (!filePath || typeof filePath !== "string") return false;
+    if (this.isPluginWritingNote && this.isPluginWritingNote.has(filePath)) return true;
+    if (this.ratingSync && typeof this.ratingSync.isSelfWrite === "function" && this.ratingSync.isSelfWrite(filePath)) {
+      return true;
+    }
+    return false;
+  }
+
   async autoSyncNoteCallout(file) {
     if (!file || !this.isTargetNote(file)) return;
-    if (this.isPluginWritingNote && this.isPluginWritingNote.has(file.path)) return;
-    if (this.ratingSync && this.ratingSync.isSelfWrite(file.path)) return;
+    if (this.isSelfWritingNote(file.path)) return;
     try {
       const content = await this.app.vault.read(file);
       const parsed = parseFrontmatter(content);
@@ -5722,21 +6254,112 @@ if (this.settings.seasonViewMode === "current") {
       }
       const synced = syncNoteCalloutFromFrontmatter(content);
       if (synced && synced !== content) {
-        if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
-        this.isPluginWritingNote.add(file.path);
-        try {
-          await this.app.vault.modify(file, synced);
-        } finally {
-          setTimeout(() => {
-            if (this.isPluginWritingNote) {
-              this.isPluginWritingNote.delete(file.path);
-            }
-          }, 2400);
-        }
+        await this.modifyNoteSafely(file, synced, 2800);
       }
     } catch (err) {
       console.error("自动同步动画信息卡失败:", err);
     }
+  }
+
+  async modifyNoteSafely(fileOrPath, newContent, guardMs = 2600) {
+    const targetFile =
+      typeof fileOrPath === "string"
+        ? this.app.vault.getAbstractFileByPath(fileOrPath)
+        : fileOrPath && typeof fileOrPath.path === "string"
+          ? this.app.vault.getAbstractFileByPath(fileOrPath.path) || fileOrPath
+          : null;
+    if (!targetFile || typeof targetFile.path !== "string") {
+      throw new Error("未找到对应的动画笔记文件，可能该笔记已被移动、重命名或处于示例预览状态。");
+    }
+    this.markNoteSelfWrite(targetFile.path, guardMs);
+    try {
+      await this.app.vault.modify(targetFile, String(newContent ?? ""));
+      this.markNoteSelfWrite(targetFile.path, guardMs);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  async inspectAndUpgradeLegacyNotes(options = {}) {
+    const dryRun = Boolean(options.dryRun);
+    const showNotice = options.showNotice !== false;
+    const scoreOpts = this.getScoreDisplayOptions();
+    const personalCache = this.settings.personalRatingCache || {};
+    const files = this.app.vault.getMarkdownFiles();
+
+    let scanned = 0;
+    let needsUpgradeCount = 0;
+    let upgradedCount = 0;
+    let failedCount = 0;
+    const details = [];
+
+    for (const file of files) {
+      if (!this.isTargetNote(file)) continue;
+      try {
+        const content = await this.app.vault.read(file);
+        const res = inspectAndUpgradeAnimeNoteContent(content, {
+          ...scoreOpts,
+          cachedPersonalScore: personalCache[file.path] || ""
+        });
+        if (!res.isTargetAnimeNote) continue;
+        scanned += 1;
+        if (res.needsUpgrade) {
+          needsUpgradeCount += 1;
+          details.push({
+            path: file.path,
+            name: file.basename || file.name,
+            reasons: res.reasons
+          });
+          if (!dryRun) {
+            await this.modifyNoteSafely(file, res.upgradedContent);
+            upgradedCount += 1;
+          }
+        }
+      } catch (err) {
+        failedCount += 1;
+        console.error("[Bangumi Manager] 升级旧版笔记失败:", file?.path, err);
+      }
+    }
+
+    if (!dryRun && upgradedCount > 0) {
+      await this.refreshOpenDashboardViews().catch(() => {});
+      await this.refreshScoreDashboard(false).catch(() => {});
+    }
+
+    if (showNotice) {
+      if (dryRun) {
+        new Notice(
+          needsUpgradeCount > 0
+            ? `扫描完成：共检查 ${scanned} 篇动画笔记，发现 ${needsUpgradeCount} 篇旧版结构笔记可无损补齐升级。`
+            : `扫描完成：共检查 ${scanned} 篇动画笔记，全部已是最新兼容结构，无需升级。`,
+          6000
+        );
+      } else if (upgradedCount > 0) {
+        new Notice(
+          `旧版笔记兼容升级完成：共检查 ${scanned} 篇，已无损补齐 ${upgradedCount} 篇笔记结构（原有评分、路径与手记全部保留）${failedCount > 0 ? `，失败 ${failedCount} 篇` : ""}。`,
+          7000
+        );
+      } else if (failedCount > 0) {
+        new Notice(
+          `检查了 ${scanned} 篇动画笔记，其中 ${failedCount} 篇处理失败，请检查文件读写权限。`,
+          6500
+        );
+      } else {
+        new Notice(
+          `检查完毕：共扫描 ${scanned} 篇动画笔记，全部已是最新结构，无需手动维护。`,
+          5000
+        );
+      }
+    }
+
+    return {
+      scanned,
+      needsUpgradeCount,
+      upgradedCount,
+      failedCount,
+      details
+    };
   }
 
   async quickUpdateAnimeNote(item, updates) {
@@ -5750,7 +6373,13 @@ if (this.settings.seasonViewMode === "current") {
         item.state = updates.state;
       }
       if (updates.score !== undefined) {
-        item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+        const rawScoreStr = String(updates.score ?? "").trim();
+        const isCleared =
+          updates.score === null ||
+          rawScoreStr === "" ||
+          rawScoreStr === "未评分" ||
+          !Number.isFinite(Number(rawScoreStr));
+        item.personalScore = isCleared ? null : Number(rawScoreStr);
       }
       if (updates.addTag) {
         const tagArr = Array.isArray(item.tags)
@@ -5766,7 +6395,7 @@ if (this.settings.seasonViewMode === "current") {
         item.tags = tagArr.filter((t) => t !== updates.removeTag);
       }
       await this.applyQuickUpdateToOpenDashboards(item, updates);
-      new Notice("✨ 示例样片体验：已临时更新预览状态（不会写入笔记库）", 2800);
+      new Notice("示例样片体验：已临时更新预览状态（不会写入笔记库）", 2800);
       return true;
     }
     if (!item.file) return false;
@@ -5789,7 +6418,13 @@ if (this.settings.seasonViewMode === "current") {
       }
 
       if (updates.score !== undefined) {
-        const scoreStr = updates.score === null || updates.score === "未评分" ? "未评分" : String(updates.score);
+        const rawScoreStr = String(updates.score ?? "").trim();
+        const isCleared =
+          updates.score === null ||
+          rawScoreStr === "" ||
+          rawScoreStr === "未评分" ||
+          !Number.isFinite(Number(rawScoreStr));
+        const scoreStr = isCleared ? "未评分" : String(Number(rawScoreStr));
         newContent = updateFrontmatterField(newContent, "我的评分", scoreStr);
         newContent = updateCalloutTableRow(newContent, "我的评分", scoreStr);
       }
@@ -5803,31 +6438,92 @@ if (this.settings.seasonViewMode === "current") {
       }
 
       if (updates.downloadPath !== undefined) {
-        newContent = updateFrontmatterField(newContent, "下载路径", String(updates.downloadPath || "无"));
+        const dlStr = String(updates.downloadPath || "无").trim() || "无";
+        newContent = updateFrontmatterField(newContent, "下载路径", dlStr);
+        newContent = updateFolderLine(newContent, {
+          downloadPath: dlStr !== "无" ? dlStr : "",
+          error: null
+        });
+      }
+
+      // 若在桌面端调整了已看集数或下载目录，单次落盘内同步更新「本地更新状态」与信息卡表格，避免延后二次写盘引起页面跳变
+      if ((updates.watchedEpisodes !== undefined || updates.downloadPath !== undefined) && isDesktopNodeAvailable()) {
+        const parsedMid = parseFrontmatter(newContent);
+        const curDlPath = cleanValue(
+          (parsedMid && parsedMid.fields && parsedMid.fields["下载路径"]) || item.downloadPath || ""
+        );
+        if (curDlPath && curDlPath !== "无") {
+          const nextWatched =
+            updates.watchedEpisodes !== undefined
+              ? Number(updates.watchedEpisodes) || 0
+              : Number(item.watchedEpisodes) || 0;
+          const localRes = inspectLocalFolder(curDlPath, nextWatched);
+          const localText = getLocalStatusText(localRes);
+          newContent = updateFrontmatterField(newContent, "本地更新状态", localText);
+          newContent = updateFolderLine(newContent, localRes);
+          item.localStatus = localText;
+          if (
+            updates.downloadPath !== undefined &&
+            this._v07LocalFolderCache &&
+            typeof this._v07LocalFolderCache.delete === "function"
+          ) {
+            if (item.downloadPath) this._v07LocalFolderCache.delete(String(item.downloadPath).trim());
+            this._v07LocalFolderCache.delete(curDlPath);
+          }
+        }
+      }
+
+      const syncedCallout = syncNoteCalloutFromFrontmatter(newContent);
+      if (syncedCallout) {
+        newContent = syncedCallout;
       }
 
       if (newContent !== content) {
-        if (!this.isPluginWritingNote) this.isPluginWritingNote = new Set();
-        this.isPluginWritingNote.add(file.path);
-        try {
-          await this.app.vault.modify(file, newContent);
-        } finally {
-          setTimeout(() => {
-            if (this.isPluginWritingNote) {
-              this.isPluginWritingNote.delete(file.path);
-            }
-          }, 1000);
-        }
+        await this.modifyNoteSafely(file, newContent, 3000);
       }
 
       if (updates.watchedEpisodes !== undefined) {
         item.watchedEpisodes = updates.watchedEpisodes;
+        animeActivityService.recordAnimeActivity(this, {
+          type: "episode",
+          animeName: item.name,
+          filePath: file.path,
+          cover: item.cover || "",
+          episode: Number(updates.watchedEpisodes) || 0,
+          status: item.state || "",
+          detail: `看到第 ${updates.watchedEpisodes} 集`
+        }).catch(() => {});
       }
       if (updates.state !== undefined) {
         item.state = updates.state;
+        animeActivityService.recordAnimeActivity(this, {
+          type: "status",
+          animeName: item.name,
+          filePath: file.path,
+          cover: item.cover || "",
+          status: updates.state,
+          detail: `观看状态更新为「${updates.state}」`
+        }).catch(() => {});
       }
       if (updates.score !== undefined) {
-        item.personalScore = updates.score === null || updates.score === "未评分" ? null : Number(updates.score);
+        const rawScoreStr = String(updates.score ?? "").trim();
+        const isCleared =
+          updates.score === null ||
+          rawScoreStr === "" ||
+          rawScoreStr === "未评分" ||
+          !Number.isFinite(Number(rawScoreStr));
+        item.personalScore = isCleared ? null : Number(rawScoreStr);
+        if (item.personalScore !== null && Number.isFinite(item.personalScore)) {
+          animeActivityService.recordAnimeActivity(this, {
+            type: "score",
+            animeName: item.name,
+            filePath: file.path,
+            cover: item.cover || "",
+            score: item.personalScore,
+            status: item.state || "",
+            detail: `个人评分更新为 ${item.personalScore} 分`
+          }).catch(() => {});
+        }
         if (!this.settings.personalRatingCache) {
           this.settings.personalRatingCache = {};
         }
@@ -6223,7 +6919,7 @@ if (this.settings.seasonViewMode === "current") {
         cls: "bangumi-dashboard-action-btn",
         text: "管理"
       });
-      manageBtn.title = "管理展柜中的动画条目";
+      manageBtn.title = "管理片单中的动画条目";
       manageBtn.onclick = (e) => {
         e.stopPropagation();
         if (typeof onManage === "function") {
@@ -6235,7 +6931,7 @@ if (this.settings.seasonViewMode === "current") {
         cls: "bangumi-dashboard-action-btn",
         text: "编辑"
       });
-      editBtn.title = "编辑展柜标题与显示模式";
+      editBtn.title = "编辑片单名称与显示模式";
       editBtn.onclick = (e) => {
         e.stopPropagation();
         if (typeof onEdit === "function") {
@@ -6247,7 +6943,7 @@ if (this.settings.seasonViewMode === "current") {
         cls: "bangumi-dashboard-action-btn",
         text: "删除"
       });
-      deleteBtn.title = "删除此收藏展柜";
+      deleteBtn.title = "删除此个人片单";
       deleteBtn.onclick = (e) => {
         e.stopPropagation();
         if (typeof onDelete === "function") {
@@ -6515,11 +7211,11 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-grid-state-badge{position:absolute;top:6px;left:6px;padding:2px 6px;font-size:.72em;font-weight:600;border-radius:4px;background:rgba(0,0,0,.68);color:#fff;backdrop-filter:blur(4px);z-index:2;pointer-events:none;}",
       ".bangumi-grid-state-badge.is-interactive{pointer-events:auto;cursor:pointer;transition:transform .12s ease,filter .12s ease;}",
       ".bangumi-grid-state-badge.is-interactive:hover{transform:scale(1.06);filter:brightness(1.15);}",
-      ".bangumi-grid-state-badge.is-已看{background:rgba(40,167,69,.85);}",
-      ".bangumi-grid-state-badge.is-在看{background:rgba(0,123,255,.85);}",
-      ".bangumi-grid-state-badge.is-想看{background:rgba(255,153,0,.85);}",
-      ".bangumi-grid-state-badge.is-抛弃{background:rgba(108,117,125,.85);}",
-      ".bangumi-grid-state-badge.is-未设置{background:rgba(80,80,80,.75);}",
+      ".bangumi-grid-state-badge.is-已看{background:rgba(56,120,96,.88);}",
+      ".bangumi-grid-state-badge.is-在看{background:rgba(50,94,140,.88);}",
+      ".bangumi-grid-state-badge.is-想看{background:rgba(156,109,54,.88);}",
+      ".bangumi-grid-state-badge.is-抛弃{background:rgba(154,75,67,.86);}",
+      ".bangumi-grid-state-badge.is-未设置{background:rgba(118,112,106,.82);}",
       ".bangumi-grid-score-badge{position:absolute;top:6px;right:6px;padding:2px 6px;font-size:.75em;font-weight:700;border-radius:4px;background:var(--interactive-accent);color:var(--text-on-accent);box-shadow:0 2px 4px rgba(0,0,0,.2);z-index:2;pointer-events:none;font-variant-numeric:tabular-nums;}",
       ".bangumi-grid-score-badge.is-interactive{pointer-events:auto;cursor:pointer;transition:transform .12s ease,filter .12s ease;}",
       ".bangumi-grid-score-badge.is-interactive:hover{transform:scale(1.06);filter:brightness(1.15);}",
@@ -6570,7 +7266,7 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-collection-panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--background-modifier-border);font-size:.9em;}",
       ".bangumi-collection-panel-empty{color:var(--text-muted);font-size:.85em;padding:24px 10px;text-align:center;}",
       ".bangumi-collection-more-hint{font-size:11px;color:var(--text-faint);text-align:center;padding:6px;}",
-      ".bangumi-score-dashboard-view{padding:0 18px 24px;overflow:auto;}",
+      ".bangumi-score-dashboard-view{padding:0 18px 24px;overflow:auto;container-type:inline-size;container-name:curator-desk-outer;}",
       ".bangumi-dashboard-view-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 0 10px;}",
       ".bangumi-dashboard-view-toolbar h2{margin:0;font-size:1.15em;}",
       ".bangumi-dashboard-view-controls{display:flex;gap:8px;flex-wrap:wrap;}",
@@ -6582,10 +7278,20 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-stacked-bar-wrap{margin-top:14px;padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);}",
       ".bangumi-stacked-bar-title{font-size:.88em;font-weight:600;margin-bottom:10px;color:var(--text-normal);}",
       ".bangumi-stacked-bar{display:flex;height:14px;border-radius:999px;overflow:hidden;background:var(--background-modifier-border);}",
-      ".bangumi-stacked-segment{height:100%;transition:width .2s ease;min-width:2px;}",
-      ".bangumi-stacked-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:.8em;color:var(--text-muted);}",
+      ".bangumi-stacked-segment{height:100%;transition:width .2s ease;min-width:2px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.22);}",
+      ".bangumi-stacked-segment.is-state-已看,.curator-watchstate-seg.is-completed{background:linear-gradient(90deg,#387860,#5ca489);}",
+      ".bangumi-stacked-segment.is-state-在看,.curator-watchstate-seg.is-watching{background:linear-gradient(90deg,#325e8c,#568bc2);}",
+      ".bangumi-stacked-segment.is-state-想看,.curator-watchstate-seg.is-plan{background:linear-gradient(90deg,#9c6d36,#c89652);}",
+      ".bangumi-stacked-segment.is-state-抛弃,.curator-watchstate-seg.is-dropped{background:linear-gradient(90deg,#9a4b43,#bf6b61);}",
+      ".bangumi-stacked-segment.is-state-未设置{background:linear-gradient(90deg,#76706a,#969088);}",
+      ".bangumi-stacked-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-size:.8em;color:var(--text-muted);}",
       ".bangumi-stacked-legend-item{display:inline-flex;align-items:center;gap:6px;}",
-      ".bangumi-legend-dot{width:8px;height:8px;border-radius:50%;display:inline-block;}",
+      ".bangumi-legend-dot{width:14px;height:8px;border-radius:999px;display:inline-block;flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.22),0 1px 2px rgba(24,18,12,0.14);}",
+      ".bangumi-legend-dot.is-state-已看{background:linear-gradient(90deg,#387860,#5ca489);}",
+      ".bangumi-legend-dot.is-state-在看{background:linear-gradient(90deg,#325e8c,#568bc2);}",
+      ".bangumi-legend-dot.is-state-想看{background:linear-gradient(90deg,#9c6d36,#c89652);}",
+      ".bangumi-legend-dot.is-state-抛弃{background:linear-gradient(90deg,#9a4b43,#bf6b61);}",
+      ".bangumi-legend-dot.is-state-未设置{background:linear-gradient(90deg,#76706a,#969088);}",
       ".bangumi-year-chart-wrap{margin-bottom:16px;padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);}",
       ".bangumi-year-chart-title{font-size:.88em;font-weight:600;margin-bottom:12px;color:var(--text-normal);}",
       ".bangumi-year-chart{display:flex;align-items:flex-end;gap:10px;height:120px;padding:10px 6px 0;overflow-x:auto;}",
@@ -6605,12 +7311,12 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-delta-stat-box{display:flex;flex-direction:column;}",
       ".bangumi-delta-stat-label{font-size:.8em;color:var(--text-muted);margin-bottom:4px;}",
       ".bangumi-delta-stat-val{font-size:1.35em;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text-normal);}",
-      ".bangumi-delta-stat-val.mod-accent{color:var(--interactive-accent);}",
+      ".bangumi-delta-stat-val.mod-accent{color:#8f683d;}",
       ".bangumi-delta-summary-bottom{padding-top:10px;border-top:1px dashed var(--background-modifier-border);}",
       ".bangumi-delta-trait-badge{display:inline-block;padding:4px 12px;border-radius:6px;font-size:.85em;font-weight:500;line-height:1.4;}",
-      ".bangumi-delta-trait-badge.is-generous{background:rgba(40,167,69,0.15);color:var(--color-green, #28a745);border:1px solid rgba(40,167,69,0.3);}",
-      ".bangumi-delta-trait-badge.is-balanced{background:rgba(0,123,255,0.15);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.3);}",
-      ".bangumi-delta-trait-badge.is-strict{background:rgba(255,153,0,0.15);color:var(--color-orange, #ff9900);border:1px solid rgba(255,153,0,0.3);}",
+      ".bangumi-delta-trait-badge.is-generous{background:rgba(56,120,96,0.14);color:#387860;border:1px solid rgba(56,120,96,0.32);}",
+      ".bangumi-delta-trait-badge.is-balanced{background:rgba(50,94,140,0.14);color:#325e8c;border:1px solid rgba(50,94,140,0.32);}",
+      ".bangumi-delta-trait-badge.is-strict{background:rgba(156,109,54,0.14);color:#9c6d36;border:1px solid rgba(156,109,54,0.32);}",
       ".bangumi-delta-lists-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}",
       ".bangumi-delta-panel{padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);}",
       ".bangumi-delta-panel-title{font-size:.9em;font-weight:600;margin-bottom:12px;color:var(--text-normal);}",
@@ -6620,11 +7326,11 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-delta-name-col{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
       ".bangumi-delta-name-col a{font-weight:500;color:var(--text-normal);}",
       ".bangumi-delta-score-col{display:flex;gap:8px;font-size:.8em;color:var(--text-muted);flex-shrink:0;font-variant-numeric:tabular-nums;}",
-      ".bangumi-delta-personal-score{color:var(--interactive-accent);font-weight:600;}",
+      ".bangumi-delta-personal-score{color:#8f683d;font-weight:700;}",
       ".bangumi-delta-bgm-score{color:var(--text-muted);}",
       ".bangumi-delta-pill{padding:2px 8px;border-radius:999px;font-size:.78em;font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0;}",
-      ".bangumi-delta-pill.is-plus{background:rgba(40,167,69,0.15);color:var(--color-green, #28a745);border:1px solid rgba(40,167,69,0.3);}",
-      ".bangumi-delta-pill.is-minus{background:rgba(235,87,87,0.15);color:var(--text-error, #eb5757);border:1px solid rgba(235,87,87,0.3);}",
+      ".bangumi-delta-pill.is-plus{background:rgba(56,120,96,0.14);color:#387860;border:1px solid rgba(56,120,96,0.32);}",
+      ".bangumi-delta-pill.is-minus{background:rgba(154,75,67,0.14);color:#9a4b43;border:1px solid rgba(154,75,67,0.32);}",
       ".bangumi-studio-type-wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}",
       ".bangumi-studio-section,.bangumi-type-section{padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);}",
       ".bangumi-analytics-sub-title{font-size:.9em;font-weight:600;margin-bottom:12px;color:var(--text-normal);}",
@@ -6633,13 +7339,20 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-studio-rank{flex:0 0 18px;font-size:.8em;font-weight:bold;color:var(--text-muted);text-align:center;}",
       ".bangumi-studio-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;}",
       ".bangumi-studio-count-badge{font-size:.78em;padding:1px 7px;border-radius:999px;background:var(--background-secondary-alt);border:1px solid var(--background-modifier-border);color:var(--text-muted);}",
-      ".bangumi-studio-score-badge{font-size:.78em;padding:1px 7px;border-radius:999px;background:rgba(0,123,255,0.12);color:var(--interactive-accent);font-weight:600;}",
+      ".bangumi-studio-score-badge{font-size:.78em;padding:1px 7px;border-radius:999px;background:rgba(143,104,61,0.14);color:#8f683d;font-weight:600;}",
       ".bangumi-type-list{display:flex;flex-direction:column;gap:10px;}",
       ".bangumi-type-row{display:grid;grid-template-columns:60px minmax(0,1fr) 72px;gap:10px;align-items:center;font-size:.85em;}",
       ".bangumi-type-label{color:var(--text-muted);white-space:nowrap;}",
-      ".bangumi-type-track{height:10px;border-radius:999px;background:var(--background-primary);overflow:hidden;}",
-      ".bangumi-type-bar{height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--interactive-accent),var(--color-accent-2, var(--color-blue)));transition:width .2s ease;}",
+      ".bangumi-type-track{height:10px;border-radius:999px;background:color-mix(in srgb,#8f683d 12%,var(--background-primary));overflow:hidden;}",
+      ".bangumi-type-bar{height:100%;border-radius:inherit;background:linear-gradient(90deg,#8f683d,#c89b62);transition:width .24s ease;}",
+      ".bangumi-type-bar.is-type-original{background:linear-gradient(90deg,#9c6b2e,#d4a350);}",
+      ".bangumi-type-bar.is-type-manga{background:linear-gradient(90deg,#355f8a,#5d91c4);}",
+      ".bangumi-type-bar.is-type-novel{background:linear-gradient(90deg,#387860,#5da489);}",
+      ".bangumi-type-bar.is-type-game{background:linear-gradient(90deg,#7d5678,#a6789f);}",
+      ".bangumi-type-bar.is-type-other{background:linear-gradient(90deg,#787066,#9b9286);}",
       ".bangumi-type-count{font-size:.8em;color:var(--text-muted);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;}",
+      "@container (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px;}.bangumi-collection-manager-panels{grid-template-columns:1fr !important;}.bangumi-analytics-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-season-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-summary-top{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-lists-wrap{grid-template-columns:1fr;}.bangumi-studio-type-wrap{grid-template-columns:1fr;}}",
+      "@container (max-width:480px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}.bangumi-analytics-stat-grid{grid-template-columns:1fr;}.bangumi-season-grid{grid-template-columns:1fr;}.bangumi-delta-summary-top{grid-template-columns:1fr;}}",
       "@media (max-width:800px){.bangumi-dashboard-cards{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-sections{grid-template-columns:1fr;}.bangumi-dashboard-rank-grid{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-dashboard-compat-banner{flex-direction:column;align-items:flex-start;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}.bangumi-collection-manager-panels{grid-template-columns:1fr !important;}.bangumi-analytics-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-season-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-summary-top{grid-template-columns:repeat(2,minmax(0,1fr));}.bangumi-delta-lists-wrap{grid-template-columns:1fr;}.bangumi-studio-type-wrap{grid-template-columns:1fr;}}",
       "@media (max-width:460px){.bangumi-dashboard-cards{grid-template-columns:1fr;}.bangumi-dashboard-state-grid{grid-template-columns:1fr;}.bangumi-dashboard-custom-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}.bangumi-analytics-stat-grid{grid-template-columns:1fr;}.bangumi-season-grid{grid-template-columns:1fr;}.bangumi-delta-summary-top{grid-template-columns:1fr;}}",
       ".bangumi-trend-component{padding:14px;border-radius:10px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);margin:12px 0;}",
@@ -6730,7 +7443,7 @@ if (this.settings.seasonViewMode === "current") {
           const pages = [
             {
               key: "nativeTrend",
-              name: "📈 原生趋势图"
+              name: "原生趋势图"
             },
             {
               key: "subject",
@@ -7588,7 +8301,7 @@ var ManagerRibbonModal = class extends Modal {
     );
     this.addButton(
       contentEl,
-      "打开番剧档案馆（二维案头编目台 / 三维原画档案室）",
+      "打开番剧档案馆（含 3D 原画展厅）",
       async () => {
         this.close();
         await this.plugin.openScoreDashboardView();
@@ -7771,14 +8484,19 @@ var CustomQuerySectionModal = class extends Modal {
     this.onSave = onSave;
   }
 
-  onOpen() {
+  async onOpen() {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("bangumi-custom-query-modal");
+    this.modalEl.style.width = "min(640px, 94vw)";
 
     const isEdit = Boolean(this.existingConfig);
     contentEl.createEl("h2", {
-      text: isEdit ? "编辑自定义查询分区" : "新建自定义查询分区"
+      text: isEdit ? "编辑智能筛选" : "新建智能筛选"
+    });
+    contentEl.createEl("p", {
+      cls: "bangumi-modal-subtitle",
+      text: "按题材标签、观看状态、评分门槛或开播季度自动聚合番剧，后续新增符合条件的作品会自动归入。"
     });
 
     const formData = Object.assign(
@@ -7798,12 +8516,91 @@ var CustomQuerySectionModal = class extends Modal {
       this.existingConfig || {}
     );
 
+    const previewBanner = contentEl.createDiv("bangumi-smart-filter-preview");
+    previewBanner.style.cssText =
+      "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;margin:8px 0 14px;border-radius:8px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);font-size:12.5px;flex-wrap:wrap;";
+    const previewCountText = previewBanner.createSpan({ text: "正在统计匹配番剧..." });
+    const backfillBtn = previewBanner.createEl("button", {
+      text: "补全已有番剧 Bangumi 标签",
+      cls: "clickable-icon"
+    });
+    backfillBtn.style.cssText =
+      "padding:4px 10px;border-radius:6px;border:1px solid var(--background-modifier-border);background:var(--background-primary);font-size:12px;cursor:pointer;";
+
+    let vaultItems = [];
+    let tagInputEl = null;
+    const tagCloudBox = contentEl.createDiv("bangumi-smart-filter-tag-cloud");
+    tagCloudBox.style.cssText = "display:none;gap:6px;flex-wrap:wrap;margin:-4px 0 12px;padding:8px 10px;border-radius:8px;background:var(--background-secondary-alt, var(--background-secondary));";
+
+    const updateLivePreview = () => {
+      if (!vaultItems.length) {
+        previewCountText.textContent = "当前仓库暂无动画笔记";
+        return;
+      }
+      const matched = this.plugin.filterCustomQueryItems(vaultItems, formData);
+      const sampleNames = matched.slice(0, 3).map((m) => `《${m.name}》`).join("、");
+      previewCountText.textContent =
+        matched.length > 0
+          ? `实时预览：当前可匹配 ${matched.length} 部番剧${sampleNames ? `（含 ${sampleNames}${matched.length > 3 ? " 等" : ""}）` : ""}`
+          : "实时预览：当前匹配 0 部（若旧笔记尚未写入题材标签，可点击右侧按钮一键从 Bangumi 补全）";
+    };
+
+    const rebuildTagChips = () => {
+      tagCloudBox.empty();
+      const cloud = this.plugin.collectVaultGenreTagCloud(vaultItems, 20);
+      if (!cloud.length) {
+        tagCloudBox.style.display = "none";
+        return;
+      }
+      tagCloudBox.style.display = "flex";
+      tagCloudBox.createSpan({
+        text: "常用标签点选：",
+        attr: { style: "font-size:12px;color:var(--text-muted);line-height:24px;" }
+      });
+      for (const entry of cloud) {
+        const chip = tagCloudBox.createEl("button", {
+          text: `${entry.tag} (${entry.count})`
+        });
+        chip.style.cssText =
+          "padding:2px 9px;height:24px;font-size:12px;border-radius:999px;border:1px solid var(--background-modifier-border);background:var(--background-primary);cursor:pointer;";
+        chip.onclick = (ev) => {
+          ev.preventDefault();
+          formData.tag = entry.tag;
+          if (tagInputEl) tagInputEl.value = entry.tag;
+          if (!formData.title.trim()) {
+            formData.title = `${entry.tag}番剧`;
+          }
+          updateLivePreview();
+        };
+      }
+    };
+
+    backfillBtn.onclick = async (ev) => {
+      ev.preventDefault();
+      backfillBtn.disabled = true;
+      backfillBtn.textContent = "正在从 Bangumi 补全...";
+      try {
+        await this.plugin.backfillExistingAnimeTagsFromBangumi({
+          onlyMissing: true,
+          onProgress: (p) => {
+            backfillBtn.textContent = `补全中 (${p.completed}/${p.total})...`;
+          }
+        });
+        vaultItems = await this.plugin.collectDashboardItems();
+        rebuildTagChips();
+        updateLivePreview();
+      } finally {
+        backfillBtn.disabled = false;
+        backfillBtn.textContent = "补全已有番剧 Bangumi 标签";
+      }
+    };
+
     new Setting(contentEl)
-      .setName("分区名称")
-      .setDesc("为该查询分区起一个清晰的标题")
+      .setName("筛选名称")
+      .setDesc("为这组智能筛选起一个直观的名字")
       .addText((text) => {
         text
-          .setPlaceholder("如：我最喜爱的百合动画、2025在看佳作")
+          .setPlaceholder("如：百合佳作、原创动画、2025在看")
           .setValue(formData.title)
           .onChange((val) => {
             formData.title = val;
@@ -7811,16 +8608,20 @@ var CustomQuerySectionModal = class extends Modal {
       });
 
     new Setting(contentEl)
-      .setName("标签筛选 (tags)")
-      .setDesc("必须包含的标签，如“百合”或“原创”（留空表示不限标签）")
+      .setName("题材标签 / 制作公司筛选")
+      .setDesc("支持输入题材标签（如“百合”“原创”“轻百”）或制作公司，多个词用空格分隔")
       .addText((text) => {
+        tagInputEl = text.inputEl;
         text
           .setPlaceholder("如：百合（留空不限）")
           .setValue(formData.tag || "")
           .onChange((val) => {
             formData.tag = val;
+            updateLivePreview();
           });
       });
+
+    contentEl.appendChild(tagCloudBox);
 
     new Setting(contentEl)
       .setName("观看状态")
@@ -7835,6 +8636,7 @@ var CustomQuerySectionModal = class extends Modal {
           .setValue(formData.watchStatus || "all")
           .onChange((val) => {
             formData.watchStatus = val;
+            updateLivePreview();
           });
       });
 
@@ -7851,6 +8653,7 @@ var CustomQuerySectionModal = class extends Modal {
           .setValue(String(formData.minMyScore || 0))
           .onChange((val) => {
             formData.minMyScore = Number(val) || 0;
+            updateLivePreview();
           });
       });
 
@@ -7867,6 +8670,7 @@ var CustomQuerySectionModal = class extends Modal {
           .setValue(String(formData.minBgmScore || 0))
           .onChange((val) => {
             formData.minBgmScore = Number(val) || 0;
+            updateLivePreview();
           });
       });
 
@@ -7879,6 +8683,7 @@ var CustomQuerySectionModal = class extends Modal {
           .setValue(formData.year || "")
           .onChange((val) => {
             formData.year = val;
+            updateLivePreview();
           });
       });
 
@@ -7895,6 +8700,7 @@ var CustomQuerySectionModal = class extends Modal {
           .setValue(formData.season || "")
           .onChange((val) => {
             formData.season = val;
+            updateLivePreview();
           });
       });
 
@@ -7952,14 +8758,20 @@ var CustomQuerySectionModal = class extends Modal {
     cancelBtn.onclick = () => this.close();
 
     const saveBtn = footer.createEl("button", {
-      text: isEdit ? "保存修改" : "创建分区",
+      text: isEdit ? "保存筛选" : "创建智能筛选",
       cls: "mod-cta"
     });
+
+    this.plugin.collectDashboardItems().then((items) => {
+      vaultItems = items || [];
+      rebuildTagChips();
+      updateLivePreview();
+    }).catch(() => {});
 
     saveBtn.onclick = async () => {
       const cleanTitle = String(formData.title || "").trim();
       if (!cleanTitle) {
-        new Notice("请输入分区名称！");
+        new Notice("请输入智能筛选名称！");
         return;
       }
       formData.title = cleanTitle;
@@ -7990,7 +8802,7 @@ var CustomQuerySectionModal = class extends Modal {
         await this.onSave(formData);
       }
 
-      new Notice(isEdit ? `已更新分区“${formData.title}”。` : `已创建分区“${formData.title}”。`);
+      new Notice(isEdit ? `已更新智能筛选“${formData.title}”。` : `已创建智能筛选“${formData.title}”。`);
     };
   }
 
@@ -8014,11 +8826,11 @@ var CustomCollectionModal = class extends Modal {
 
     const isEdit = Boolean(this.existingConfig);
     contentEl.createEl("h2", {
-      text: isEdit ? "编辑收藏展柜" : "新建收藏展柜"
+      text: isEdit ? "编辑精选片单" : "新建精选片单"
     });
     contentEl.createEl("p", {
       cls: "bangumi-modal-subtitle",
-      text: "手动挑选并编排心爱作品的专属展柜，支持卡片拖拽重排与直观展出。"
+      text: "手动挑选心爱作品组成个人片单，支持自由调整作品先后顺序与展示方式。"
     });
 
     const formData = Object.assign(
@@ -8032,11 +8844,11 @@ var CustomCollectionModal = class extends Modal {
     );
 
     new Setting(contentEl)
-      .setName("展柜名称")
-      .setDesc("为您的收藏展柜起一个优雅的名字")
+      .setName("片单名称")
+      .setDesc("为您的精选片单起一个清晰的名字")
       .addText((text) => {
         text
-          .setPlaceholder("如：年度十佳、神作殿堂、二次元启蒙...")
+          .setPlaceholder("如：年度十佳、周末重温片单、入坑推荐...")
           .setValue(formData.title)
           .onChange((val) => {
             formData.title = val;
@@ -8046,11 +8858,11 @@ var CustomCollectionModal = class extends Modal {
 
     new Setting(contentEl)
       .setName("展示形态")
-      .setDesc("选择展柜在仪表盘上的展现方式")
+      .setDesc("选择片单在页面上的展示方式")
       .addDropdown((dropdown) => {
         dropdown
-          .addOption("grid", "响应式封面海报网格 (Cover Grid)")
-          .addOption("list", "紧凑榜单列表 (Compact List)")
+          .addOption("grid", "封面海报网格")
+          .addOption("list", "紧凑列表")
           .setValue(formData.displayMode || "grid")
           .onChange((val) => {
             formData.displayMode = val;
@@ -8067,14 +8879,14 @@ var CustomCollectionModal = class extends Modal {
     cancelBtn.onclick = () => this.close();
 
     const saveBtn = footer.createEl("button", {
-      text: isEdit ? "保存修改" : "创建展柜并挑选动画",
+      text: isEdit ? "保存修改" : "创建片单并挑选动画",
       cls: "mod-cta"
     });
 
     saveBtn.onclick = async () => {
       const cleanTitle = String(formData.title || "").trim();
       if (!cleanTitle) {
-        new Notice("请输入展柜名称！");
+        new Notice("请输入片单名称！");
         return;
       }
       formData.title = cleanTitle;
@@ -8102,7 +8914,7 @@ var CustomCollectionModal = class extends Modal {
         await this.onSave(formData);
       }
 
-      new Notice(isEdit ? `已更新展柜“${formData.title}”。` : `已创建展柜“${formData.title}”。`);
+      new Notice(isEdit ? `已更新片单“${formData.title}”。` : `已创建片单“${formData.title}”。`);
 
       if (!isEdit) {
         this.plugin.openCollectionItemsManagerModal(formData, this.onSave);
@@ -8138,11 +8950,11 @@ var CollectionItemsManagerModal = class extends Modal {
     this.modalEl.style.overflowY = "auto";
 
     contentEl.createEl("h2", {
-      text: `管理收藏展柜 - 《${this.collectionConfig.title}》`
+      text: `管理精选片单 · 《${this.collectionConfig.title}》`
     });
     contentEl.createEl("p", {
       cls: "bangumi-modal-subtitle",
-      text: "从动画库中挑选动画收录至展柜，使用“↑ / ↓”微调展示顺序，或一键从展柜移出。"
+      text: "从番剧库中挑选作品加入片单，使用“↑ / ↓”微调排列顺序，或一键移出片单。"
     });
 
     this.allItems = await this.plugin.collectDashboardItems();
@@ -8218,14 +9030,14 @@ var CollectionItemsManagerModal = class extends Modal {
     const renderPanels = () => {
       leftHeader.empty();
       leftHeader.createEl("strong", {
-        text: `已收录到展柜 (${this.currentItems.length} 部)`
+        text: `已加入片单 (${this.currentItems.length} 部)`
       });
       leftList.empty();
 
       if (this.currentItems.length === 0) {
         leftList.createDiv({
           cls: "bangumi-collection-panel-empty",
-          text: "展柜为空，请从右侧点击“+ 添加”加入作品。"
+          text: "片单为空，请从右侧点击“+ 添加”加入作品。"
         });
       } else {
         this.currentItems.forEach((entry, idx) => {
@@ -8245,7 +9057,7 @@ var CollectionItemsManagerModal = class extends Modal {
           row.style.padding = "6px 8px";
           row.style.borderRadius = "6px";
           row.style.background = "var(--background-secondary)";
-          row.style.fontSize = "0.85em";
+          row.style.fontSize = "13px";
 
           const leftInfo = row.createDiv();
           leftInfo.style.display = "flex";
@@ -8272,8 +9084,8 @@ var CollectionItemsManagerModal = class extends Modal {
               text: state,
               cls: `bangumi-list-state-pill is-${state}`
             });
-            pill.style.fontSize = "10px";
-            pill.style.padding = "0 4px";
+            pill.style.fontSize = "12px";
+            pill.style.padding = "1px 6px";
           }
 
           const ops = row.createDiv();
@@ -8304,7 +9116,7 @@ var CollectionItemsManagerModal = class extends Modal {
           }
 
           const btnDel = ops.createEl("button", { text: "×", cls: "bangumi-manager-mini-btn mod-warning" });
-          btnDel.title = "从展柜移出";
+          btnDel.title = "从片单移出";
           btnDel.onclick = () => {
             this.currentItems.splice(idx, 1);
             renderPanels();
@@ -8320,10 +9132,7 @@ var CollectionItemsManagerModal = class extends Modal {
         if (isItemInShelf(it)) return false;
         if (st !== "all" && it.state !== st) return false;
         if (q) {
-          const matchTitle = (it.name || "").toLowerCase().includes(q);
-          const matchJp = (it.japaneseName || "").toLowerCase().includes(q);
-          const matchTag = (it.tags || "").toLowerCase().includes(q);
-          if (!matchTitle && !matchJp && !matchTag) return false;
+          if (!noteUtils.matchesTagOrMetaQuery(it, q)) return false;
         }
         return true;
       });
@@ -8336,7 +9145,7 @@ var CollectionItemsManagerModal = class extends Modal {
       if (candidates.length === 0) {
         rightList.createDiv({
           cls: "bangumi-collection-panel-empty",
-          text: q ? "未搜索到匹配的动画。" : "所有符合条件的动画均已收录。"
+          text: q ? "未搜索到匹配的动画。" : "所有符合条件的动画均已加入。"
         });
       } else {
         candidates.slice(0, 50).forEach((it) => {
@@ -8347,7 +9156,7 @@ var CollectionItemsManagerModal = class extends Modal {
           row.style.padding = "6px 8px";
           row.style.borderRadius = "6px";
           row.style.background = "var(--background-secondary)";
-          row.style.fontSize = "0.85em";
+          row.style.fontSize = "13px";
 
           const leftInfo = row.createDiv();
           leftInfo.style.display = "flex";
@@ -8366,8 +9175,8 @@ var CollectionItemsManagerModal = class extends Modal {
               text: it.state,
               cls: `bangumi-list-state-pill is-${it.state}`
             });
-            pill.style.fontSize = "10px";
-            pill.style.padding = "0 4px";
+            pill.style.fontSize = "12px";
+            pill.style.padding = "1px 6px";
           }
 
           if (it.year) {
@@ -8422,7 +9231,7 @@ var CollectionItemsManagerModal = class extends Modal {
     cancelBtn.onclick = () => this.close();
 
     const saveBtn = footer.createEl("button", {
-      text: "保存展柜编排",
+      text: "保存片单顺序",
       cls: "mod-cta"
     });
 
@@ -8445,7 +9254,7 @@ var CollectionItemsManagerModal = class extends Modal {
       if (typeof this.onSave === "function") {
         await this.onSave();
       }
-      new Notice(`已保存展柜“${this.collectionConfig.title}”的编排（共收录 ${this.currentItems.length} 部）。`);
+      new Notice(`已保存片单“${this.collectionConfig.title}”（共 ${this.currentItems.length} 部）。`);
     };
   }
 

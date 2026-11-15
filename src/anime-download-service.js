@@ -2,6 +2,7 @@ const obsidian = require("obsidian");
 const noteUtils = require("./note-utils.js");
 const noteManager = require("./note-manager.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
+const v07Core = require("./v07-core.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -410,17 +411,20 @@ function parseComicatTitleMeta(title, author = "", animeName = "") {
 
   // 构造能在 comicat.org 精准筛出该单一发布流（每集仅 1 条）的推荐搜索关键词
   const keywordTokens = [];
+  let groupSearchToken = "";
   if (group && group !== "其他发布源") {
     if (group.includes("&")) {
-      keywordTokens.push(group.split("&")[0].trim());
+      groupSearchToken = group.split("&")[0].trim();
     } else {
-      keywordTokens.push(`[${group}]`);
+      groupSearchToken = `[${group}]`;
     }
+    if (groupSearchToken) keywordTokens.push(groupSearchToken);
   }
   const cleanAnimeName = String(animeName || "").trim();
   if (cleanAnimeName) {
     keywordTokens.push(cleanAnimeName);
   }
+  const fallbackKeyword = keywordTokens.join(" ").trim();
   if (platform) {
     keywordTokens.push(platform);
   } else if (lang) {
@@ -440,7 +444,8 @@ function parseComicatTitleMeta(title, author = "", animeName = "") {
     version,
     isPack,
     streamId,
-    recommendedKeyword: keywordTokens.join(" ").trim()
+    recommendedKeyword: keywordTokens.join(" ").trim(),
+    fallbackKeyword
   };
 }
 
@@ -451,6 +456,109 @@ function decodeXmlEntities(str) {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
+}
+
+/**
+ * 判定 RSS 链接或种子附件是否指向 enclosure 已墙死失效的站点（如漫猫 comicat.org 硬编码的 v2.uploadbt.com）
+ */
+function isDeadEnclosureRssFeed(rawUrl) {
+  return /(?:^|\/\/|\.)(comicat\.org|kisssub\.org|miobt\.com|uploadbt\.com)\b/i.test(
+    String(rawUrl || "").trim()
+  );
+}
+
+/**
+ * 判定 RSS 链接是否为未带任何作品/关键词过滤的全站大杂烩总源（严禁直接轮询投递，防串番误下无关动画）
+ */
+function isGenericSiteWideRssFeed(rawUrl) {
+  const raw = String(rawUrl || "").trim();
+  if (!raw) return true;
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.toLowerCase();
+    const pathname = u.pathname.replace(/\/+$/, "");
+    const search = u.search || "";
+    if (/(?:^|\.)(comicat\.org|kisssub\.org|miobt\.com)$/i.test(host)) {
+      // 漫猫专属搜索源格式为 /rss-<keyword>.xml；裸 /rss.xml 或 /rss-all.xml 均为全站总源
+      if (!pathname || /^\/rss(?:-all)?\.xml$/i.test(pathname)) {
+        return !/[?&](?:keyword|kw|q)=[^&]+/i.test(search);
+      }
+      return false;
+    }
+    if (/mikanani\.me|mikanime\.tv/i.test(host)) {
+      if (/^\/rss\/classic$/i.test(pathname)) return true;
+      if (/^\/rss\/mybangumi$/i.test(pathname) && !/[?&]token=/i.test(search)) return true;
+      if (/^\/rss\/search$/i.test(pathname) && !/[?&]searchstr=[^&]+/i.test(search)) return true;
+    }
+    if (/dmhy\.org/i.test(host)) {
+      if (/\/rss\.xml$/i.test(pathname) && !/[?&]keyword=[^&]+/i.test(search)) return true;
+    }
+    if (/nyaa\.si/i.test(host)) {
+      if (/[?&]page=rss/i.test(search) && !/[?&]q=[^&]+/i.test(search)) return true;
+    }
+  } catch (_) {
+    if (/\/rss(?:-all)?\.xml\s*$/i.test(raw)) return true;
+  }
+  return false;
+}
+
+function normalizeSubSavePathKey(p) {
+  return String(p || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function selectSpecificFeedFromAffected(affected, fallbackKeyword = "") {
+  const list = (Array.isArray(affected) ? affected : [])
+    .map((f) => String(f || "").trim())
+    .filter(Boolean);
+  const specificDead = list.find((f) => isDeadEnclosureRssFeed(f) && !isGenericSiteWideRssFeed(f));
+  if (specificDead) return specificDead;
+  const specificAny = list.find((f) => !isGenericSiteWideRssFeed(f));
+  if (specificAny) return specificAny;
+  const cleanKw = String(fallbackKeyword || "").trim();
+  if (cleanKw && list.some((f) => isDeadEnclosureRssFeed(f))) {
+    return buildComicatRssUrl(cleanKw);
+  }
+  return "";
+}
+
+/**
+ * 兼容 qBittorrent 通配符语法的标题过滤器：
+ * - `|` 分隔多个「或（OR）」子句；
+ * - 单个子句内以空白分隔多个「且（AND）」词元；
+ * - 词元内支持 `*`（任意字符序列）与 `?`（单个字符），大小写不敏感。
+ */
+function matchesQbWildcardFilter(title, patternRaw) {
+  const raw = String(patternRaw || "").trim();
+  if (!raw) return false;
+  const text = String(title || "");
+  const clauses = raw
+    .split("|")
+    .map((c) => c.trim())
+    .filter(Boolean);
+  if (clauses.length === 0) return false;
+
+  return clauses.some((clause) => {
+    const tokens = clause.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return false;
+    return tokens.every((tk) => {
+      if (!tk.includes("*") && !tk.includes("?")) {
+        return text.toLowerCase().includes(tk.toLowerCase());
+      }
+      const escaped = tk
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, "[\\s\\S]*")
+        .replace(/\?/g, ".");
+      try {
+        return new RegExp(escaped, "i").test(text);
+      } catch (_) {
+        return text.toLowerCase().includes(tk.replace(/[*?]/g, "").toLowerCase());
+      }
+    });
+  });
 }
 
 /**
@@ -486,16 +594,24 @@ function parseComicatRssXml(xmlText, animeName = "", baseUrl = DEFAULT_COMICAT_B
 
     const hashMatch =
       link.match(/show-([a-fA-F0-9]{40})\.html/i) ||
-      enclosureUrl.match(/hash=([a-fA-F0-9]{40})/i);
+      enclosureUrl.match(/hash=([a-fA-F0-9]{40})/i) ||
+      enclosureUrl.match(/btih:([a-fA-F0-9]{40})/i);
     const infoHash = hashMatch ? hashMatch[1].toLowerCase() : "";
 
     const trackerList = getAugmentedAnimeTrackers();
     const trackerSuffix = trackerList.map((tr) => `&tr=${encodeURIComponent(tr)}`).join("");
-    const magnetUrl = infoHash
-      ? `magnet:?xt=urn:btih:${infoHash}&dn=${encodeURIComponent(title)}${trackerSuffix}`
-      : "";
+    const magnetUrl =
+      enclosureUrl.startsWith("magnet:?")
+        ? enrichMagnetUrlWithTrackers(enclosureUrl)
+        : infoHash
+        ? `magnet:?xt=urn:btih:${infoHash}&dn=${encodeURIComponent(title)}${trackerSuffix}`
+        : "";
+    const safeEnclosure =
+      enclosureUrl && !enclosureUrl.startsWith("magnet:?") && !isDeadEnclosureRssFeed(enclosureUrl)
+        ? enclosureUrl
+        : "";
     const torrentUrl =
-      enclosureUrl || (infoHash ? `http://v2.uploadbt.com/?r=down&hash=${infoHash}` : "");
+      safeEnclosure || (infoHash ? `https://itorrents.org/torrent/${infoHash.toUpperCase()}.torrent` : "");
 
     const meta = parseComicatTitleMeta(title, author, animeName);
     const pubTimeMs = pubDate ? Date.parse(pubDate) || 0 : 0;
@@ -522,6 +638,7 @@ function parseComicatRssXml(xmlText, animeName = "", baseUrl = DEFAULT_COMICAT_B
         format: meta.format,
         resolution: meta.resolution,
         recommendedKeyword: meta.recommendedKeyword,
+        fallbackKeyword: meta.fallbackKeyword || meta.recommendedKeyword,
         searchUrl: buildComicatSearchUrl(meta.recommendedKeyword, baseUrl),
         rssUrl: buildComicatRssUrl(meta.recommendedKeyword, baseUrl),
         rawItems: []
@@ -536,6 +653,9 @@ function parseComicatRssXml(xmlText, animeName = "", baseUrl = DEFAULT_COMICAT_B
       ...st,
       dedup,
       episodeCount: dedup.episodes.length,
+      packCount: dedup.packs.length,
+      minEp: dedup.minEp,
+      maxEp: dedup.maxEp,
       totalRawCount: st.rawItems.length
     };
   });
@@ -692,7 +812,7 @@ function detectQbittorrentStatus(plugin) {
 /**
  * 启动本机 qBittorrent 客户端
  */
-async function launchQbittorrentClient(plugin) {
+async function launchQbittorrentClient(plugin, opts = {}) {
   const status = detectQbittorrentStatus(plugin);
   if (!status.installed || !status.exePath) {
     return { ok: false, reason: "not_installed", status };
@@ -701,10 +821,11 @@ async function launchQbittorrentClient(plugin) {
     return { ok: true, alreadyRunning: true, status };
   }
   try {
-    const child = spawn(status.exePath, [], {
+    const args = opts.noSplash ? ["--no-splash"] : [];
+    const child = spawn(status.exePath, args, {
       detached: true,
       stdio: "ignore",
-      windowsHide: false
+      windowsHide: Boolean(opts.noSplash)
     });
     child.unref();
     await new Promise((r) => setTimeout(r, 1400));
@@ -718,41 +839,145 @@ async function launchQbittorrentClient(plugin) {
 /**
  * 确保作品拥有合法的本地下载文件夹（若笔记未配置下载路径，可按规范「本地根目录/年份/季度/安全名称」自动生成并写回笔记）
  */
-async function ensureAnimeLocalDownloadFolder(plugin, item, createOnDisk = true) {
-  let targetPath = String(item?.downloadPath || "").trim();
-  let updatedNote = false;
+async function ensureAnimeLocalDownloadFolder(plugin, item, createOnDisk = true, customTargetPath = "") {
+  if (item?.isSamplePreviewItem) {
+    return {
+      ok: false,
+      targetPath: "",
+      createdOnDisk: false,
+      updatedNote: false,
+      error: "当前作品为示例样片预览，不会在本地磁盘创建目录。请先导入真实动画笔记后再试。"
+    };
+  }
+
+  let targetPath = String(customTargetPath || item?.downloadPath || "").trim();
+  const needsWritePathToNote =
+    Boolean(customTargetPath) || !item?.downloadPath || String(item.downloadPath).trim() === "无";
 
   if (!targetPath || targetPath === "无") {
-    const base = String(plugin?.settings?.localAnimeRoot || "D:/ACG/Obsidian ACG")
+    const base = String(plugin?.settings?.localAnimeRoot || "")
       .trim()
       .replace(/[\\/]+$/, "");
+    if (!base) {
+      return {
+        ok: false,
+        targetPath: "",
+        createdOnDisk: false,
+        updatedNote: false,
+        error: "尚未在插件设置中填写「本地动画根目录」，请先前往设置指定保存根目录。"
+      };
+    }
     const year = String(item?.year || new Date().getFullYear()).trim() || String(new Date().getFullYear());
     const season = String(item?.season || "10月新番").trim() || "10月新番";
     const safeFolder = noteManager.getSafeFileName(item?.name || "未命名动画");
     targetPath = `${base}/${year}/${season}/${safeFolder}`.replace(/\\/g, "/");
-
-    if (item?.file) {
-      let content = await plugin.app.vault.read(item.file);
-      content = noteUtils.updateFrontmatterField(content, "下载路径", targetPath);
-      content = noteUtils.updateFolderLine(content, targetPath);
-      content = noteUtils.syncNoteCalloutFromFrontmatter(content);
-      await plugin.modifyNoteSafely(item.file, content);
-      item.downloadPath = targetPath;
-      updatedNote = true;
-    }
+  } else {
+    targetPath = targetPath.replace(/\\/g, "/").replace(/\/+$/, "");
   }
 
+  let createdOnDisk = false;
+  let diskError = "";
   if (createOnDisk && targetPath && targetPath !== "无") {
+    if (!isDesktopNodeAvailable()) {
+      return {
+        ok: false,
+        targetPath,
+        createdOnDisk: false,
+        updatedNote: false,
+        error: "当前处于移动端环境，暂不支持直接创建电脑端本地文件夹。"
+      };
+    }
     try {
       if (!fs.existsSync(targetPath)) {
         fs.mkdirSync(targetPath, { recursive: true });
       }
+      createdOnDisk = Boolean(fs.existsSync(targetPath));
+      if (!createdOnDisk) {
+        diskError = "目录创建后仍未检测到文件夹，请检查目标盘符是否存在或是否有写入权限";
+      }
     } catch (err) {
+      diskError = err?.message || String(err);
       console.warn("[BangumiDownload] 创建本地动画文件夹失败:", err);
+    }
+
+    if (!createdOnDisk) {
+      return {
+        ok: false,
+        targetPath,
+        createdOnDisk: false,
+        updatedNote: false,
+        error: `无法创建本地目录「${targetPath}」（${diskError || "目标盘符不存在或无写入权限"}）。请在设置中检查「本地动画根目录」路径是否有效。`
+      };
     }
   }
 
-  return { targetPath, updatedNote };
+  let updatedNote = false;
+  let noteError = "";
+  const targetFile =
+    item?.file ||
+    (item?.path && plugin?.app?.vault
+      ? plugin.app.vault.getAbstractFileByPath(item.path)
+      : null);
+
+  if (targetFile && needsWritePathToNote) {
+    try {
+      let content = await plugin.app.vault.read(targetFile);
+      if (typeof noteUtils.inspectAndUpgradeAnimeNoteContent === "function") {
+        const upg = noteUtils.inspectAndUpgradeAnimeNoteContent(content, {
+          ...(typeof plugin?.getScoreDisplayOptions === "function"
+            ? plugin.getScoreDisplayOptions()
+            : {}),
+          cachedPersonalScore: plugin?.settings?.personalRatingCache?.[targetFile.path] || ""
+        });
+        if (upg.isTargetAnimeNote && upg.needsUpgrade) {
+          content = upg.upgradedContent;
+        }
+      }
+      const inspectRes = isDesktopNodeAvailable()
+        ? noteUtils.inspectLocalFolder(targetPath, item?.watchedEpisodes)
+        : { downloadPath: targetPath, error: null, newCount: 0 };
+      content = noteUtils.updateFrontmatterField(content, "下载路径", targetPath);
+      content = noteUtils.updateFrontmatterField(
+        content,
+        "本地更新状态",
+        noteUtils.getLocalStatusText(inspectRes)
+      );
+      content = noteUtils.updateFolderLine(content, {
+        downloadPath: targetPath,
+        error: null
+      });
+      content = noteUtils.syncNoteCalloutFromFrontmatter(content);
+      if (typeof plugin?.modifyNoteSafely === "function") {
+        await plugin.modifyNoteSafely(targetFile, content);
+      } else {
+        await plugin.app.vault.modify(targetFile, content);
+      }
+      item.file = targetFile;
+      item.downloadPath = targetPath;
+      if (plugin?._v07LocalFolderCache && typeof plugin._v07LocalFolderCache.clear === "function") {
+        plugin._v07LocalFolderCache.clear();
+      }
+      updatedNote = true;
+      if (typeof plugin?.applyQuickUpdateToOpenDashboards === "function") {
+        await plugin.applyQuickUpdateToOpenDashboards(item, { downloadPath: targetPath }).catch(() => {});
+      }
+    } catch (err) {
+      noteError = err?.message || String(err);
+      console.error("[BangumiDownload] 写回动画笔记本地目录路径失败:", err);
+    }
+  } else if (needsWritePathToNote && !targetFile) {
+    item.downloadPath = targetPath;
+    noteError = "本地目录已创建，但未能定位到对应的动画 Markdown 笔记文件，可在设置中执行「兼容升级旧版动画笔记」或重新打开番剧档案馆刷新。";
+  }
+
+  return {
+    ok: createOnDisk ? createdOnDisk : true,
+    targetPath,
+    createdOnDisk,
+    updatedNote,
+    noteError,
+    error: noteError && !createdOnDisk ? noteError : ""
+  };
 }
 
 /**
@@ -799,7 +1024,7 @@ async function tryDownloadTorrentFileToCache(target, timeoutMs = 3400) {
       `http://btcache.me/torrent/${upperHash}`
     );
   }
-  if (target.torrentUrl) {
+  if (target.torrentUrl && !isDeadEnclosureRssFeed(target.torrentUrl)) {
     candidateUrls.push(target.torrentUrl);
   }
 
@@ -818,7 +1043,6 @@ async function tryDownloadTorrentFileToCache(target, timeoutMs = 3400) {
       ]);
       if (resp && resp.status >= 200 && resp.status < 300 && resp.arrayBuffer) {
         const buf = toNodeBufferOrUint8(resp.arrayBuffer);
-        // 合法的 .torrent 文件必然以 bencode dictionary 'd' (0x64) 开头且最后以 'e' (0x65) 结尾
         if (buf.length > 180 && buf[0] === 0x64) {
           return buf;
         }
@@ -842,7 +1066,7 @@ async function tryDownloadTorrentFileToCache(target, timeoutMs = 3400) {
 }
 
 /**
- * 为任意磁力链接补齐高可用 HTTP/HTTPS/UDP 动漫 Tracker 列表（穿透 Fake-IP TUN 代理）
+ * 为任意磁力链接补齐高可用 HTTP/HTTPS/UDP 动漫 Tracker 列表
  */
 function enrichMagnetUrlWithTrackers(rawMagnet) {
   const s = String(rawMagnet || "").trim();
@@ -871,14 +1095,21 @@ async function dispatchDownloadToQbittorrent(plugin, item, episodeTargets, optio
   }
 
   const autoCreate = plugin?.settings?.qbittorrentAutoCreateFolder !== false;
-  const { targetPath } = await ensureAnimeLocalDownloadFolder(plugin, item, autoCreate);
+  const folderRes = await ensureAnimeLocalDownloadFolder(plugin, item, autoCreate);
+  if (autoCreate && !folderRes.ok) {
+    return {
+      ok: false,
+      reason: folderRes.error || "无法创建本地动画保存目录，请检查插件设置中的「本地动画根目录」"
+    };
+  }
+  const { targetPath } = folderRes;
   const winSavePath = targetPath ? path.normalize(targetPath) : "";
 
-  // 并行尝试将目标预取为本地 .torrent 文件（若成功则彻底跳过 qB 下载元数据 0.0% 阶段；若失败则回退为增强型多 Tracker 磁力链接）
   let torrentFileHitCount = 0;
   const resolvedArgs = await Promise.all(
     targets.map(async (t) => {
       if (typeof t === "string") {
+        if (isDeadEnclosureRssFeed(t)) return "";
         return t.startsWith("magnet:?") ? enrichMagnetUrlWithTrackers(t) : t;
       }
       const cachedTorrentPath = await tryDownloadTorrentFileToCache(t, 2800).catch(() => "");
@@ -889,7 +1120,7 @@ async function dispatchDownloadToQbittorrent(plugin, item, episodeTargets, optio
       if (t?.magnetUrl) {
         return enrichMagnetUrlWithTrackers(t.magnetUrl);
       }
-      return t?.torrentUrl || "";
+      return t?.torrentUrl && !isDeadEnclosureRssFeed(t.torrentUrl) ? t.torrentUrl : "";
     })
   );
 
@@ -927,8 +1158,8 @@ async function dispatchDownloadToQbittorrent(plugin, item, episodeTargets, optio
       category: "追番下载",
       priority: roxyMascotService.PRIORITY.HIGH,
       dedupeKey: `dl:${item?.name}:${urls.length}:${Date.now()}`,
-      message: `已经帮您把《${item?.name || "作品"}》的 ${urls.length} 集下载任务投递给 qBittorrent 了${
-        torrentFileHitCount > 0 ? `（已直通预取 ${torrentFileHitCount} 份种子元数据）` : "（已注入穿透型动漫 Tracker 节点）"
+      message: `已经帮您把《${item?.name || "作品"}》的 ${urls.length} 集下载任务发送给 qBittorrent 了${
+        torrentFileHitCount > 0 ? `（已预先拉取 ${torrentFileHitCount} 份种子文件）` : "（已附带加速节点列表）"
       }，保存位置已对准本地番剧目录哦。`
     });
 
@@ -976,21 +1207,510 @@ async function gracefullyStopQbittorrentIfRunning(plugin, maxWaitMs = 3200) {
   return { wasRunning: true, exePath: st.exePath };
 }
 
+function ensurePluginRssSubMap(plugin) {
+  if (!plugin || !plugin.settings) return {};
+  if (!plugin.settings.pluginRssSubscriptions || typeof plugin.settings.pluginRssSubscriptions !== "object") {
+    plugin.settings.pluginRssSubscriptions = {};
+  }
+  return plugin.settings.pluginRssSubscriptions;
+}
+
 /**
- * 将动画的专属 RSS 订阅地址与自动下载规则真实写入本机 qBittorrent 的 RSS 阅读器 (feeds.json) 与 RSS 下载器 (download_rules.json)，
- * 并在需要时自动重启/唤醒 qBittorrent 及投递当前未看缺失集数。
+ * 自愈清洗已存储在 pluginRssSubscriptions 中的污染规则（去除键名尾随换行符、将误存的全站总源升级为对应番剧专属源）
+ */
+async function healPollutedPluginRssSubscriptions(plugin) {
+  if (!plugin?.settings) return false;
+  const subMap = ensurePluginRssSubMap(plugin);
+  const entries = Object.entries(subMap);
+  if (entries.length === 0) return false;
+
+  let bakRulesByCleanName = null;
+  const loadBackupRulesMap = () => {
+    if (bakRulesByCleanName) return bakRulesByCleanName;
+    bakRulesByCleanName = new Map();
+    if (!isDesktopNodeAvailable()) return bakRulesByCleanName;
+    const appData = getSafeEnv().APPDATA || "";
+    if (!appData) return bakRulesByCleanName;
+    const rssDir = path.join(appData, "qBittorrent", "rss");
+    for (const fn of ["download_rules.pre-v08.bak.json", "download_rules.json"]) {
+      const fp = path.join(rssDir, fn);
+      try {
+        if (!fs.existsSync(fp)) continue;
+        const obj = JSON.parse(fs.readFileSync(fp, "utf8")) || {};
+        for (const [rKey, rVal] of Object.entries(obj)) {
+          const cleanRKey = String(rKey || "").trim();
+          if (cleanRKey && rVal && typeof rVal === "object" && !bakRulesByCleanName.has(cleanRKey)) {
+            bakRulesByCleanName.set(cleanRKey, rVal);
+          }
+        }
+      } catch (_) {}
+    }
+    return bakRulesByCleanName;
+  };
+
+  let changed = false;
+  for (const [rawKey, sub] of entries) {
+    if (!sub || typeof sub !== "object") continue;
+    const cleanKey = String(rawKey || "").trim();
+    const cleanAnimeName = String(sub.animeName || cleanKey).trim();
+    if (!cleanKey) {
+      delete subMap[rawKey];
+      changed = true;
+      continue;
+    }
+    if (cleanKey !== rawKey) {
+      delete subMap[rawKey];
+      sub.animeName = cleanAnimeName;
+      subMap[cleanKey] = sub;
+      changed = true;
+    } else if (sub.animeName !== cleanAnimeName) {
+      sub.animeName = cleanAnimeName;
+      changed = true;
+    }
+
+    if (sub.rssUrl && isGenericSiteWideRssFeed(sub.rssUrl)) {
+      const bakMap = loadBackupRulesMap();
+      const bakRule = bakMap.get(cleanAnimeName) || bakMap.get(cleanKey);
+      const fallbackKw = [
+        String(sub.mustContain || "").includes("*") ? "" : String(sub.mustContain || "").trim(),
+        String(sub.keyword || cleanAnimeName).trim()
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const upgraded = bakRule
+        ? selectSpecificFeedFromAffected(bakRule.affectedFeeds, fallbackKw || cleanAnimeName)
+        : buildComicatRssUrl(fallbackKw || cleanAnimeName);
+      if (upgraded && !isGenericSiteWideRssFeed(upgraded)) {
+        sub.rssUrl = upgraded;
+        sub.updatedAt = Date.now();
+        changed = true;
+      } else {
+        sub.enabled = false;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed && typeof plugin.saveSettings === "function") {
+    await plugin.saveSettings().catch(() => {});
+  }
+  return changed;
+}
+
+function resolveNoteItemForSubscription(key, sub, items, byName, bySavePath, byNotePath) {
+  const rawName = String(sub?.animeName || key || "").trim();
+  const normSave = normalizeSubSavePathKey(sub?.savePath);
+  if (normSave && bySavePath.has(normSave)) {
+    return { matched: true, item: bySavePath.get(normSave) };
+  }
+  const notePath = String(sub?.notePath || "").trim();
+  if (notePath && byNotePath.has(notePath)) {
+    return { matched: true, item: byNotePath.get(notePath) };
+  }
+  if (rawName && byName.has(rawName)) {
+    return { matched: true, item: byName.get(rawName) };
+  }
+  if (rawName.length >= 2) {
+    const lowerRaw = rawName.toLowerCase();
+    for (const it of items) {
+      const itName = String(it?.name || "").trim();
+      if (!itName) continue;
+      const lowerIt = itName.toLowerCase();
+      if (lowerIt.includes(lowerRaw) || lowerRaw.includes(lowerIt)) {
+        return { matched: true, item: it };
+      }
+    }
+  }
+  return {
+    matched: false,
+    item: {
+      name: rawName,
+      downloadPath: sub?.savePath || "",
+      watchedEpisodes: 0
+    }
+  };
+}
+
+/**
+ * 自动清理并迁移 qBittorrent 中指向漫猫 (comicat.org / uploadbt.com) 死链 enclosure 的原生自动下载规则：
+ * - 漫猫 XML 的 <enclosure url="http://v2.uploadbt.com/?r=down&hash=..."> 已失效，qB 原生自动下载器请求时必弹超时报错；
+ * - 本函数在保留备份的前提下停用 qB 中所有指向死链源的自动下载规则并清退「自动追番」分组下的死链订阅，
+ *   同时将其平滑迁入插件侧磁力追更引擎（提取 infoHash 走镜像缓存与磁力推送），彻底消除右下角超时报错弹窗。
+ */
+async function sanitizeDeadQbittorrentComicatRules(plugin) {
+  await healPollutedPluginRssSubscriptions(plugin).catch(() => {});
+  if (!isDesktopNodeAvailable()) return { cleanedRules: 0, cleanedFeeds: 0 };
+  const appData = getSafeEnv().APPDATA || "";
+  if (!appData) return { cleanedRules: 0, cleanedFeeds: 0 };
+
+  const rssDir = path.join(appData, "qBittorrent", "rss");
+  const rulesFilePath = path.join(rssDir, "download_rules.json");
+  const feedsFilePath = path.join(rssDir, "feeds.json");
+  if (!fs.existsSync(rulesFilePath) && !fs.existsSync(feedsFilePath)) {
+    return { cleanedRules: 0, cleanedFeeds: 0 };
+  }
+
+  let rulesObj = null;
+  let feedsObj = null;
+  let dirtyRules = 0;
+  let dirtyFeeds = 0;
+
+  try {
+    if (fs.existsSync(rulesFilePath)) {
+      rulesObj = JSON.parse(fs.readFileSync(rulesFilePath, "utf8")) || {};
+      for (const [, ruleVal] of Object.entries(rulesObj)) {
+        if (!ruleVal || typeof ruleVal !== "object" || ruleVal.enabled === false) continue;
+        const affected = Array.isArray(ruleVal.affectedFeeds) ? ruleVal.affectedFeeds : [];
+        if (affected.some((f) => isDeadEnclosureRssFeed(f))) {
+          dirtyRules++;
+        }
+      }
+    }
+    if (fs.existsSync(feedsFilePath)) {
+      feedsObj = JSON.parse(fs.readFileSync(feedsFilePath, "utf8")) || {};
+      const autoGroup = feedsObj["自动追番"];
+      if (autoGroup && typeof autoGroup === "object" && typeof autoGroup.url !== "string") {
+        for (const [, fVal] of Object.entries(autoGroup)) {
+          if (fVal && typeof fVal.url === "string" && isDeadEnclosureRssFeed(fVal.url)) {
+            dirtyFeeds++;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    return { cleanedRules: 0, cleanedFeeds: 0, error: e.message };
+  }
+
+  if (dirtyRules === 0 && dirtyFeeds === 0) {
+    const bakPath = path.join(rssDir, "download_rules.pre-v08.bak.json");
+    if (plugin?.settings && !plugin.settings._migratedPreV08QbRules && fs.existsSync(bakPath)) {
+      try {
+        const bakObj = JSON.parse(fs.readFileSync(bakPath, "utf8")) || {};
+        const subMap = ensurePluginRssSubMap(plugin);
+        let migrated = 0;
+        for (const [rawRuleName, ruleVal] of Object.entries(bakObj)) {
+          if (!ruleVal || typeof ruleVal !== "object" || ruleVal.enabled === false) continue;
+          const cleanRuleName = String(rawRuleName || "").trim();
+          if (!cleanRuleName) continue;
+          const affected = Array.isArray(ruleVal.affectedFeeds) ? ruleVal.affectedFeeds : [];
+          const primaryFeed = selectSpecificFeedFromAffected(affected, cleanRuleName);
+          if (primaryFeed && !isGenericSiteWideRssFeed(primaryFeed) && !subMap[cleanRuleName]) {
+            const parsedLast = ruleVal.lastMatch ? Date.parse(ruleVal.lastMatch) || 0 : 0;
+            subMap[cleanRuleName] = {
+              animeName: cleanRuleName,
+              rssUrl: primaryFeed,
+              keyword: cleanRuleName,
+              savePath: String(ruleVal.savePath || ruleVal.torrentParams?.save_path || "").trim(),
+              mustContain: String(ruleVal.mustContain || ""),
+              mustNotContain: String(ruleVal.mustNotContain || "720p|720P|480p"),
+              enabled: true,
+              baselineTimeMs: parsedLast > 0 ? parsedLast : Date.now(),
+              matchedHashes: [],
+              updatedAt: Date.now()
+            };
+            migrated++;
+          }
+        }
+        plugin.settings._migratedPreV08QbRules = true;
+        if (typeof plugin.saveSettings === "function") {
+          await plugin.saveSettings().catch(() => {});
+        }
+        return { cleanedRules: 0, cleanedFeeds: 0, migratedFromBackup: migrated };
+      } catch (_) {}
+    }
+    return { cleanedRules: 0, cleanedFeeds: 0 };
+  }
+
+  const stopInfo = await gracefullyStopQbittorrentIfRunning(plugin);
+  try {
+    // Re-read after qB flush so nothing is lost
+    if (fs.existsSync(rulesFilePath)) {
+      const raw = fs.readFileSync(rulesFilePath, "utf8");
+      const bakPath = path.join(rssDir, "download_rules.pre-v08.bak.json");
+      if (!fs.existsSync(bakPath)) fs.writeFileSync(bakPath, raw, "utf8");
+      rulesObj = JSON.parse(raw) || {};
+    }
+    if (fs.existsSync(feedsFilePath)) {
+      const rawF = fs.readFileSync(feedsFilePath, "utf8");
+      const bakFPath = path.join(rssDir, "feeds.pre-v08.bak.json");
+      if (!fs.existsSync(bakFPath)) fs.writeFileSync(bakFPath, rawF, "utf8");
+      feedsObj = JSON.parse(rawF) || {};
+    }
+
+    const subMap = ensurePluginRssSubMap(plugin);
+    let settingsChanged = false;
+    let cleanedRules = 0;
+    let cleanedFeeds = 0;
+
+    if (rulesObj) {
+      for (const [rawRuleName, ruleVal] of Object.entries(rulesObj)) {
+        if (!ruleVal || typeof ruleVal !== "object") continue;
+        const cleanRuleName = String(rawRuleName || "").trim();
+        const affected = Array.isArray(ruleVal.affectedFeeds) ? ruleVal.affectedFeeds : [];
+        if (affected.some((f) => isDeadEnclosureRssFeed(f))) {
+          if (ruleVal.enabled !== false) {
+            ruleVal.enabled = false;
+            cleanedRules++;
+            const primaryFeed = selectSpecificFeedFromAffected(affected, cleanRuleName);
+            const savePath = String(ruleVal.savePath || ruleVal.torrentParams?.save_path || "").trim();
+            if (cleanRuleName && primaryFeed && !isGenericSiteWideRssFeed(primaryFeed) && !subMap[cleanRuleName]) {
+              const parsedLast = ruleVal.lastMatch ? Date.parse(ruleVal.lastMatch) || 0 : 0;
+              subMap[cleanRuleName] = {
+                animeName: cleanRuleName,
+                rssUrl: primaryFeed,
+                keyword: cleanRuleName,
+                savePath,
+                mustContain: String(ruleVal.mustContain || ""),
+                mustNotContain: String(ruleVal.mustNotContain || "720p|720P|480p"),
+                enabled: true,
+                baselineTimeMs: parsedLast > 0 ? parsedLast : Date.now(),
+                matchedHashes: [],
+                updatedAt: Date.now()
+              };
+              settingsChanged = true;
+            }
+          }
+        }
+      }
+      if (cleanedRules > 0) {
+        fs.writeFileSync(rulesFilePath, JSON.stringify(rulesObj, null, 4), "utf8");
+      }
+    }
+
+    if (feedsObj && feedsObj["自动追番"] && typeof feedsObj["自动追番"] === "object") {
+      for (const [k, v] of Object.entries(feedsObj["自动追番"])) {
+        if (v && typeof v.url === "string" && isDeadEnclosureRssFeed(v.url)) {
+          delete feedsObj["自动追番"][k];
+          cleanedFeeds++;
+        }
+      }
+      if (cleanedFeeds > 0) {
+        fs.writeFileSync(feedsFilePath, JSON.stringify(feedsObj, null, 4), "utf8");
+      }
+    }
+
+    if (settingsChanged && plugin && typeof plugin.saveSettings === "function") {
+      await plugin.saveSettings().catch(() => {});
+    }
+    if (stopInfo.wasRunning && stopInfo.exePath) {
+      await launchQbittorrentClient(plugin, { noSplash: true }).catch(() => {});
+    }
+    return { cleanedRules, cleanedFeeds };
+  } catch (err) {
+    if (stopInfo.wasRunning) {
+      await launchQbittorrentClient(plugin, { noSplash: true }).catch(() => {});
+    }
+    return { cleanedRules: 0, cleanedFeeds: 0, error: err.message };
+  }
+}
+
+/**
+ * 插件侧磁力 RSS 追更轮询器：拉取绑定的 RSS XML，提取 infoHash 并过滤已看/本地已有/已投递剧集，通过镜像种子或磁力链推送给 qBittorrent。
+ */
+async function pollPluginRssSubscriptions(plugin, options = {}) {
+  if (!isDesktopNodeAvailable() || !plugin?.settings) return { checked: 0, dispatched: 0 };
+  if (plugin._isPollingPluginRss) return { checked: 0, dispatched: 0 };
+  plugin._isPollingPluginRss = true;
+
+  try {
+    await healPollutedPluginRssSubscriptions(plugin).catch(() => {});
+    const qbStatus = detectQbittorrentStatus(plugin);
+    if (!qbStatus.enabled || !qbStatus.installed) return { checked: 0, dispatched: 0 };
+
+    const subMap = ensurePluginRssSubMap(plugin);
+    const items = typeof plugin.collectDashboardItems === "function" ? await plugin.collectDashboardItems().catch(() => []) : [];
+    const byName = new Map();
+    const bySavePath = new Map();
+    const byNotePath = new Map();
+    for (const it of items) {
+      const cleanItName = String(it?.name || "").trim();
+      if (cleanItName) byName.set(cleanItName, it);
+      const normItSave = normalizeSubSavePathKey(it?.downloadPath);
+      if (normItSave && normItSave !== "无") bySavePath.set(normItSave, it);
+      if (it?.file?.path) byNotePath.set(it.file.path, it);
+
+      if (it?.rssUrl && !isGenericSiteWideRssFeed(it.rssUrl) && it.state === "在看" && cleanItName && !subMap[cleanItName]) {
+        const alreadyCoveredByPath = normItSave && Array.from(Object.values(subMap)).some(
+          (existing) => normalizeSubSavePathKey(existing?.savePath) === normItSave
+        );
+        if (!alreadyCoveredByPath) {
+          subMap[cleanItName] = {
+            animeName: cleanItName,
+            notePath: it.file?.path || "",
+            rssUrl: it.rssUrl,
+            keyword: it.downloadSourceKeyword || cleanItName,
+            streamId: it.downloadStreamId || "",
+            savePath: it.downloadPath && it.downloadPath !== "无" ? it.downloadPath : "",
+            mustContain: "",
+            mustNotContain: "720p|720P|480p",
+            enabled: true,
+            baselineTimeMs: Date.now() - 7 * 86400000,
+            matchedHashes: [],
+            updatedAt: Date.now()
+          };
+        }
+      }
+    }
+
+    let checked = 0;
+    let dispatched = 0;
+    let dirty = false;
+
+    for (const [key, sub] of Object.entries(subMap)) {
+      if (!sub || !sub.enabled || !sub.rssUrl) continue;
+      // 终极安全闸门：严禁轮询任何未带过滤参数的全站总源
+      if (isGenericSiteWideRssFeed(sub.rssUrl)) {
+        continue;
+      }
+
+      const resolved = resolveNoteItemForSubscription(key, sub, items, byName, bySavePath, byNotePath);
+      const noteItem = resolved.item;
+      if (resolved.matched && noteItem.state && noteItem.state !== "在看" && !options.forceAll) {
+        continue;
+      }
+      if (resolved.matched && noteItem.file?.path && sub.notePath !== noteItem.file.path) {
+        sub.notePath = noteItem.file.path;
+        dirty = true;
+      }
+
+      checked++;
+      let xml = "";
+      try {
+        xml = await fetchComicatRssXml(sub.rssUrl);
+      } catch (_) {
+        continue;
+      }
+      if (!xml) continue;
+
+      const parsed = parseComicatRssXml(xml, noteItem.name);
+      const dedup = deduplicateEpisodeItems(parsed.items || []);
+      const watchedEp = Number(noteItem.watchedEpisodes) || 0;
+      const saveDir = (noteItem.downloadPath && noteItem.downloadPath !== "无" ? noteItem.downloadPath : sub.savePath) || "";
+      const localInspect = saveDir ? noteUtils.inspectLocalFolder(saveDir, watchedEp) : null;
+      const localEpSet = new Set(
+        Array.isArray(localInspect?.videoFiles) ? localInspect.videoFiles.map((v) => Number(v.episode)) : []
+      );
+      const matchedSet = new Set(Array.isArray(sub.matchedHashes) ? sub.matchedHashes : []);
+      const baseline = Number(sub.baselineTimeMs) || 0;
+      const mustContainRaw = String(sub.mustContain || "").trim();
+      const mustNotRaw = String(sub.mustNotContain || "720p|720P|480p").trim();
+
+      const newTargets = [];
+      for (const epItem of dedup.episodes) {
+        if (!epItem.infoHash) continue;
+        if (matchedSet.has(epItem.infoHash)) continue;
+        const itemTitle = String(epItem.title || "");
+        if (mustContainRaw && !matchesQbWildcardFilter(itemTitle, mustContainRaw)) continue;
+        if (mustNotRaw && matchesQbWildcardFilter(itemTitle, mustNotRaw)) continue;
+        const epNum = Number(epItem.episode);
+        if (Number.isFinite(epNum) && (epNum <= watchedEp || localEpSet.has(epNum))) {
+          matchedSet.add(epItem.infoHash);
+          dirty = true;
+          continue;
+        }
+        if (baseline > 0 && epItem.pubTimeMs > 0 && epItem.pubTimeMs <= baseline) {
+          matchedSet.add(epItem.infoHash);
+          dirty = true;
+          continue;
+        }
+        newTargets.push(epItem);
+      }
+
+      if (newTargets.length > 0) {
+        const dlRes = await dispatchDownloadToQbittorrent(plugin, noteItem, newTargets);
+        if (dlRes && dlRes.ok) {
+          dispatched += newTargets.length;
+          for (const t of newTargets) matchedSet.add(t.infoHash);
+          sub.lastMatchTitle = newTargets[0].title || "";
+          dirty = true;
+        }
+      }
+      sub.matchedHashes = Array.from(matchedSet).slice(-400);
+      sub.lastCheckedAt = Date.now();
+    }
+
+    if (dirty && typeof plugin.saveSettings === "function") {
+      await plugin.saveSettings().catch(() => {});
+    }
+    return { checked, dispatched };
+  } finally {
+    plugin._isPollingPluginRss = false;
+  }
+}
+
+/**
+ * 将动画的专属 RSS 订阅地址与自动下载规则同步生效：
+ * - 若订阅源为漫猫 (comicat.org) 等 enclosure 指向失效死链 (v2.uploadbt.com) 的源，绝不写入 qB 原生自动下载器（防右下角超时报错），
+ *   而是交由插件内置磁力追更引擎接管并立即清理旧死链规则；
+ * - 若为标准有效 .torrent 源（如蜜柑计划等），则同步写入 qBittorrent。
  */
 async function syncRssFeedAndRuleToQbittorrent(
   plugin,
   item,
   { keyword, rssUrl, streamId, missingEpisodes = [] } = {}
 ) {
-  const cleanRss = String(rssUrl || "").trim();
+  let cleanRss = String(rssUrl || "").trim();
   if (!cleanRss) return { ok: false, reason: "empty_rss" };
 
   if (!isDesktopNodeAvailable()) return { ok: false, reason: "mobile_env" };
   const appData = getSafeEnv().APPDATA || "";
   if (!appData) return { ok: false, reason: "no_appdata" };
+
+  const { targetPath } = await ensureAnimeLocalDownloadFolder(plugin, item, true);
+  const normSavePath = String(targetPath || "").replace(/\\/g, "/");
+  const ruleName = String(item?.name || keyword || "未命名番剧").trim();
+  if (isGenericSiteWideRssFeed(cleanRss)) {
+    const kwFallback = String(keyword || ruleName).trim();
+    if (!kwFallback) return { ok: false, reason: "generic_site_wide_rss_blocked" };
+    cleanRss = buildComicatRssUrl(kwFallback);
+  }
+  const feedTitle = `${item?.name || keyword}${streamId ? ` [${streamId}]` : ""}`;
+
+  // 漫猫等死链 enclosure 源：走插件内置磁力追更引擎，并自动停用 qB 中可能残留的死链规则
+  if (isDeadEnclosureRssFeed(cleanRss)) {
+    await sanitizeDeadQbittorrentComicatRules(plugin).catch(() => {});
+    const subMap = ensurePluginRssSubMap(plugin);
+    const seedHashes = new Set(Array.isArray(subMap[ruleName]?.matchedHashes) ? subMap[ruleName].matchedHashes : []);
+    for (const ep of Array.isArray(missingEpisodes) ? missingEpisodes : []) {
+      if (ep?.infoHash) seedHashes.add(String(ep.infoHash).toLowerCase());
+    }
+    subMap[ruleName] = {
+      animeName: ruleName,
+      notePath: item?.file?.path || "",
+      rssUrl: cleanRss,
+      keyword: String(keyword || ruleName),
+      streamId: String(streamId || ""),
+      savePath: normSavePath,
+      mustContain: "",
+      mustNotContain: "720p|720P|480p",
+      enabled: true,
+      baselineTimeMs: Date.now(),
+      matchedHashes: Array.from(seedHashes).slice(-400),
+      lastCheckedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    if (plugin && typeof plugin.saveSettings === "function") {
+      await plugin.saveSettings().catch(() => {});
+    }
+
+    let dispatchedCount = 0;
+    if (Array.isArray(missingEpisodes) && missingEpisodes.length > 0) {
+      const dlRes = await dispatchDownloadToQbittorrent(plugin, item, missingEpisodes);
+      if (dlRes && dlRes.ok) {
+        dispatchedCount = dlRes.dispatchedCount || missingEpisodes.length;
+      }
+    }
+
+    return {
+      ok: true,
+      pluginManagedMagnetRss: true,
+      feedTitle,
+      ruleName,
+      savePath: normSavePath,
+      restartedQb: false,
+      dispatchedCount
+    };
+  }
 
   const rssDir = path.join(appData, "qBittorrent", "rss");
   try {
@@ -1004,14 +1724,9 @@ async function syncRssFeedAndRuleToQbittorrent(
   const feedsFilePath = path.join(rssDir, "feeds.json");
   const rulesFilePath = path.join(rssDir, "download_rules.json");
 
-  const { targetPath } = await ensureAnimeLocalDownloadFolder(plugin, item, true);
-  const normSavePath = String(targetPath || "").replace(/\\/g, "/");
-
-  // 若 qBittorrent 正在运行，先平滑停止进程，避免 qB 在退出时用旧内存状态覆盖我们写入的 feeds.json 和 download_rules.json
   const stopInfo = await gracefullyStopQbittorrentIfRunning(plugin);
 
   try {
-    // 1. 写入 feeds.json（优先放入「自动追番」分组下，若无则自动创建）
     let feedsObj = {};
     if (fs.existsSync(feedsFilePath)) {
       try {
@@ -1035,16 +1750,15 @@ async function syncRssFeedAndRuleToQbittorrent(
       }
     }
 
-    const feedTitle = existingFeedKey || `${item?.name || keyword}${streamId ? ` [${streamId}]` : ""}`;
+    const finalFeedTitle = existingFeedKey || feedTitle;
     const uid = existingUid || `{${generateRandomUuid()}}`;
 
-    feedsObj["自动追番"][feedTitle] = {
+    feedsObj["自动追番"][finalFeedTitle] = {
       uid,
       url: cleanRss
     };
     fs.writeFileSync(feedsFilePath, JSON.stringify(feedsObj, null, 4), "utf8");
 
-    // 2. 写入 download_rules.json（启用自动下载规则，保存路径指向该番剧目录）
     let rulesObj = {};
     if (fs.existsSync(rulesFilePath)) {
       try {
@@ -1054,7 +1768,6 @@ async function syncRssFeedAndRuleToQbittorrent(
       }
     }
 
-    const ruleName = String(item?.name || keyword || "未命名番剧").trim();
     const prevRule = rulesObj[ruleName] && typeof rulesObj[ruleName] === "object" ? rulesObj[ruleName] : {};
     rulesObj[ruleName] = {
       addPaused: false,
@@ -1092,7 +1805,6 @@ async function syncRssFeedAndRuleToQbittorrent(
     };
     fs.writeFileSync(rulesFilePath, JSON.stringify(rulesObj, null, 4), "utf8");
 
-    // 3. 确保 qBittorrent.ini 开启了 RSS 自动刷新与自动下载开关 (RSS\AutoDownloader\EnableProcessing=true)
     const iniPath = path.join(appData, "qBittorrent", "qBittorrent.ini");
     if (fs.existsSync(iniPath)) {
       try {
@@ -1110,7 +1822,6 @@ async function syncRssFeedAndRuleToQbittorrent(
       } catch (e) {}
     }
 
-    // 4. 若原本正在运行或存在待立即下载的缺失集数，自动重新拉起 qBittorrent（并投递缺失剧集）
     let dispatchedCount = 0;
     if (Array.isArray(missingEpisodes) && missingEpisodes.length > 0) {
       const dlRes = await dispatchDownloadToQbittorrent(plugin, item, missingEpisodes);
@@ -1123,7 +1834,7 @@ async function syncRssFeedAndRuleToQbittorrent(
 
     return {
       ok: true,
-      feedTitle,
+      feedTitle: finalFeedTitle,
       ruleName,
       savePath: normSavePath,
       restartedQb: stopInfo.wasRunning,
@@ -1146,8 +1857,24 @@ async function bindAnimeDownloadSourceToNote(
   item,
   { keyword, rssUrl, streamId, missingEpisodes = [], syncQb = true } = {}
 ) {
-  if (!item || !item.file) return false;
-  let content = await plugin.app.vault.read(item.file);
+  const targetFile =
+    item?.file ||
+    (item?.path && plugin?.app?.vault
+      ? plugin.app.vault.getAbstractFileByPath(item.path)
+      : null);
+  if (!item || !targetFile) return false;
+  let content = await plugin.app.vault.read(targetFile);
+  if (typeof noteUtils.inspectAndUpgradeAnimeNoteContent === "function") {
+    const upg = noteUtils.inspectAndUpgradeAnimeNoteContent(content, {
+      ...(typeof plugin?.getScoreDisplayOptions === "function"
+        ? plugin.getScoreDisplayOptions()
+        : {}),
+      cachedPersonalScore: plugin?.settings?.personalRatingCache?.[targetFile.path] || ""
+    });
+    if (upg.isTargetAnimeNote && upg.needsUpgrade) {
+      content = upg.upgradedContent;
+    }
+  }
   if (keyword !== undefined) {
     content = noteUtils.updateFrontmatterField(content, "下载源关键词", keyword);
     item.downloadSourceKeyword = keyword;
@@ -1161,7 +1888,12 @@ async function bindAnimeDownloadSourceToNote(
     item.downloadStreamId = streamId;
   }
   content = noteUtils.syncNoteCalloutFromFrontmatter(content);
-  await plugin.modifyNoteSafely(item.file, content);
+  if (typeof plugin?.modifyNoteSafely === "function") {
+    await plugin.modifyNoteSafely(targetFile, content);
+  } else {
+    await plugin.app.vault.modify(targetFile, content);
+  }
+  item.file = targetFile;
 
   let qbSyncResult = null;
   if (syncQb && rssUrl) {
@@ -1180,10 +1912,10 @@ async function bindAnimeDownloadSourceToNote(
     priority: roxyMascotService.PRIORITY.HIGH,
     dedupeKey: `bind_rss:${item.name}:${keyword}`,
     message: qbSyncResult?.ok
-      ? `已经为《${item.name}》锁定了「${streamId || keyword}」专属源，并已同步写入 qBittorrent 的「RSS 阅读器 (自动追番)」与「RSS 下载器」规则${
+      ? `已经为《${item.name}》锁定了「${streamId || keyword}」专属源并开启自动追更${
           qbSyncResult.dispatchedCount > 0 ? `，同时开始为您下载缺失的 ${qbSyncResult.dispatchedCount} 集` : ""
         }哦！`
-      : `已经为《${item.name}》锁定了「${streamId || keyword}」专属单集源并记入案卷，之后随时可以一键核对补齐新集哦。`
+      : `已经为《${item.name}》锁定了「${streamId || keyword}」专属单集源并记入笔记，之后随时可以一键核对补齐新集哦。`
   });
   return qbSyncResult || { ok: true };
 }
@@ -1597,6 +2329,27 @@ function detectExistingRssAndDownloadRules(plugin, item, currentKeyword = "", cu
     }
   }
 
+  const subMap = ensurePluginRssSubMap(plugin);
+  for (const [subKey, subVal] of Object.entries(subMap)) {
+    if (!subVal || typeof subVal !== "object" || !subVal.rssUrl) continue;
+    const decodedSubRss = safeDecodeRssUrl(subVal.rssUrl);
+    const isSame = normCurrentRss && decodedSubRss.toLowerCase() === normCurrentRss;
+    if (isSame || textMatchesTokens(subKey) || textMatchesTokens(subVal.animeName) || textMatchesTokens(decodedSubRss)) {
+      matchedRules.push({
+        ruleName: `${subVal.animeName || subKey}（插件磁力追更）`,
+        enabled: subVal.enabled !== false,
+        affectedFeeds: [subVal.rssUrl],
+        decodedFeeds: [decodedSubRss],
+        mustContain: String(subVal.mustContain || ""),
+        mustNotContain: String(subVal.mustNotContain || ""),
+        episodeFilter: "",
+        savePath: String(subVal.savePath || ""),
+        lastMatch: subVal.lastCheckedAt ? new Date(subVal.lastCheckedAt).toLocaleString() : "",
+        matchReason: "插件内置磁力追更已接管（绕开失效种子站）"
+      });
+    }
+  }
+
   const noteBoundRss = String(item?.rssUrl || "").trim();
   const noteBoundKeyword = String(item?.downloadSourceKeyword || "").trim();
   const hasEnabledRule = matchedRules.some((r) => r.enabled);
@@ -1649,7 +2402,7 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
 
       contentEl.createEl("h2", {
         cls: "curator-dl-title",
-        text: `🔍 RSS 订阅与自动下载规则查重确认 · 《${item?.name || "未命名"}》`
+        text: `RSS 订阅与自动下载查重确认 · 《${item?.name || "未命名"}》`
       });
 
       const statusBanner = contentEl.createDiv(
@@ -1667,8 +2420,8 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
         statusBanner.createDiv({
           cls: "curator-rss-check-banner-title",
           text: report.hasEnabledRule
-            ? `⚠️ 检测到已存在 ${report.matchedRules.length} 条相关下载规则（其中 ${enabledCount} 条正处于「已启用」状态）及 ${report.matchedFeeds.length} 条 RSS 订阅源！`
-            : `ℹ️ 检测到已存在相关记录（下载规则 ${report.matchedRules.length} 条 · RSS 订阅源 ${report.matchedFeeds.length} 条 · 笔记绑定 ${report.noteBoundRss ? "1 项" : "0 项"}）`
+            ? `检测到已存在 ${report.matchedRules.length} 条相关下载规则（其中 ${enabledCount} 条正处于「已启用」状态）及 ${report.matchedFeeds.length} 条 RSS 订阅源`
+            : `检测到已存在相关记录（下载规则 ${report.matchedRules.length} 条 · RSS 订阅源 ${report.matchedFeeds.length} 条 · 笔记绑定 ${report.noteBoundRss ? "1 项" : "0 项"}）`
         });
         statusBanner.createDiv({
           cls: "curator-rss-check-banner-sub",
@@ -1677,7 +2430,7 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
       } else {
         statusBanner.createDiv({
           cls: "curator-rss-check-banner-title",
-          text: "✅ 检测结果：未发现已存在的同名/相关 RSS 订阅或自动下载规则"
+          text: "检测结果：未发现已存在的同名或相关 RSS 订阅与自动下载规则"
         });
         statusBanner.createDiv({
           cls: "curator-rss-check-banner-sub",
@@ -1707,7 +2460,7 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
           const topLine = itemRow.createDiv("curator-rss-check-item-top");
           topLine.createSpan({
             cls: `curator-rss-rule-state-pill ${r.enabled ? "is-enabled" : "is-disabled"}`,
-            text: r.enabled ? "🟢 已启用 (Enabled)" : "⚪ 已停用 (Disabled)"
+            text: r.enabled ? "已启用" : "已停用"
           });
           topLine.createSpan({
             cls: "curator-rss-check-item-name",
@@ -1758,7 +2511,7 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
           const topLine = feedRow.createDiv("curator-rss-check-item-top");
           topLine.createSpan({
             cls: "curator-rss-rule-state-pill is-enabled",
-            text: `📂 ${f.folderPath}`
+            text: `${f.folderPath}`
           });
           topLine.createSpan({
             cls: "curator-rss-check-item-name",
@@ -1800,7 +2553,7 @@ function openRssDuplicateConfirmModal(plugin, item, report, actionMeta = {}, onC
       const promptBox = contentEl.createDiv("curator-rss-check-prompt");
       promptBox.createDiv({
         cls: "curator-rss-check-prompt-q",
-        text: `❓ 您当前请求执行：「${actionTitle}」${
+        text: `当前操作：「${actionTitle}」${
           targetKw ? `（关键词：${targetKw}）` : ""
         }。继续添加或执行可能会导致 RSS 订阅重复或剧集重复下载，是否确认继续？`
       });
@@ -1901,14 +2654,21 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       this.baseUrl = normalizeComicatBaseUrl(plugin);
       this.currentKeyword =
         String(item?.downloadSourceKeyword || item?.name || "").trim();
+      this.broadKeyword = String(item?.name || "").trim();
       this.broadStreams = [];
+      this.broadHitLimit = false;
+      this.broadSnapshot = null;
       this.activeStreamId = "";
+      this._userManuallyPickedStream = false;
+      this.autoPromotedStreamLabel = "";
       this.currentEpisodes = [];
       this.currentPacks = [];
       this.currentDedupInfo = null;
       this.streamsExpanded = false;
       this.isLoading = false;
       this.errorMessage = "";
+      this.lastFolderError = "";
+      this.showCustomFolderInput = false;
     }
 
     onOpen() {
@@ -1955,7 +2715,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       const titleCol = header.createDiv("curator-dl-title-col");
       titleCol.createDiv({
         cls: "curator-dl-kicker",
-        text: "ANIME DOWNLOAD & SINGLE-EPISODE RSS WORKBENCH"
+        text: "番剧下载与单集 RSS 助手"
       });
       titleCol.createEl("h2", {
         cls: "curator-dl-title",
@@ -1972,7 +2732,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       if (this.item?.rssUrl) {
         const boundBadge = metaSub.createSpan({
           cls: "curator-dl-bound-pill",
-          text: `📌 已绑定源：${this.item.downloadSourceKeyword || "专属 RSS"}`
+          text: `已绑定源：${this.item.downloadSourceKeyword || "专属 RSS"}`
         });
         boundBadge.title = this.item.rssUrl;
       }
@@ -2004,17 +2764,17 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
       if (this.plugin.settings.enableComicatIntegration !== false) {
         const searchBtn = searchRow.createEl("button", {
-          cls: "curator-dl-btn is-primary",
-          text: "🔍 检索漫猫发布源"
+          cls: "curator-dl-btn is-primary"
         });
+        v07Core.setBtnIconLabel(searchBtn, "search", "检索漫猫发布源", 14);
         searchBtn.onclick = () => {
           this.performSearch(this.keywordInput.value.trim(), { preserveStreams: false });
         };
 
         const openWebBtn = searchRow.createEl("button", {
-          cls: "curator-dl-btn",
-          text: "↗ 漫猫网页搜索"
+          cls: "curator-dl-btn"
         });
+        v07Core.setBtnIconLabel(openWebBtn, "external", "漫猫网页搜索", 14);
         openWebBtn.title = "在浏览器中打开 www.comicat.org 搜索结果页";
         openWebBtn.onclick = () => {
           const kw = this.keywordInput.value.trim() || this.item?.name || "";
@@ -2022,9 +2782,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         };
 
         const copyRssBtn = searchRow.createEl("button", {
-          cls: "curator-dl-btn",
-          text: "📋 复制当前 RSS"
+          cls: "curator-dl-btn"
         });
+        v07Core.setBtnIconLabel(copyRssBtn, "copy", "复制当前 RSS", 14);
         copyRssBtn.dataset.dlAction = "copy-rss";
         copyRssBtn.title = "检测是否已有 RSS 订阅/下载规则并复制当前漫猫专属 RSS 订阅地址";
         copyRssBtn.onclick = () => {
@@ -2049,9 +2809,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       }
 
       const customWebBtn = searchRow.createEl("button", {
-        cls: "curator-dl-btn is-subtle",
-        text: "↗ 备用站搜索"
+        cls: "curator-dl-btn is-subtle"
       });
+      v07Core.setBtnIconLabel(customWebBtn, "external", "备用站搜索", 14);
       customWebBtn.title = "在自定义备用下载网站（如蜜柑计划/动漫花园）中搜索该动画";
       customWebBtn.onclick = () => {
         const kw = this.keywordInput.value.trim() || this.item?.name || "";
@@ -2136,31 +2896,60 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       const folderActions = folderCol.createDiv("curator-dl-env-actions");
       if (!folderExists) {
         const createDirBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn is-accent",
-          text: "✨ 自动生成并创建本地目录"
+          cls: "curator-dl-mini-btn is-accent"
         });
+        v07Core.setBtnIconLabel(createDirBtn, "folder", "自动生成并创建本地目录", 13);
         createDirBtn.onclick = async () => {
-          const { targetPath } = await ensureAnimeLocalDownloadFolder(this.plugin, this.item, true);
-          if (NoticeClass) {
-            new NoticeClass(`已创建并绑定本地番剧目录：\n${targetPath}`);
+          createDirBtn.disabled = true;
+          createDirBtn.textContent = "正在创建本地目录...";
+          const res = await ensureAnimeLocalDownloadFolder(this.plugin, this.item, true);
+          createDirBtn.disabled = false;
+          if (res.ok && res.createdOnDisk) {
+            this.lastFolderError = "";
+            this.showCustomFolderInput = false;
+            if (NoticeClass) {
+              new NoticeClass(
+                `已创建并绑定本地番剧目录：\n${res.targetPath}${
+                  res.noteError ? `\n（提示：${res.noteError}）` : ""
+                }`,
+                4800
+              );
+            }
+          } else {
+            this.lastFolderError =
+              res.error ||
+              res.noteError ||
+              "无法创建本地文件夹，请检查本地动画根目录路径是否存在及磁盘写入权限。";
+            if (NoticeClass) {
+              new NoticeClass(`本地目录创建未成功：\n${this.lastFolderError}`, 6500);
+            }
           }
           this.renderEnvStatus();
           this.renderResultsMount();
           if (typeof this.onUpdated === "function") this.onUpdated();
         };
+
+        const customDirToggleBtn = folderActions.createEl("button", {
+          cls: "curator-dl-mini-btn",
+          text: this.showCustomFolderInput ? "收起路径输入" : "手动指定目录"
+        });
+        customDirToggleBtn.onclick = () => {
+          this.showCustomFolderInput = !this.showCustomFolderInput;
+          this.renderEnvStatus();
+        };
       } else {
         const openDirBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn",
-          text: "📂 打开本地文件夹"
+          cls: "curator-dl-mini-btn"
         });
+        v07Core.setBtnIconLabel(openDirBtn, "folder", "打开本地文件夹", 13);
         openDirBtn.onclick = async () => {
           await noteUtils.openLocalPathSafely(rawPath);
         };
 
         const rescanBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn",
-          text: "🔄 刷新本地状态"
+          cls: "curator-dl-mini-btn"
         });
+        v07Core.setBtnIconLabel(rescanBtn, "refresh", "刷新本地状态", 13);
         rescanBtn.onclick = async () => {
           if (this.item?.file) {
             await this.plugin.checkOneLocalStatus(this.item.file);
@@ -2172,9 +2961,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         };
 
         const collectCloudBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn is-accent",
-          text: "☁️ 从夸克/网盘目录归集"
+          cls: "curator-dl-mini-btn is-accent"
         });
+        v07Core.setBtnIconLabel(collectCloudBtn, "cloud", "从夸克/网盘目录归集", 13);
         collectCloudBtn.title =
           "自动扫描夸克网盘 (QuarkDownload)、百度网盘、迅雷及系统下载目录，将属于该番剧的视频一键移入本番文件夹";
         collectCloudBtn.onclick = async () => {
@@ -2197,28 +2986,116 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           this.renderResultsMount();
           if (typeof this.onUpdated === "function") this.onUpdated();
         };
+
+        const changeDirBtn = folderActions.createEl("button", {
+          cls: "curator-dl-mini-btn is-subtle",
+          text: this.showCustomFolderInput ? "收起路径修改" : "更换目录"
+        });
+        changeDirBtn.onclick = () => {
+          this.showCustomFolderInput = !this.showCustomFolderInput;
+          this.renderEnvStatus();
+        };
+      }
+
+      if (this.lastFolderError) {
+        const errBox = folderCol.createDiv("curator-dl-folder-error-box");
+        errBox.createDiv({
+          cls: "curator-dl-folder-error-text",
+          text: this.lastFolderError
+        });
+        const errActs = errBox.createDiv("curator-dl-folder-error-actions");
+        if (!this.showCustomFolderInput) {
+          const manualBtn = errActs.createEl("button", {
+            cls: "curator-dl-mini-btn is-accent",
+            text: "手动输入本番目录"
+          });
+          manualBtn.onclick = () => {
+            this.showCustomFolderInput = true;
+            this.renderEnvStatus();
+          };
+        }
+        const openSettingsBtn = errActs.createEl("button", {
+          cls: "curator-dl-mini-btn"
+        });
+        v07Core.setBtnIconLabel(openSettingsBtn, "settings", "前往设置检查「本地动画根目录」", 13);
+        openSettingsBtn.onclick = () => {
+          this.close();
+          if (this.plugin?.app?.setting) {
+            this.plugin.app.setting.open();
+            if (typeof this.plugin.app.setting.openTabById === "function") {
+              this.plugin.app.setting.openTabById("bangumi-manager");
+            }
+          }
+        };
+      }
+
+      if (this.showCustomFolderInput) {
+        const customRow = folderCol.createDiv("curator-dl-custom-folder-row");
+        const cleanRoot = String(this.plugin?.settings?.localAnimeRoot || "").trim().replace(/[\\/]+$/, "");
+        const defaultSuggested =
+          hasPath && rawPath !== "无"
+            ? rawPath
+            : cleanRoot
+              ? `${cleanRoot}/${
+                  this.item?.year || new Date().getFullYear()
+                }/${this.item?.season || "10月新番"}/${noteManager.getSafeFileName(
+                  this.item?.name || "未命名动画"
+                )}`
+              : "";
+        const dirInput = customRow.createEl("input", {
+          type: "text",
+          cls: "curator-dl-keyword-input curator-mono",
+          placeholder: "输入本机保存文件夹路径（如 D:/Anime/败犬女主太多了）..."
+        });
+        dirInput.value = defaultSuggested;
+        const saveCustomDirBtn = customRow.createEl("button", {
+          cls: "curator-dl-mini-btn is-primary",
+          text: "保存并创建"
+        });
+        saveCustomDirBtn.onclick = async () => {
+          const val = dirInput.value.trim();
+          if (!val) return;
+          saveCustomDirBtn.disabled = true;
+          const res = await ensureAnimeLocalDownloadFolder(this.plugin, this.item, true, val);
+          saveCustomDirBtn.disabled = false;
+          if (res.ok && res.createdOnDisk) {
+            this.lastFolderError = "";
+            this.showCustomFolderInput = false;
+            if (NoticeClass) {
+              new NoticeClass(`已绑定并创建目录：\n${res.targetPath}`, 4500);
+            }
+          } else {
+            this.lastFolderError = res.error || res.noteError || "指定目录无法创建";
+            if (NoticeClass) {
+              new NoticeClass(`目录创建未成功：\n${this.lastFolderError}`, 6000);
+            }
+          }
+          this.renderEnvStatus();
+          this.renderResultsMount();
+          if (typeof this.onUpdated === "function") this.onUpdated();
+        };
       }
 
       // 展示本地已存在的单集列表，支持在插件内直接删除本地单集并同步删除 qBittorrent 对应任务
       if (folderExists && Array.isArray(localInspect?.videoFiles) && localInspect.videoFiles.length > 0) {
         const localEpStrip = folderCol.createDiv("curator-dl-local-ep-strip");
         localEpStrip.style.cssText =
-          "display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;padding-top:6px;border-top:1px dashed var(--background-modifier-border);";
+          "display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:6px;border-top:1px dashed var(--background-modifier-border);";
         for (const vf of localInspect.videoFiles) {
           const epNum = Number(vf.episode);
           const watchedNow = Number(this.item?.watchedEpisodes) || 0;
           const isWatched = Number.isFinite(epNum) && epNum <= watchedNow;
           const pill = localEpStrip.createDiv("curator-dl-local-ep-chip");
           pill.style.cssText =
-            "display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:6px;font-size:11px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);";
+            "display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:6px;font-size:12px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);";
           pill.createSpan({
             text: `第${String(epNum).padStart(2, "0")}话${isWatched ? "(已看)" : ""}`
           });
           const delBtn = pill.createEl("button", {
-            cls: "curator-dl-mini-btn is-subtle",
-            text: "🗑️"
+            cls: "curator-dl-mini-btn is-subtle"
           });
-          delBtn.style.cssText = "padding:0 4px;min-height:18px;font-size:10.5px;";
+          delBtn.appendChild(v07Core.icon("trash", 13));
+          delBtn.style.cssText = "padding:0 4px;min-height:20px;font-size:12px;display:inline-flex;align-items:center;";
           delBtn.title = `删除本地《${vf.name}》并同步移除 qBittorrent 中的对应下载任务（支持看一集删一集，不回退已看进度）`;
           delBtn.onclick = async () => {
             delBtn.disabled = true;
@@ -2254,7 +3131,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         });
         qbCol.createDiv({
           cls: "curator-dl-env-path",
-          text: "点击下方剧集的「🧲 磁力」或「📄 种子」可使用您习惯的任意工具自行下载。"
+          text: "点击下方剧集的「磁力」或「种子」可使用您习惯的任意工具自行下载。"
         });
         const qbActions = qbCol.createDiv("curator-dl-env-actions");
         const enableQbBtn = qbActions.createEl("button", {
@@ -2303,9 +3180,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         });
         const qbActions = qbCol.createDiv("curator-dl-env-actions");
         const startQbBtn = qbActions.createEl("button", {
-          cls: "curator-dl-mini-btn is-accent",
-          text: "🚀 立即打开 qBittorrent"
+          cls: "curator-dl-mini-btn is-accent"
         });
+        v07Core.setBtnIconLabel(startQbBtn, "play", "立即打开 qBittorrent", 13);
         startQbBtn.onclick = async () => {
           startQbBtn.disabled = true;
           startQbBtn.textContent = "正在启动 qBittorrent...";
@@ -2327,9 +3204,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         });
         const qbActions = qbCol.createDiv("curator-dl-env-actions");
         const dlQbBtn = qbActions.createEl("button", {
-          cls: "curator-dl-mini-btn is-accent",
-          text: "↗ 前往官网下载 qBittorrent"
+          cls: "curator-dl-mini-btn is-accent"
         });
+        v07Core.setBtnIconLabel(dlQbBtn, "external", "前往官网下载 qBittorrent", 13);
         dlQbBtn.onclick = () => {
           window.open(OFFICIAL_QBITTORRENT_URL);
         };
@@ -2402,12 +3279,12 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         headRow.createSpan({
           cls: `curator-rss-inline-badge ${report.hasEnabledRule ? "is-warn" : "is-info"}`,
           text: report.hasEnabledRule
-            ? `⚠️ 已检出 ${enabledCount} 条启用中的下载规则`
-            : "ℹ️ 已检出关联订阅记录"
+            ? `已检出 ${enabledCount} 条启用中的下载规则`
+            : "已检出关联订阅记录"
         });
         headRow.createSpan({
           cls: "curator-rss-inline-title",
-          text: `本机 RSS 订阅与下载规则检测结果（规则 ${report.matchedRules.length} 条：🟢启用 ${enabledCount} / ⚪停用 ${disabledCount} · 订阅源 ${report.matchedFeeds.length} 条）`
+          text: `本机 RSS 订阅与下载规则检测结果（规则 ${report.matchedRules.length} 条：启用 ${enabledCount} / 停用 ${disabledCount} · 订阅源 ${report.matchedFeeds.length} 条）`
         });
 
         const detailList = leftCol.createDiv("curator-rss-inline-details");
@@ -2415,7 +3292,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           const tag = detailList.createDiv("curator-rss-inline-rule-line");
           tag.createSpan({
             cls: `curator-rss-rule-state-pill ${r.enabled ? "is-enabled" : "is-disabled"}`,
-            text: r.enabled ? "🟢 已启用" : "⚪ 已停用"
+            text: r.enabled ? "已启用" : "已停用"
           });
           tag.createSpan({
             cls: "curator-rss-inline-rule-name",
@@ -2433,7 +3310,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             const tag = detailList.createDiv("curator-rss-inline-rule-line");
             tag.createSpan({
               cls: "curator-rss-rule-state-pill is-enabled",
-              text: `📂 ${f.folderPath}`
+              text: f.folderPath
             });
             tag.createSpan({
               cls: "curator-rss-inline-rule-name",
@@ -2452,7 +3329,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       } else {
         headRow.createSpan({
           cls: "curator-rss-inline-badge is-clean",
-          text: "✅ 未检出已有规则"
+          text: "未检出已有规则"
         });
         headRow.createSpan({
           cls: "curator-rss-inline-title",
@@ -2466,9 +3343,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
       const rightCol = card.createDiv("curator-rss-inline-actions");
       const inspectBtn = rightCol.createEl("button", {
-        cls: "curator-dl-mini-btn is-accent",
-        text: "🔍 查看完整查重报告 & 复制 RSS"
+        cls: "curator-dl-mini-btn is-accent"
       });
+      v07Core.setBtnIconLabel(inspectBtn, "search", "查看查重报告与复制 RSS", 13);
       inspectBtn.dataset.dlAction = "inspect-rss-check";
       inspectBtn.onclick = () => {
         const kw = this.keywordInput?.value?.trim() || this.currentKeyword || this.item?.name || "";
@@ -2495,6 +3372,18 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       const cleanKw = String(keyword || "").trim();
       if (!cleanKw) return;
 
+      if (opts.isInitial) {
+        this._userManuallyPickedStream = false;
+        this.autoPromotedStreamLabel = "";
+      } else if (opts.preserveStreams) {
+        this._userManuallyPickedStream = true;
+        this.autoPromotedStreamLabel = "";
+      } else {
+        this._userManuallyPickedStream = false;
+        this.autoPromotedStreamLabel = "";
+        this.activeStreamId = "";
+      }
+
       this.currentKeyword = cleanKw;
       if (this.keywordInput && this.keywordInput.value !== cleanKw) {
         this.keywordInput.value = cleanKw;
@@ -2511,39 +3400,51 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         const parsed = parseComicatRssXml(xmlText, this.item?.name || "", this.baseUrl);
         const dedup = deduplicateEpisodeItems(parsed.items);
 
+        this.currentDedupInfo = dedup;
+        this.currentEpisodes = dedup.episodes;
+        this.currentPacks = dedup.packs;
+
         if (!opts.preserveStreams || this.broadStreams.length === 0) {
           this.broadStreams = parsed.streams;
           this.broadHitLimit = parsed.items.length >= 45;
+          this.broadSnapshot = {
+            keyword: cleanKw,
+            dedup,
+            episodes: dedup.episodes,
+            packs: dedup.packs
+          };
+          if (opts.isInitial && parsed.streams.length > 0 && !this.item?.downloadSourceKeyword) {
+            this.activeStreamId = "";
+          }
           // 若本次已经是精确流搜索（仅返回单一发布源），则标记为精确已核验
           if (this.broadStreams.length === 1) {
             this.broadStreams[0].exactCountVerified = true;
+            this.broadStreams[0].episodeCount = dedup.episodes.length;
+            this.broadStreams[0].packCount = dedup.packs.length;
+            this.broadStreams[0].minEp = dedup.minEp;
+            this.broadStreams[0].maxEp = dedup.maxEp;
           } else if (this.broadHitLimit) {
-            // 宽泛搜索受到漫猫单页 50 条上限截断，导致各发布源卡片仅统计到前 50 条中的集数（如 ANi 实际 5 集却只显示 2 集）
-            // 启动非阻塞后台探测，自动将前排常用发布源的真实完整集数回填刷新到卡片上
+            // 宽泛搜索受到漫猫单页 50 条上限截断，导致前几话被挤出本页且各发布源卡片集数不全
+            // 启动非阻塞探测：回填真实集数，并在宽泛结果缺失未看前序集数时自动为您聚焦首个全集发布源
             this.probeTopStreamsExactCount(this.broadStreams.slice(0, 8));
           }
         } else {
           // 用户点击了某个候选发布源卡片（opts.preserveStreams === true）：
-          // 立即将该发布源实际检索到的真实去重集数同步回填到上方发布源卡片，消灭「上方显示已检出 2 集、下方显示 5 集」的不一致！
+          // 立即将该发布源实际检索到的真实去重集数同步回填到上方发布源卡片
           for (const st of this.broadStreams) {
             if (
               st.streamId === this.activeStreamId ||
               st.recommendedKeyword === cleanKw
             ) {
               st.episodeCount = dedup.episodes.length;
+              st.packCount = dedup.packs.length;
+              st.minEp = dedup.minEp;
+              st.maxEp = dedup.maxEp;
               st.totalRawCount = parsed.items.length;
+              st.probedDedup = dedup;
               st.exactCountVerified = true;
             }
           }
-        }
-
-        this.currentDedupInfo = dedup;
-        this.currentEpisodes = dedup.episodes;
-        this.currentPacks = dedup.packs;
-
-        // 如果这是首次按番名宽泛搜索且发现存在多个字幕组混杂，记录候选流供用户一键锁定
-        if (opts.isInitial && parsed.streams.length > 0 && !this.item?.downloadSourceKeyword) {
-          this.activeStreamId = "";
         }
       } catch (err) {
         this.errorMessage = err?.message || "请求漫猫 (comicat.org) 失败";
@@ -2559,21 +3460,75 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
     async probeTopStreamsExactCount(streamsToProbe) {
       if (!Array.isArray(streamsToProbe) || streamsToProbe.length === 0) return;
       const probeToken = (this._probeToken = (this._probeToken || 0) + 1);
+      const watchedNow = Number(this.item?.watchedEpisodes) || 0;
+
       for (const st of streamsToProbe) {
         if (!this.modalEl || !this.modalEl.isConnected || this._probeToken !== probeToken) return;
         if (st.exactCountVerified || !st.recommendedKeyword) continue;
         try {
           const url = buildComicatRssUrl(st.recommendedKeyword, this.baseUrl);
           const xml = await fetchComicatRssXml(url, 6500);
-          const parsed = parseComicatRssXml(xml, this.item?.name || "", this.baseUrl);
-          const dedup = deduplicateEpisodeItems(parsed.items);
-          if (dedup.episodes.length > 0) {
-            st.episodeCount = dedup.episodes.length;
-            st.totalRawCount = parsed.items.length;
-            st.exactCountVerified = true;
-            if (!this.isLoading && this.modalEl && this.modalEl.isConnected) {
-              this.renderResultsMount();
+          let parsed = parseComicatRssXml(xml, this.item?.name || "", this.baseUrl);
+          let dedup = deduplicateEpisodeItems(parsed.items);
+
+          // 若带简日/繁日等特征词导致合流字幕组前几话命名略异而漏集，尝试回退仅含「[字幕组] 番名」的宽容词
+          if (
+            (dedup.episodes.length === 0 || (dedup.minEp !== null && dedup.minEp > 1)) &&
+            st.fallbackKeyword &&
+            st.fallbackKeyword !== st.recommendedKeyword
+          ) {
+            try {
+              const fbUrl = buildComicatRssUrl(st.fallbackKeyword, this.baseUrl);
+              const fbXml = await fetchComicatRssXml(fbUrl, 5500);
+              const fbParsed = parseComicatRssXml(fbXml, this.item?.name || "", this.baseUrl);
+              const fbDedup = deduplicateEpisodeItems(fbParsed.items);
+              const improvedCount = fbDedup.episodes.length > dedup.episodes.length;
+              const improvedStart =
+                dedup.minEp === null || (fbDedup.minEp !== null && fbDedup.minEp <= dedup.minEp);
+              if (improvedCount && improvedStart && fbParsed.streams.length <= 3) {
+                st.recommendedKeyword = st.fallbackKeyword;
+                parsed = fbParsed;
+                dedup = fbDedup;
+              }
+            } catch (_) {}
+          }
+
+          st.episodeCount = dedup.episodes.length;
+          st.packCount = dedup.packs.length;
+          st.minEp = dedup.minEp;
+          st.maxEp = dedup.maxEp;
+          st.totalRawCount = parsed.items.length;
+          st.probedDedup = dedup;
+          st.exactCountVerified = true;
+
+          // 若初始宽泛 RSS 因 50 条上限把用户尚未观看的前几话挤出了列表（如已看 0 话却只剩第 05–12 话），
+          // 且用户尚未手动点选其他流，则自动切换至首个包含起始未看集数的完整字幕组流！
+          const curMinEp = this.currentDedupInfo?.minEp ?? null;
+          if (
+            !this._userManuallyPickedStream &&
+            !this.autoPromotedStreamLabel &&
+            !this.item?.downloadSourceKeyword &&
+            this.broadHitLimit &&
+            curMinEp !== null &&
+            curMinEp > watchedNow + 1 &&
+            dedup.minEp !== null &&
+            dedup.minEp <= watchedNow + 1 &&
+            dedup.episodes.length > this.currentEpisodes.length
+          ) {
+            this.activeStreamId = st.streamId;
+            this.currentKeyword = st.recommendedKeyword;
+            if (this.keywordInput) {
+              this.keywordInput.value = st.recommendedKeyword;
             }
+            this.currentDedupInfo = dedup;
+            this.currentEpisodes = dedup.episodes;
+            this.currentPacks = dedup.packs;
+            this.autoPromotedStreamLabel = st.group || st.streamId;
+            this.renderRssRuleCheckBanner();
+          }
+
+          if (!this.isLoading && this.modalEl && this.modalEl.isConnected) {
+            this.renderResultsMount();
           }
         } catch (e) {}
       }
@@ -2650,12 +3605,33 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           text: `① 选择发布源 / 字幕组版本流（共识别出 ${totalStreamCount} 组可用发布源）`
         });
 
+        const streamHeaderBtns = streamHeaderTop.createDiv("curator-dl-stream-head-btns");
+        if (this.activeStreamId && this.broadSnapshot) {
+          const resetBroadBtn = streamHeaderBtns.createEl("button", {
+            cls: "curator-dl-mini-btn",
+            text: "切回宽泛混流结果"
+          });
+          resetBroadBtn.title = "返回按动画原名检索的最新 50 条多字幕组混排列表";
+          resetBroadBtn.onclick = () => {
+            this._userManuallyPickedStream = true;
+            this.autoPromotedStreamLabel = "";
+            this.activeStreamId = "";
+            this.currentKeyword = this.broadSnapshot.keyword;
+            if (this.keywordInput) this.keywordInput.value = this.broadSnapshot.keyword;
+            this.currentDedupInfo = this.broadSnapshot.dedup;
+            this.currentEpisodes = this.broadSnapshot.episodes;
+            this.currentPacks = this.broadSnapshot.packs;
+            this.renderRssRuleCheckBanner();
+            this.renderResultsMount();
+          };
+        }
+
         if (hasMoreStreams) {
-          const toggleExpandBtn = streamHeaderTop.createEl("button", {
+          const toggleExpandBtn = streamHeaderBtns.createEl("button", {
             cls: "curator-dl-mini-btn is-accent curator-dl-streams-toggle-btn",
             text: isExpandedAll
-              ? `▴ 收起发布源（仅显示前 ${defaultLimit} 组）`
-              : `▾ 展开全部 ${totalStreamCount} 组发布源（还有 ${totalStreamCount - defaultLimit} 组）`
+              ? `收起发布源（仅显示前 ${defaultLimit} 组）`
+              : `展开全部 ${totalStreamCount} 组发布源（还有 ${totalStreamCount - defaultLimit} 组）`
           });
           toggleExpandBtn.onclick = () => {
             this.streamsExpanded = !this.streamsExpanded;
@@ -2665,7 +3641,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
         streamHeader.createDiv({
           cls: "curator-dl-section-hint",
-          text: "点击任一发布源即可自动切换为该字幕组专属搜索词（确保每集仅下载 1 份）"
+          text: this.autoPromotedStreamLabel
+            ? `因宽泛 RSS 单页 50 条上限挤出了早期集数，已自动为您聚焦集数完整的「${this.autoPromotedStreamLabel}」发布源（您仍可自由点选其他字幕组）`
+            : "点击任一发布源即可自动切换为该字幕组专属搜索词（确保每集仅下载 1 份）"
         });
 
         const streamGrid = streamSection.createDiv(
@@ -2685,11 +3663,20 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             text: st.group
           });
           const plusSign = !st.exactCountVerified && this.broadHitLimit ? "+" : "";
+          const epRangeSuffix =
+            st.exactCountVerified &&
+            st.episodeCount > 0 &&
+            Number.isFinite(st.minEp) &&
+            Number.isFinite(st.maxEp)
+              ? ` (${String(st.minEp).padStart(2, "0")}-${String(st.maxEp).padStart(2, "0")})`
+              : "";
           topRow.createSpan({
             cls: "curator-dl-stream-epcount curator-mono",
             text:
               st.episodeCount > 0
-                ? `已检出 ${st.episodeCount}${plusSign} 集`
+                ? `已检出 ${st.episodeCount}${plusSign} 集${epRangeSuffix}`
+                : st.packCount > 0
+                ? `合集 ${st.packCount} 条`
                 : `${st.totalRawCount}${plusSign} 条`
           });
 
@@ -2704,8 +3691,20 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           }
 
           card.onclick = () => {
+            this._userManuallyPickedStream = true;
+            this.autoPromotedStreamLabel = "";
             this.activeStreamId = st.streamId;
-            this.performSearch(st.recommendedKeyword, { preserveStreams: true });
+            if (st.exactCountVerified && st.probedDedup) {
+              this.currentKeyword = st.recommendedKeyword;
+              if (this.keywordInput) this.keywordInput.value = st.recommendedKeyword;
+              this.currentDedupInfo = st.probedDedup;
+              this.currentEpisodes = st.probedDedup.episodes;
+              this.currentPacks = st.probedDedup.packs;
+              this.renderRssRuleCheckBanner();
+              this.renderResultsMount();
+            } else {
+              this.performSearch(st.recommendedKeyword, { preserveStreams: true });
+            }
           };
         }
 
@@ -2722,7 +3721,16 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       }
 
       // 2. 当前检索结果为空时的温和提示（未开播或冷门无人搬运）
-      if (this.currentEpisodes.length === 0 && this.currentPacks.length === 0) {
+      const fallbackBroadPacks =
+        this.currentPacks.length === 0 && Array.isArray(this.broadSnapshot?.packs)
+          ? this.broadSnapshot.packs
+          : [];
+      const effectivePacks =
+        this.currentPacks.length > 0 ? this.currentPacks : fallbackBroadPacks;
+      const isShowingBroadPacksFallback =
+        this.currentPacks.length === 0 && fallbackBroadPacks.length > 0;
+
+      if (this.currentEpisodes.length === 0 && effectivePacks.length === 0) {
         const emptyBox = this.resultsMount.createDiv("curator-dl-empty-box");
         emptyBox.createDiv({
           cls: "curator-dl-empty-title",
@@ -2735,7 +3743,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         return;
       }
 
-      // 3. 单集唯一性核验横幅 + 一键批量操作栏（原生兼容「看一集删一集」与「跨渠道追番」，默认不重复下载已看集数）
+      // 3. 单集唯一性核验横幅 + 前序集数截断诊断提醒 + 一键批量操作栏
       const localEpSet = this.getLocalExistingEpisodeSet();
       const watchedEp = Number(this.item?.watchedEpisodes) || 0;
       const allNotInFolder = this.currentEpisodes.filter(
@@ -2747,20 +3755,74 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       const watchedNotInFolderCount = allNotInFolder.length - unwatchedMissing.length;
       const missingEpisodes = this.includeWatchedInBatch ? allNotInFolder : unwatchedMissing;
 
+      const dupCount = this.currentDedupInfo?.duplicateReplacedCount || 0;
+      const curMinEp = this.currentDedupInfo?.minEp ?? null;
+      const curMaxEp = this.currentDedupInfo?.maxEp ?? null;
+      const rangeText =
+        curMinEp !== null && curMaxEp !== null
+          ? `第 ${String(curMinEp).padStart(2, "0")}–${String(curMaxEp).padStart(2, "0")} 话`
+          : "";
+
+      // 若当前列表起始话数大于「已看话数 + 1」（例如外显已看 0 话、内显仅第 05–12 话），主动解释原因并提供一键切换完整源按钮
+      if (this.currentEpisodes.length > 0 && curMinEp !== null && curMinEp > watchedEp + 1) {
+        const missingStart = watchedEp + 1;
+        const missingEnd = curMinEp - 1;
+        const missingRangeLabel =
+          missingStart === missingEnd
+            ? `第 ${String(missingStart).padStart(2, "0")} 话`
+            : `第 ${String(missingStart).padStart(2, "0")}–${String(missingEnd).padStart(2, "0")} 话`;
+
+        const bestCompleteStream = this.broadStreams.find(
+          (st) =>
+            st.exactCountVerified &&
+            st.minEp !== null &&
+            st.minEp <= watchedEp + 1 &&
+            st.episodeCount > this.currentEpisodes.length
+        );
+
+        const gapWarn = this.resultsMount.createDiv("curator-dl-gap-warn-banner");
+        gapWarn.createDiv({
+          cls: "curator-dl-gap-warn-text",
+          text:
+            !this.activeStreamId && this.broadHitLimit
+              ? `前序集数截断提示：漫猫宽泛搜索单次仅返回最新 50 条记录，多字幕组混排时较早发布的 ${missingRangeLabel} 已被挤出本页（您当前已看 ${watchedEp} 话，本页仅剩 ${rangeText}）。请点选上方具体字幕组加载完整集数。`
+              : `当前发布源未检出 ${missingRangeLabel}（仅含 ${rangeText}，您当前已看 ${watchedEp} 话）：该字幕组可能仅发布了后半部分剧集或采用合集打包，建议切换其他完整发布源或查看下方季度合集包。`
+        });
+        if (bestCompleteStream) {
+          const switchCompleteBtn = gapWarn.createEl("button", {
+            cls: "curator-dl-mini-btn is-primary",
+            text: `切换至完整源「${bestCompleteStream.group}」（共 ${bestCompleteStream.episodeCount} 集）`
+          });
+          switchCompleteBtn.onclick = () => {
+            this._userManuallyPickedStream = true;
+            this.autoPromotedStreamLabel = "";
+            this.activeStreamId = bestCompleteStream.streamId;
+            if (bestCompleteStream.probedDedup) {
+              this.currentKeyword = bestCompleteStream.recommendedKeyword;
+              if (this.keywordInput) this.keywordInput.value = bestCompleteStream.recommendedKeyword;
+              this.currentDedupInfo = bestCompleteStream.probedDedup;
+              this.currentEpisodes = bestCompleteStream.probedDedup.episodes;
+              this.currentPacks = bestCompleteStream.probedDedup.packs;
+              this.renderRssRuleCheckBanner();
+              this.renderResultsMount();
+            } else {
+              this.performSearch(bestCompleteStream.recommendedKeyword, { preserveStreams: true });
+            }
+          };
+        }
+      }
+
       const actionBanner = this.resultsMount.createDiv("curator-dl-verify-banner");
       const verifyLeft = actionBanner.createDiv("curator-dl-verify-info");
-      const dupCount = this.currentDedupInfo?.duplicateReplacedCount || 0;
-      const rangeText =
-        this.currentDedupInfo?.minEp !== null && this.currentDedupInfo?.maxEp !== null
-          ? `第 ${String(this.currentDedupInfo.minEp).padStart(2, "0")}–${String(this.currentDedupInfo.maxEp).padStart(2, "0")} 话`
-          : "";
 
       verifyLeft.createDiv({
         cls: "curator-dl-verify-title",
         text:
-          dupCount === 0
-            ? `✅ 每集唯一性核验通过：共 ${this.currentEpisodes.length} 集（${rangeText}），每集严格 1 条资源`
-            : `🛡️ 已自动去重 ${dupCount} 条重复/v1旧版条目：当前锁定 ${this.currentEpisodes.length} 集（${rangeText}），确保每集仅下载 1 份`
+          this.currentEpisodes.length === 0
+            ? `当前检索到 ${effectivePacks.length} 条季度全集 / 合集包资源（当前搜索词下无拆分单集条目）`
+            : dupCount === 0
+            ? `每集唯一性核验通过：共 ${this.currentEpisodes.length} 集（${rangeText}），每集严格 1 条资源`
+            : `已自动去重 ${dupCount} 条重复/v1旧版条目：当前锁定 ${this.currentEpisodes.length} 集（${rangeText}），确保每集仅下载 1 份`
       });
 
       const currentRssUrl = buildComicatRssUrl(this.currentKeyword, this.baseUrl);
@@ -2776,7 +3838,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         const toggleWatchedMissingBtn = verifyActions.createEl("button", {
           cls: "curator-dl-mini-btn",
           text: this.includeWatchedInBatch
-            ? `✓ 已含前 ${watchedNotInFolderCount} 集已看补档 (点击仅下未看新集)`
+            ? `已含前 ${watchedNotInFolderCount} 集已看补档 (点击仅下未看新集)`
             : `已跳过 ${watchedNotInFolderCount} 集已看集数 (点击纳入补档)`
         });
         toggleWatchedMissingBtn.title =
@@ -2789,9 +3851,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
       if (missingEpisodes.length > 0 && qbStatus.enabled && qbStatus.installed) {
         const batchDlBtn = verifyActions.createEl("button", {
-          cls: "curator-dl-btn is-primary",
-          text: `⬇ 一键下载未看缺失的 ${missingEpisodes.length} 集 (qBittorrent)`
+          cls: "curator-dl-btn is-primary"
         });
+        v07Core.setBtnIconLabel(batchDlBtn, "download", `一键下载未看缺失的 ${missingEpisodes.length} 集 (qBittorrent)`, 14);
         batchDlBtn.dataset.dlAction = "batch-qb-download";
         batchDlBtn.onclick = () => {
           this.confirmRssRuleBeforeAction(
@@ -2825,16 +3887,16 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       }
 
       const bindSourceBtn = verifyActions.createEl("button", {
-        cls: "curator-dl-btn is-accent",
-        text: "📌 绑定为该番默认下载源与 RSS (同步写入qB)"
+        cls: "curator-dl-btn is-accent"
       });
+      v07Core.setBtnIconLabel(bindSourceBtn, "rss", "绑定为默认下载源并开启追更", 14);
       bindSourceBtn.dataset.dlAction = "bind-rss-source";
       bindSourceBtn.title =
-        "将该精准搜索词与专属 RSS 同时写入动画笔记、qBittorrent「RSS 阅读器 (自动追番)」及「RSS 下载器」自动规则，并立即下载当前未看缺失集数";
+        "将该精准搜索词与专属 RSS 写入动画笔记并启用自动磁力追更（绕开失效种子站），同时立即下载当前未看缺失集数";
       bindSourceBtn.onclick = () => {
         this.confirmRssRuleBeforeAction(
           {
-            actionTitle: "绑定默认下载源并同步写入 qBittorrent RSS 阅读器与下载器",
+            actionTitle: "绑定默认下载源并开启自动追更",
             targetKeyword: this.currentKeyword,
             targetRss: currentRssUrl
           },
@@ -2851,7 +3913,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             if (NoticeClass) {
               new NoticeClass(
                 syncRes?.ok
-                  ? `已绑定「${this.currentKeyword}」并同步写入 qBittorrent RSS 阅读器与自动下载器${
+                  ? `已绑定「${this.currentKeyword}」并开启自动追更${
                       syncRes.dispatchedCount > 0 ? `（已同时投递 ${syncRes.dispatchedCount} 集未看新集）` : ""
                     }！`
                   : `已将「${this.currentKeyword}」绑定至《${this.item.name}》笔记！`,
@@ -2917,9 +3979,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         const actCol = row.createDiv("curator-dl-ep-actions-col");
         if (isLocalDownloaded) {
           const delEpBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn is-subtle",
-            text: "🗑️ 删源(同步qB)"
+            cls: "curator-dl-mini-btn is-subtle"
           });
+          v07Core.setBtnIconLabel(delEpBtn, "trash", "删源(同步qB)", 13);
           delEpBtn.title =
             "在插件内删除本集本地视频文件，并同步移除 qBittorrent 中的对应下载任务（支持看一集删一集）";
           delEpBtn.onclick = async () => {
@@ -2944,9 +4006,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
         if (qbStatus.enabled && qbStatus.installed) {
           const qbBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn is-primary",
-            text: "⬇ qB下载"
+            cls: "curator-dl-mini-btn is-primary"
           });
+          v07Core.setBtnIconLabel(qbBtn, "download", "qB下载", 13);
           qbBtn.title = "预取种子元数据并调用本机 qBittorrent 下载本集到番剧文件夹";
           qbBtn.onclick = () => {
             this.confirmRssRuleBeforeAction(
@@ -2962,9 +4024,11 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
                 if (res.ok && NoticeClass) {
                   new NoticeClass(
                     `已投递《${this.item.name}》第 ${epNum} 话至 qBittorrent${
-                      res.torrentFileHitCount > 0 ? "（已直通预取 .torrent 元数据）" : ""
+                      res.torrentFileHitCount > 0 ? "（已预取 .torrent 元数据）" : ""
                     }`
                   );
+                } else if (!res.ok && NoticeClass) {
+                  new NoticeClass(`发送失败：${res.reason || "未知原因"}`, 5500);
                 }
                 this.renderEnvStatus();
               }
@@ -2974,9 +4038,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
         if (epItem.magnetUrl) {
           const magBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn",
-            text: "🧲 磁力/网盘"
+            cls: "curator-dl-mini-btn"
           });
+          v07Core.setBtnIconLabel(magBtn, "magnet", "磁力/网盘", 13);
           magBtn.title =
             "唤起磁力链接（如夸克网盘/迅雷），并自动将本番剧本地文件夹路径复制到剪贴板，在网盘「下载到」直接按 Ctrl+V 即可关联路径！";
           magBtn.onclick = () => {
@@ -2987,12 +4051,13 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
                 targetRss: currentRssUrl
               },
               async () => {
-                const { targetPath } = await ensureAnimeLocalDownloadFolder(
+                const folderRes = await ensureAnimeLocalDownloadFolder(
                   this.plugin,
                   this.item,
                   true
                 );
-                const winFolder = targetPath ? path.normalize(targetPath) : "";
+                const winFolder =
+                  folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
                 if (navigator.clipboard) {
                   await navigator.clipboard
                     .writeText(winFolder || epItem.magnetUrl)
@@ -3002,8 +4067,10 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
                 if (NoticeClass) {
                   new NoticeClass(
                     winFolder
-                      ? `已拉起磁力/夸克下载！\n📂 已自动将本番保存路径复制到剪贴板：\n${winFolder}\n（在网盘弹窗的「下载到」直接 Ctrl+V 粘贴即可，或下载后点上方「☁️ 从夸克/网盘目录归集」）`
-                      : `已唤起磁力链接（第 ${epNum} 话）`,
+                      ? `已拉起磁力/夸克下载！\n已自动将本番保存路径复制到剪贴板：\n${winFolder}\n（在网盘弹窗的「下载到」直接 Ctrl+V 粘贴即可，或下载后点上方「从夸克/网盘目录归集」）`
+                      : `已唤起磁力链接（第 ${epNum} 话）${
+                          folderRes.error ? `\n本地目录未自动创建：${folderRes.error}` : ""
+                        }`,
                     6500
                   );
                 }
@@ -3014,9 +4081,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
         if (epItem.torrentUrl) {
           const torBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn",
-            text: "📄 种子"
+            cls: "curator-dl-mini-btn"
           });
+          v07Core.setBtnIconLabel(torBtn, "file", "种子", 13);
           torBtn.title = "检测是否已有订阅规则并直接下载 .torrent 种子文件";
           torBtn.onclick = () => {
             this.confirmRssRuleBeforeAction(
@@ -3034,13 +4101,143 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
         if (epItem.link) {
           const pageBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn is-subtle",
-            text: "↗"
+            cls: "curator-dl-mini-btn is-subtle"
           });
+          pageBtn.appendChild(v07Core.icon("external", 13));
           pageBtn.title = "打开漫猫该集发布详情页";
           pageBtn.onclick = () => {
             window.open(epItem.link);
           };
+        }
+      }
+
+      // 5. 季度全集 / 合集包资源（避免完结番补番时合集包被静默丢弃）
+      if (effectivePacks.length > 0) {
+        const packsSection = this.resultsMount.createDiv("curator-dl-packs-section");
+        const packsHead = packsSection.createDiv("curator-dl-section-head");
+        packsHead.createDiv({
+          cls: "curator-dl-section-title",
+          text: isShowingBroadPacksFallback
+            ? `季度全集 / 合集包资源（来自全站搜索 · 共 ${effectivePacks.length} 条，适合完结一次补齐）`
+            : `季度全集 / 合集包资源（共 ${effectivePacks.length} 条，适合一次下载全季）`
+        });
+        const packsList = packsSection.createDiv("curator-dl-packs-list");
+        for (const packItem of effectivePacks) {
+          const prow = packsList.createDiv("curator-dl-ep-row is-pack-row");
+          const badgeCol = prow.createDiv("curator-dl-ep-badge-col");
+          badgeCol.createSpan({
+            cls: "curator-dl-pack-pill curator-mono",
+            text: "全集/合集"
+          });
+
+          const infoCol = prow.createDiv("curator-dl-ep-info-col");
+          infoCol.createDiv({
+            cls: "curator-dl-ep-title",
+            text: packItem.title
+          });
+          const subMeta = [
+            packItem.group ? `发布组：${packItem.group}` : "",
+            packItem.pubDate ? `发布时间：${packItem.pubDate}` : ""
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          if (subMeta) {
+            infoCol.createDiv({
+              cls: "curator-dl-ep-sub",
+              text: subMeta
+            });
+          }
+
+          const actCol = prow.createDiv("curator-dl-ep-actions-col");
+          if (qbStatus.enabled && qbStatus.installed) {
+            const qbPackBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn is-primary"
+            });
+            v07Core.setBtnIconLabel(qbPackBtn, "download", "qB下载合集", 13);
+            qbPackBtn.onclick = () => {
+              this.confirmRssRuleBeforeAction(
+                {
+                  actionTitle: "使用 qBittorrent 下载季度合集包",
+                  targetKeyword: this.currentKeyword,
+                  targetRss: currentRssUrl
+                },
+                async () => {
+                  qbPackBtn.disabled = true;
+                  const res = await dispatchDownloadToQbittorrent(this.plugin, this.item, [packItem]);
+                  qbPackBtn.disabled = false;
+                  if (res.ok && NoticeClass) {
+                    new NoticeClass(
+                      `已投递《${this.item.name}》季度合集包至 qBittorrent！\n保存目录：${res.savePath}`,
+                      5000
+                    );
+                  } else if (!res.ok && NoticeClass) {
+                    new NoticeClass(`发送失败：${res.reason || "未知原因"}`, 5500);
+                  }
+                  this.renderEnvStatus();
+                }
+              );
+            };
+          }
+
+          if (packItem.magnetUrl) {
+            const magPackBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn"
+            });
+            v07Core.setBtnIconLabel(magPackBtn, "magnet", "磁力/网盘", 13);
+            magPackBtn.onclick = () => {
+              this.confirmRssRuleBeforeAction(
+                {
+                  actionTitle: "唤起季度合集包磁力/网盘下载",
+                  targetKeyword: this.currentKeyword,
+                  targetRss: currentRssUrl
+                },
+                async () => {
+                  const folderRes = await ensureAnimeLocalDownloadFolder(
+                    this.plugin,
+                    this.item,
+                    true
+                  );
+                  const winFolder =
+                    folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
+                  if (navigator.clipboard) {
+                    await navigator.clipboard
+                      .writeText(winFolder || packItem.magnetUrl)
+                      .catch(() => {});
+                  }
+                  window.open(enrichMagnetUrlWithTrackers(packItem.magnetUrl));
+                  if (NoticeClass) {
+                    new NoticeClass(
+                      winFolder
+                        ? `已拉起合集磁力下载！\n已将本番保存目录复制到剪贴板：\n${winFolder}`
+                        : "已唤起季度合集包磁力链接",
+                      5500
+                    );
+                  }
+                }
+              );
+            };
+          }
+
+          if (packItem.torrentUrl) {
+            const torPackBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn"
+            });
+            v07Core.setBtnIconLabel(torPackBtn, "file", "种子", 13);
+            torPackBtn.onclick = () => {
+              window.open(packItem.torrentUrl);
+            };
+          }
+
+          if (packItem.link) {
+            const pagePackBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn is-subtle"
+            });
+            pagePackBtn.appendChild(v07Core.icon("external", 13));
+            pagePackBtn.title = "打开漫猫该合集详情页";
+            pagePackBtn.onclick = () => {
+              window.open(packItem.link);
+            };
+          }
         }
       }
     }
@@ -3054,6 +4251,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 module.exports = {
   OFFICIAL_QBITTORRENT_URL,
   DEFAULT_COMICAT_BASE_URL,
+  isDeadEnclosureRssFeed,
   buildComicatSearchUrl,
   buildComicatRssUrl,
   buildCustomSearchUrl,
@@ -3066,6 +4264,8 @@ module.exports = {
   launchQbittorrentClient,
   ensureAnimeLocalDownloadFolder,
   dispatchDownloadToQbittorrent,
+  sanitizeDeadQbittorrentComicatRules,
+  pollPluginRssSubscriptions,
   syncRssFeedAndRuleToQbittorrent,
   bindAnimeDownloadSourceToNote,
   deleteLocalEpisodeAndSyncQb,

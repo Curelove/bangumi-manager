@@ -784,15 +784,19 @@ async function downloadRoxyHdPortraitPack(plugin, onProgress) {
     }
 
     const candidateUrls = [
-      `https://github.com/${REPO_SLUG}/releases/latest/download/${encodeURIComponent(fileName)}`,
       `https://cdn.jsdelivr.net/gh/${REPO_SLUG}@main/assets/roxy/${encodeURIComponent(fileName)}`,
-      `https://raw.githubusercontent.com/${REPO_SLUG}/main/assets/roxy/${encodeURIComponent(fileName)}`
+      `https://fastly.jsdelivr.net/gh/${REPO_SLUG}@main/assets/roxy/${encodeURIComponent(fileName)}`,
+      `https://raw.githubusercontent.com/${REPO_SLUG}/main/assets/roxy/${encodeURIComponent(fileName)}`,
+      `https://github.com/${REPO_SLUG}/releases/download/0.4.0/${encodeURIComponent(fileName)}`
     ];
 
     let fileBuffer = null;
     for (const url of candidateUrls) {
       try {
-        const res = await requestUrl({ url, method: "GET", throw: true });
+        const res = await Promise.race([
+          requestUrl({ url, method: "GET", throw: true }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 7500))
+        ]);
         if (res && res.arrayBuffer && res.arrayBuffer.byteLength > 1024) {
           fileBuffer = res.arrayBuffer;
           break;
@@ -1199,6 +1203,252 @@ function analyzeBroadcastTiming(items, now = new Date()) {
 }
 
 /**
+ * 规范化并读取洛琪希手势操作记忆（用于新用户温和引导与长久未用唤醒，绝不打扰高频或有固定使用节奏的老用户）
+ */
+function ensureGestureMemory(plugin) {
+  if (!plugin || !plugin.settings) {
+    return {
+      firstSeenAt: Date.now(),
+      wandUseCount: 0,
+      firstWandUsedAt: 0,
+      lastWandUsedAt: 0,
+      wandHintShowCount: 0,
+      lastWandHintShownAt: 0,
+      wandHintDismissed: false,
+      pullUseCount: 0,
+      lastPullUsedAt: 0
+    };
+  }
+  const raw =
+    plugin.settings.roxyGestureMemory && typeof plugin.settings.roxyGestureMemory === "object"
+      ? plugin.settings.roxyGestureMemory
+      : {};
+  const now = Date.now();
+  const normalized = {
+    firstSeenAt: Number(raw.firstSeenAt) > 0 ? Number(raw.firstSeenAt) : now,
+    wandUseCount: Math.max(0, Number(raw.wandUseCount) || 0),
+    firstWandUsedAt: Math.max(0, Number(raw.firstWandUsedAt) || 0),
+    lastWandUsedAt: Math.max(0, Number(raw.lastWandUsedAt) || 0),
+    wandHintShowCount: Math.max(0, Number(raw.wandHintShowCount) || 0),
+    lastWandHintShownAt: Math.max(0, Number(raw.lastWandHintShownAt) || 0),
+    wandHintDismissed: Boolean(raw.wandHintDismissed),
+    pullUseCount: Math.max(0, Number(raw.pullUseCount) || 0),
+    lastPullUsedAt: Math.max(0, Number(raw.lastPullUsedAt) || 0)
+  };
+  plugin.settings.roxyGestureMemory = normalized;
+  return normalized;
+}
+
+function recordWandRelationUsed(plugin) {
+  if (!plugin || !plugin.settings) return;
+  const mem = ensureGestureMemory(plugin);
+  const now = Date.now();
+  mem.wandUseCount = (mem.wandUseCount || 0) + 1;
+  if (!mem.firstWandUsedAt) {
+    mem.firstWandUsedAt = now;
+  }
+  mem.lastWandUsedAt = now;
+  if (typeof plugin.saveSettings === "function") {
+    plugin.saveSettings().catch(() => {});
+  }
+}
+
+function recordPullToTopUsed(plugin) {
+  if (!plugin || !plugin.settings) return;
+  const mem = ensureGestureMemory(plugin);
+  mem.pullUseCount = (mem.pullUseCount || 0) + 1;
+  mem.lastPullUsedAt = Date.now();
+  if (typeof plugin.saveSettings === "function") {
+    plugin.saveSettings().catch(() => {});
+  }
+}
+
+async function resetRoxyGestureMemory(plugin) {
+  if (!plugin || !plugin.settings) return;
+  plugin.settings.roxyGestureMemory = {
+    firstSeenAt: Date.now(),
+    wandUseCount: 0,
+    firstWandUsedAt: 0,
+    lastWandUsedAt: 0,
+    wandHintShowCount: 0,
+    lastWandHintShownAt: 0,
+    wandHintDismissed: false,
+    pullUseCount: 0,
+    lastPullUsedAt: 0
+  };
+  plugin.settings.roxyPullToTopHintDismissed = false;
+  const coord = ensureRoxyCoordinator(plugin);
+  if (coord) {
+    coord._sessionWandHintShown = false;
+  }
+  if (typeof plugin.saveSettings === "function") {
+    await plugin.saveSettings().catch(() => {});
+  }
+}
+
+/**
+ * 判断是否应当温和提示「长按或右键卡片查看关联收藏」
+ * - 全新未使用过该功能的用户：最多温和提示 3 次（首次开馆后展示 1 次，后续每次至少间隔 5 天）
+ * - 长久未使用（距上次使用 > 25 天）且尚未形成固定低频节奏的用户：间隔至少 21 天温和提醒 1 次
+ * - 近期使用过（<= 25 天）或已有稳定个人使用节奏的老用户：保持完全安静，绝不打扰
+ */
+function evaluateWandGestureHintNeed(plugin, state, coord) {
+  if (!plugin || !plugin.settings) return null;
+  if (plugin.settings.roxySmartGestureHints === false) return null;
+  if (plugin.settings.roxyQuietMode) return null;
+  const items = (state && state.items) || [];
+  if (items.length === 0) return null;
+  if (coord && coord._sessionWandHintShown) return null;
+
+  const mem = ensureGestureMemory(plugin);
+  if (mem.wandHintDismissed) return null;
+
+  const now = Date.now();
+  const DAY = 86400000;
+  const daysSinceLastHint = mem.lastWandHintShownAt > 0 ? (now - mem.lastWandHintShownAt) / DAY : 999;
+
+  if (mem.wandUseCount === 0) {
+    if (mem.wandHintShowCount >= 3) return null;
+    if (mem.wandHintShowCount > 0 && daysSinceLastHint < 5) return null;
+    return "new_user";
+  }
+
+  const refUsedAt = mem.lastWandUsedAt || mem.firstWandUsedAt || mem.firstSeenAt || now;
+  const daysSinceLastWand = (now - refUsedAt) / DAY;
+  if (daysSinceLastWand <= 25) {
+    return null;
+  }
+
+  // 若用户已累计使用 >= 4 次且处于自身平均间隔的合理倍数内（低频但规律使用的熟手），不打扰
+  if (mem.wandUseCount >= 4 && mem.firstWandUsedAt > 0 && mem.lastWandUsedAt > mem.firstWandUsedAt) {
+    const avgIntervalDays = (mem.lastWandUsedAt - mem.firstWandUsedAt) / ((mem.wandUseCount - 1) * DAY);
+    if (daysSinceLastWand < Math.max(45, avgIntervalDays * 2.2)) {
+      return null;
+    }
+  }
+
+  if (daysSinceLastHint < 21 || mem.wandHintShowCount >= 4) {
+    return null;
+  }
+  return "dormant";
+}
+
+function buildWandGestureHintRecord(plugin, kind = "new_user") {
+  const mascotName = getMascotDisplayName(plugin);
+  return {
+    type: "roxy:wand_gesture_hint",
+    state: "explain",
+    badgeText: `✦ ${mascotName} · 关联小贴士`,
+    stepHint: "操作提示",
+    isWandHint: true,
+    isPrimary: false,
+    priority: PRIORITY.LOW,
+    autoHideMs: 11500,
+    message:
+      kind === "dormant"
+        ? "顺带提一句，如果您想把某部动画和角色、画册、音声或游戏串起来同屏对照，只要长按任意卡片（或直接右键点击）就能唤出关联收藏啦。"
+        : "偷偷告诉您一个小窍门：在馆内任意卡片或条目上长按片刻（或者直接点鼠标右键），就能一键串起同作品的角色、画册、音声和游戏记录哦。"
+  };
+}
+
+/**
+ * 将固定定位的洛琪希挂件/唤醒胶囊动态锚定到当前 `.workspace-leaf-content` 内容区右下角
+ * 确保开启 Obsidian 右侧边栏或双侧边栏分屏时，绝不越界遮挡右侧栏，也绝不溢出被裁切
+ */
+function bindRoxyLeafBoundsAnchor(targetEl, hostEl) {
+  if (!targetEl || !hostEl || typeof window === "undefined") {
+    return () => {};
+  }
+  const paneEl =
+    hostEl.closest(".workspace-leaf-content") ||
+    hostEl.closest(".bangumi-score-dashboard-view") ||
+    hostEl;
+
+  let rafId = null;
+  const syncBounds = () => {
+    rafId = null;
+    if (!targetEl.isConnected || !paneEl.isConnected) return;
+    const rect = paneEl.getBoundingClientRect();
+    const vw = Math.max(320, window.innerWidth || 1280);
+    const vh = Math.max(240, window.innerHeight || 800);
+
+    if (rect.width < 48 || rect.height < 48 || rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh) {
+      targetEl.classList.add("is-pane-hidden");
+      return;
+    }
+    targetEl.classList.remove("is-pane-hidden");
+
+    const isCompactPane = rect.width <= 760;
+    const isTightPane = rect.width <= 560;
+    targetEl.classList.toggle("is-compact-pane", isCompactPane);
+    targetEl.classList.toggle("is-tight-pane", isTightPane);
+
+    const padRight = isTightPane ? 8 : isCompactPane ? 12 : 20;
+    const padBottom = isTightPane ? 10 : isCompactPane ? 14 : 24;
+
+    // 检测是否存在建立独立 fixed 包含块的祖先（如 Obsidian .workspace-leaf-content 的 contain: strict）
+    let cbRight = vw;
+    let cbBottom = vh;
+    let anc = targetEl.parentElement;
+    while (anc && anc !== document.body && anc !== document.documentElement) {
+      const cs = window.getComputedStyle(anc);
+      if (
+        (cs.contain && /(layout|paint|strict|content)/.test(cs.contain)) ||
+        (cs.transform && cs.transform !== "none") ||
+        (cs.filter && cs.filter !== "none") ||
+        (cs.perspective && cs.perspective !== "none") ||
+        (cs.backdropFilter && cs.backdropFilter !== "none")
+      ) {
+        const cbRect = anc.getBoundingClientRect();
+        cbRight = cbRect.right;
+        cbBottom = cbRect.bottom;
+        break;
+      }
+      anc = anc.parentElement;
+    }
+
+    const rightPx = Math.max(8, Math.round(Math.max(0, cbRight - Math.min(cbRight, rect.right)) + padRight));
+    const bottomPx = Math.max(8, Math.round(Math.max(0, cbBottom - Math.min(cbBottom, rect.bottom)) + padBottom));
+    const maxBubbleW = Math.max(176, Math.min(268, Math.round(rect.width - 76)));
+
+    targetEl.style.right = `${rightPx}px`;
+    targetEl.style.bottom = `${bottomPx}px`;
+    targetEl.style.setProperty("--roxy-pane-max-bubble-w", `${maxBubbleW}px`);
+  };
+
+  const scheduleSync = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(syncBounds);
+  };
+
+  syncBounds();
+  window.addEventListener("resize", scheduleSync, { passive: true });
+
+  let ro = null;
+  if (typeof ResizeObserver !== "undefined") {
+    ro = new ResizeObserver(scheduleSync);
+    ro.observe(paneEl);
+    if (document.body) {
+      ro.observe(document.body);
+    }
+  }
+
+  return () => {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    window.removeEventListener("resize", scheduleSync);
+    if (ro) {
+      try {
+        ro.disconnect();
+      } catch (_) {}
+      ro = null;
+    }
+  };
+}
+
+/**
  * 构建当前最重要的一条「首要提示」（Card 0，用于首次进入工作台及用户点击「↺ 首要」还原）
  */
 function buildPrimaryDeskRecord(plugin, state) {
@@ -1248,7 +1498,7 @@ function buildPrimaryDeskRecord(plugin, state) {
       badgeText: "✦ 洛琪希 · 首要事项",
       isPrimary: true,
       priority: PRIORITY.NORMAL,
-      message: `目前案头有《${top.name}》（已看 ${t > 0 ? `${w}/${t}话` : `${w}话`}）等 ${watching.length} 部连载正在跟进。今天要先看第 ${nextEp} 话，还是整理笔记呢？`
+      message: `目前有《${top.name}》（已看 ${t > 0 ? `${w}/${t}话` : `${w}话`}）等 ${watching.length} 部连载正在跟进。今天要先看第 ${nextEp} 话，还是整理笔记呢？`
     };
   }
 
@@ -1260,18 +1510,18 @@ function buildPrimaryDeskRecord(plugin, state) {
       badgeText: "✦ 洛琪希 · 开馆导览",
       isPrimary: true,
       priority: PRIORITY.NORMAL,
-      message: "欢迎来到新落成的番剧与原画典藏馆！您可以直接在案头搜索第一部喜欢的动画建档，或者先点「载入 3 部示例样片预览」随我逛一圈展厅哦。"
+      message: "欢迎来到新落成的番剧与原画典藏馆！您可以直接搜索第一部喜欢的动画建档，或者先点「载入 3 部示例样片预览」随我逛一圈展厅哦。"
     };
   }
 
-  // 4. 若当前没有「在看」作品，使用温和的讲解立绘（explain）引导首屏候补席
+  // 4. 若当前没有「在看」作品，使用温和的讲解立绘（explain）引导首屏待看推荐
   return {
     type: "primary:standby",
     state: "explain",
     badgeText: "✦ 洛琪希 · 首要事项",
     isPrimary: true,
     priority: PRIORITY.NORMAL,
-    message: `目前案头还没有标记为「在看」的连载呢。我已经从您的 ${plan.length} 部想看候补与 ${completed.length} 部已看典藏里挑了 4 部放在首屏，随时可以挑一部开始追番哦。`
+    message: `目前还没有标记为「在看」的连载呢。我已经从您的 ${plan.length} 部想看与 ${completed.length} 部已看作品里挑了几部放在首屏，随时可以挑一部开始追番哦。`
   };
 }
 
@@ -1398,7 +1648,7 @@ function buildRoxyConsultationDeck(plugin, state) {
     deck.push({
       type: "consult:teacher_reminder",
       state: "warn2",
-      badgeText: "✦ 洛琪希 · 编目叮嘱",
+      badgeText: "✦ 洛琪希 · 进度提醒",
       isPrimary: false,
       message:
         unscoredCompleted.length > 0
@@ -1417,9 +1667,9 @@ function buildRoxyConsultationDeck(plugin, state) {
     deck.push({
       type: "consult:teacher_neat",
       state: "warn2",
-      badgeText: "✦ 洛琪希 · 编目叮嘱",
+      badgeText: "✦ 洛琪希 · 进度提醒",
       isPrimary: false,
-      message: `看完了新的一话之后，请记得顺手点一下卡片上的「+1」按钮登记进度哦。保持台账整洁可是馆藏记录的基本功呢。`
+      message: `看完了新的一话之后，请记得顺手点一下卡片上的「+1」按钮登记进度哦。保持观看记录整洁可是追番整理的基本功呢。`
     });
   }
 
@@ -1491,13 +1741,13 @@ function buildRoxyConsultationDeck(plugin, state) {
  */
 function buildOverPokeReaction(pokeStreak) {
   const warnLines = [
-    "那、那个……请不要一直连续戳我啦！我是在认真帮您核对番剧台账，可不是放在桌角解闷的玩偶哦。",
+    "那、那个……请不要一直连续戳我啦！我是在认真帮您核对追番记录，可不是放在桌角解闷的玩偶哦。",
     "禁止继续乱戳！再这样打岔的话，我今天就不帮您留意新番的开播日期了哦。"
   ];
   const panicLines = [
     "呜哇……帽子都要被您戳歪了！就算一直按我也不会掉出隐藏动画来的，快去挑一部番看吧！",
-    "请、请饶了我吧……如果您是想看回最关键的案头事项，点一下气泡上面的「↺ 首要」就能马上切回去了！",
-    "别、别再连击了！再戳下去手里的番剧编目账本都要散落一地啦！"
+    "请、请饶了我吧……如果您是想看回最关键的首要事项，点一下气泡上面的「↺ 首要」就能马上切回去了！",
+    "别、别再连击了！再戳下去手里的追番记录本都要散落一地啦！"
   ];
 
   if (pokeStreak >= 99) {
@@ -1592,7 +1842,7 @@ function buildPlushiePokeReaction(pokeCount = 1, plushieVariant = "plushie01") {
   return {
     type: `poke:plushie_${plushieVariant}_${idx}`,
     state: plushieVariant,
-    badgeText: isButtonEyes ? "🧸 替身布偶 · 纽扣眼1号" : "🧸 替身布偶 · 刺绣眼2号",
+    badgeText: isButtonEyes ? "✦ 替身布偶 · 纽扣眼1号" : "✦ 替身布偶 · 刺绣眼2号",
     stepHint: "棉花替身",
     isPrimary: false,
     priority: PRIORITY.HIGH,
@@ -1805,7 +2055,7 @@ function buildRoxyRunawayComplaintRecord(coord, wasPlushie = false) {
       state: "warn2",
       badgeText: "✦ 洛琪希 · 严正抗议",
       message:
-        "咳咳！虽然听到您的召唤还是乖乖回来了，但我必须严正声明——馆藏记录员的职责是核对动画台账，绝对不包括『百连击满屏弹射表演』！"
+        "咳咳！虽然听到您的召唤还是乖乖回来了，但我必须严正声明——馆藏记录员的职责是核对追番记录，绝对不包括『百连击满屏弹射表演』！"
     },
     {
       state: "panic",
@@ -1959,7 +2209,12 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
     existing.remove();
   });
-  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((pill) => pill.remove());
+  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((pill) => {
+    if (typeof pill._cleanupAnchor === "function") {
+      pill._cleanupAnchor();
+    }
+    pill.remove();
+  });
 
   const modeInfo = normalizeRoxy2DModeSettings(plugin);
   coord.hdPortraitsAvailable = modeInfo.hdInstalled;
@@ -1989,6 +2244,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }`
   );
   widget.dataset.roxyState = coord.plushieState2D || coord.currentState || "explain";
+  const cleanupLeafAnchor = bindRoxyLeafBoundsAnchor(widget, hostEl);
 
   // 1. 对话气泡（含状态徽章、轮播序号、「↺ 首要」还原按钮、关闭按钮，以及长按回顶提示专属「不再显示」轻按钮）
   const bubble = widget.createDiv("curator-roxy-bubble is-hidden");
@@ -2009,7 +2265,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     text: "↺ 首要"
   });
   restorePrimaryBtn.dataset.roxyAction = "restore-primary";
-  restorePrimaryBtn.title = "将气泡内容还原为当前最需要优先关注的案头首要事项";
+  restorePrimaryBtn.title = "将气泡内容还原为当前最需要优先关注的首要事项";
 
   const bubbleCloseBtn = bubbleRightCtrls.createEl("button", {
     cls: "curator-roxy-bubble-close",
@@ -2206,29 +2462,29 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   };
 
   const hitZone = stage.createDiv("curator-roxy-hit-zone");
-  hitZone.title = "点击切换番剧咨讯 · 按住向下拉动松手可施展回顶术式（右键还原首要事项）";
+  hitZone.title = "点击切换番剧咨讯 · 右键还原首要事项";
 
   // 3. 底部轻量控制名牌（支持常驻显示或「点击看板娘后才长出小横条」）
   const dockBar = widget.createDiv("curator-roxy-dock-bar");
   const summonBackBtn = dockBar.createEl("button", {
     cls: "curator-roxy-summon-btn",
-    text: `🔮 ${mascotName}被戳飞逃跑了 · 点击召唤回来`
+    text: `✦ ${mascotName}被戳飞逃跑了 · 点击召唤回来`
   });
   summonBackBtn.dataset.roxyAction = "summon-runaway";
-  summonBackBtn.title = `把被连戳 100 下弹飞出去的${mascotName}重新召唤回案头`;
+  summonBackBtn.title = `把被连戳 100 下弹飞出去的${mascotName}重新召唤回来`;
 
   const unplushieBtn = dockBar.createEl("button", {
     cls: "curator-roxy-unplushie-btn",
-    text: `🔮 解除替身玩偶 · 唤回${mascotName}`
+    text: `✦ 解除替身玩偶 · 唤回${mascotName}`
   });
   unplushieBtn.dataset.roxyAction = "summon-from-plushie";
-  unplushieBtn.title = `解除米格路德替身玩偶术，把躲起来喝甜茶的${mascotName}真身唤回案头`;
+  unplushieBtn.title = `解除米格路德替身玩偶术，把躲起来喝甜茶的${mascotName}真身唤回页面`;
 
   const getDockModeBtnLabel = () => {
     if (plugin.settings.roxy2DMinimized) {
       return `✦ ${mascotName} [展开]`;
     }
-    return plugin.settings.roxyDockExpandOnClickOnly ? "📌 固定底栏" : "📌 点立绘展栏";
+    return plugin.settings.roxyDockExpandOnClickOnly ? "固定底栏" : "点立绘展栏";
   };
   const getDockModeBtnTitle = () => {
     if (plugin.settings.roxy2DMinimized) {
@@ -2280,7 +2536,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
 
   const packDownloadBtn = ctrlsGroup.createEl("button", {
     cls: "curator-roxy-ctrl-btn is-pack-dl",
-    text: "📥 立绘包"
+    text: "立绘包"
   });
   packDownloadBtn.dataset.roxyAction = "download-hd-pack";
   packDownloadBtn.title = "当前使用内置轻量像素形象 · 点击一键下载洛琪希高清立绘扩展包（7张 PNG）";
@@ -2291,18 +2547,18 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     text: "首要"
   });
   dockPrimaryBtn.dataset.roxyAction = "dock-restore-primary";
-  dockPrimaryBtn.title = "还原为当前最需要展现的首要案头事项";
+  dockPrimaryBtn.title = "还原为当前最需要展现的首要事项";
 
   const quietBtn = ctrlsGroup.createEl("button", {
     cls: `curator-roxy-ctrl-btn is-quiet-toggle ${isQuietMode ? "is-active is-quiet-active" : ""}`,
-    text: isQuietMode ? "🩹 解封" : "🤫 静默"
+    text: isQuietMode ? "解封" : "静默"
   });
   quietBtn.dataset.roxyAction = "toggle-quiet-mode";
   const syncQuietBtnState = () => {
     const active = Boolean(plugin.settings.roxyQuietMode);
     quietBtn.classList.toggle("is-active", active);
     quietBtn.classList.toggle("is-quiet-active", active);
-    quietBtn.textContent = active ? "🩹 解封" : "🤫 静默";
+    quietBtn.textContent = active ? "解封" : "静默";
     quietBtn.title = active
       ? `当前：静默值守中（已贴上封口白条，仅在点击${mascotName}时说话）· 点击撕下白条恢复主动播报`
       : `开启静默值守：为${mascotName}贴上封口白条，平时操作不主动弹窗搭话，仅在点击${mascotName}时回应`;
@@ -2378,12 +2634,15 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     bubble.classList.add("roxy-bubble-popping");
   };
 
+  let activeDismissHintType = null;
+
   const hideBubble = () => {
     if (bubbleTimer) {
       clearTimeout(bubbleTimer);
       bubbleTimer = null;
     }
-    bubble.classList.remove("is-visible", "roxy-bubble-popping", "is-pull-hint-bubble");
+    activeDismissHintType = null;
+    bubble.classList.remove("is-visible", "roxy-bubble-popping", "is-pull-hint-bubble", "is-wand-hint-bubble");
     bubble.classList.add("is-hidden");
     bubbleFooter.classList.add("is-hidden");
   };
@@ -2408,23 +2667,44 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
       bubbleBadge.className = `curator-roxy-bubble-badge is-${nextState}`;
       bubbleStep.textContent = record.stepHint || (record.isPrimary ? "首要" : "");
       bubbleStep.style.display = bubbleStep.textContent ? "inline-flex" : "none";
-      restorePrimaryBtn.classList.toggle("is-active-primary", Boolean(record.isPrimary || record.isPullHint));
-
-      const isPullHint = Boolean(record.isPullHint);
-      bubble.classList.toggle("is-pull-hint-bubble", isPullHint);
-      bubbleFooter.classList.toggle(
-        "is-hidden",
-        !isPullHint || Boolean(plugin.settings.roxyPullToTopHintDismissed)
+      restorePrimaryBtn.classList.toggle(
+        "is-active-primary",
+        Boolean(record.isPrimary || record.isPullHint || record.isWandHint)
       );
 
+      const isPullHint = Boolean(record.isPullHint);
+      const isWandHint = Boolean(record.isWandHint);
+      const mem = ensureGestureMemory(plugin);
+      bubble.classList.toggle("is-pull-hint-bubble", isPullHint);
+      bubble.classList.toggle("is-wand-hint-bubble", isWandHint);
+
+      if (isPullHint && !plugin.settings.roxyPullToTopHintDismissed) {
+        activeDismissHintType = "pull";
+        dismissPullHintBtn.title = "永久不再弹出长按回顶操作提示（不影响长按拉动回顶功能本身）";
+        bubbleFooter.classList.remove("is-hidden");
+      } else if (isWandHint && !mem.wandHintDismissed) {
+        activeDismissHintType = "wand";
+        dismissPullHintBtn.title = "永久不再弹出长按/右键关联检索操作提示（不影响长按或右键功能本身）";
+        bubbleFooter.classList.remove("is-hidden");
+      } else {
+        activeDismissHintType = null;
+        bubbleFooter.classList.add("is-hidden");
+      }
+
       bubbleText.textContent = record.message;
-      const isNarrowMobile2D =
-        typeof window !== "undefined" && window.innerWidth > 0 && window.innerWidth <= 680;
-      const allowAutoBubbleOnMobile =
+      const paneEl =
+        hostEl.closest(".workspace-leaf-content") ||
+        hostEl.closest(".bangumi-score-dashboard-view") ||
+        hostEl;
+      const paneWidth =
+        (paneEl && paneEl.getBoundingClientRect().width) ||
+        (typeof window !== "undefined" ? window.innerWidth : 1280);
+      const isTightPane2D = paneWidth > 0 && paneWidth <= 540;
+      const allowAutoBubbleOnTightPane =
         Boolean(record.userInitiated) ||
         String(record.type || "").startsWith("poke") ||
         record.type === "roxy:hd_pack_installed";
-      if (isNarrowMobile2D && !allowAutoBubbleOnMobile) {
+      if (isTightPane2D && !allowAutoBubbleOnTightPane) {
         hideBubble();
       } else {
         bubble.classList.remove("is-hidden");
@@ -2445,11 +2725,22 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   dismissPullHintBtn.onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+    const dismissedType = activeDismissHintType;
+    if (dismissedType === "wand") {
+      const mem = ensureGestureMemory(plugin);
+      mem.wandHintDismissed = true;
+      await plugin.saveSettings().catch(() => {});
+      hideBubble();
+      if (globalThis.__BangumiManagerNotice) {
+        new globalThis.__BangumiManagerNotice("已记住偏好：今后不再弹出长按/右键查看关联收藏的操作提示。");
+      }
+      return;
+    }
     plugin.settings.roxyPullToTopHintDismissed = true;
     await plugin.saveSettings().catch(() => {});
     hideBubble();
     if (globalThis.__BangumiManagerNotice) {
-      new globalThis.__BangumiManagerNotice("已记住偏好：今后不再弹出长按回顶教学提示。");
+      new globalThis.__BangumiManagerNotice("已记住偏好：今后不再弹出长按回顶操作提示。");
     }
   };
 
@@ -2728,6 +3019,23 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
   };
 
+  const getScrollHost = () =>
+    typeof plugin.getDashboardScrollParent === "function"
+      ? plugin.getDashboardScrollParent(container)
+      : container.closest(".bangumi-score-dashboard-view") || container;
+
+  const isDashboardScrollable = () => {
+    const scrollEl = getScrollHost();
+    if (!scrollEl) return false;
+    return scrollEl.scrollHeight - scrollEl.clientHeight > 64 || scrollEl.scrollTop > 12;
+  };
+
+  hitZone.addEventListener("pointerenter", () => {
+    hitZone.title = isDashboardScrollable()
+      ? "点击切换番剧咨讯 · 按住向下拉动松手可回到顶部（右键还原首要事项）"
+      : "点击切换番剧咨讯 · 右键还原首要事项";
+  });
+
   const onWindowPointerMove = (e) => {
     if (!isPointerDown) return;
     const dy = e.clientY - startY;
@@ -2748,10 +3056,15 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
 
     if (dy > 6) {
-      widget.classList.add("is-pull-holding", "is-pull-dragging");
-      const isReady = dy >= PULL_THRESHOLD;
-      widget.classList.toggle("is-pull-ready", isReady);
-      pullHintLabel.textContent = isReady ? "松手回顶 ↑" : "继续下拉";
+      const canPullTop = isDashboardScrollable();
+      if (canPullTop) {
+        widget.classList.add("is-pull-holding", "is-pull-dragging");
+        const isReady = dy >= PULL_THRESHOLD;
+        widget.classList.toggle("is-pull-ready", isReady);
+        pullHintLabel.textContent = isReady ? "松手回顶 ↑" : "继续下拉";
+      } else {
+        widget.classList.remove("is-pull-holding", "is-pull-dragging", "is-pull-ready");
+      }
 
       // 阶段二：渐进式阻尼挤压形变（底部锚定于名牌上沿 50% 168px，体积守恒：纵向压缩 + 横向微扩 + 微下沉）
       const norm = Math.tanh(Math.max(0, dy - 4) / 95);
@@ -2773,9 +3086,11 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     window.removeEventListener("pointercancel", onWindowPointerCancel);
     clearPullTimers();
 
-    const pulledEnough = !isCancel && currentDy >= PULL_THRESHOLD;
+    const canPullTop = isDashboardScrollable();
+    const pulledEnough = !isCancel && canPullTop && currentDy >= PULL_THRESHOLD;
     if (pulledEnough) {
       suppressNextClick = true;
+      recordPullToTopUsed(plugin);
       // 用户完成下拉回顶操作，立即关闭气泡并执行弹簧发射回顶
       hideBubble();
       resetPullVisuals(true, currentDy);
@@ -2815,32 +3130,43 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
 
     clearPullTimers();
 
-    // 阶段一：长按满 1 秒未松手，浮现半透明呼吸/流动向下箭头指示器
-    hold1sTimer = setTimeout(() => {
-      hold1sTimer = null;
-      if (!isPointerDown || coord.isPinballFlying2D || coord.runaway2D) return;
-      widget.classList.add("is-pull-holding");
-    }, 1000);
+    if (isDashboardScrollable()) {
+      // 阶段一：长按满 1 秒未松手，浮现半透明呼吸/流动向下箭头指示器
+      hold1sTimer = setTimeout(() => {
+        hold1sTimer = null;
+        if (!isPointerDown || coord.isPinballFlying2D || coord.runaway2D || !isDashboardScrollable()) return;
+        widget.classList.add("is-pull-holding");
+      }, 1000);
 
-    // 阶段三：长按满 3 秒仍未拉动触发回顶，且未点击过「不再显示」时，弹出角色口吻引导气泡
-    hold3sTimer = setTimeout(() => {
-      hold3sTimer = null;
-      if (!isPointerDown || coord.isPinballFlying2D || coord.runaway2D) return;
-      if (maxDy >= PULL_THRESHOLD) return;
-      if (plugin.settings.roxyPullToTopHintDismissed) return;
+      // 阶段三：长按满 3 秒仍未拉动触发回顶，且未点击过「不再显示」或尚未熟练掌握时，弹出角色口吻引导气泡
+      hold3sTimer = setTimeout(() => {
+        hold3sTimer = null;
+        if (!isPointerDown || coord.isPinballFlying2D || coord.runaway2D || !isDashboardScrollable()) return;
+        if (maxDy >= PULL_THRESHOLD) return;
+        if (plugin.settings.roxyPullToTopHintDismissed) return;
+        if (plugin.settings.roxySmartGestureHints === false) return;
+        const pullMem = ensureGestureMemory(plugin);
+        if (
+          pullMem.pullUseCount >= 3 &&
+          pullMem.lastPullUsedAt > 0 &&
+          Date.now() - pullMem.lastPullUsedAt < 30 * 86400000
+        ) {
+          return;
+        }
 
-      hintShownDuringHold = true;
-      showRecord({
-        type: "roxy:pull_to_top_hint",
-        state: "explain",
-        badgeText: `✦ ${mascotName} · 回顶术式`,
-        stepHint: "操作提示",
-        isPullHint: true,
-        skipBounce: true,
-        autoHideMs: 12000,
-        message: "那个……如果您想快速回到档案馆顶部的话，只需按住我向下拖动蓄力再松手，我就会施展风系术式带您一跃回到页首哦。"
-      });
-    }, 3000);
+        hintShownDuringHold = true;
+        showRecord({
+          type: "roxy:pull_to_top_hint",
+          state: "explain",
+          badgeText: `✦ ${mascotName} · 回顶术式`,
+          stepHint: "操作提示",
+          isPullHint: true,
+          skipBounce: true,
+          autoHideMs: 12000,
+          message: "那个……如果您想快速回到档案馆顶部的话，只需按住我向下拖动蓄力再松手，我就会施展风系术式带您一跃回到页首哦。"
+        });
+      }, 3000);
+    }
 
     window.addEventListener("pointermove", onWindowPointerMove);
     window.addEventListener("pointerup", onWindowPointerUp);
@@ -2935,7 +3261,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
             emitRoxyEvent(plugin, {
               type: `roxy:plushie_transformed_${nextPlushie}`,
               state: nextPlushie,
-              badgeText: `🧸 ${mascotName} · 替身玩偶术`,
+              badgeText: `✦ ${mascotName} · 替身玩偶术`,
               stepHint: "百连击彩蛋",
               priority: PRIORITY.CRITICAL,
               force: true,
@@ -3179,9 +3505,17 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
   };
 
+  let wandHintTimer = null;
   coord.listeners2D.add(showRecord);
   widget._cleanupRoxy = () => {
     coord.listeners2D.delete(showRecord);
+    if (typeof cleanupLeafAnchor === "function") {
+      cleanupLeafAnchor();
+    }
+    if (wandHintTimer) {
+      clearTimeout(wandHintTimer);
+      wandHintTimer = null;
+    }
     clearPullTimers();
     if (bandageAnimTimer2D) clearTimeout(bandageAnimTimer2D);
     [hdBandageEl, chibiBandageEl].forEach((el) => {
@@ -3229,6 +3563,30 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     showRecord(coord.history[0]);
   }
 
+  const initialWandHintNeed = evaluateWandGestureHintNeed(plugin, state, coord);
+  if (initialWandHintNeed && !isRunaway && !isMinimized) {
+    wandHintTimer = setTimeout(() => {
+      wandHintTimer = null;
+      if (!widget.isConnected || coord.runaway2D || coord.isPinballFlying2D || plugin.settings.roxy2DMinimized) {
+        return;
+      }
+      if (widget.classList.contains("is-pane-hidden") || widget.classList.contains("is-tight-pane")) {
+        return;
+      }
+      if (Date.now() - (coord.lastPokeAt || 0) < 8000) {
+        return;
+      }
+      const needNow = evaluateWandGestureHintNeed(plugin, state, coord);
+      if (!needNow) return;
+      coord._sessionWandHintShown = true;
+      const mem = ensureGestureMemory(plugin);
+      mem.wandHintShowCount = (mem.wandHintShowCount || 0) + 1;
+      mem.lastWandHintShownAt = Date.now();
+      plugin.saveSettings().catch(() => {});
+      showRecord(buildWandGestureHintRecord(plugin, needNow));
+    }, 11800);
+  }
+
   return widget;
 }
 
@@ -3247,7 +3605,12 @@ function syncTopbarRoxyButton(plugin, container, state, helpers) {
       ? container.parentElement
       : container;
 
-  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((el) => el.remove());
+  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((el) => {
+    if (typeof el._cleanupAnchor === "function") {
+      el._cleanupAnchor();
+    }
+    el.remove();
+  });
 
   const coord = ensureRoxyCoordinator(plugin);
   const modeInfo = normalizeRoxy2DModeSettings(plugin);
@@ -3259,6 +3622,7 @@ function syncTopbarRoxyButton(plugin, container, state, helpers) {
       text: "✦ 唤出洛琪希"
     });
     pill.title = "恢复显示本次会话隐藏的洛琪希馆藏记录员";
+    pill._cleanupAnchor = bindRoxyLeafBoundsAnchor(pill, hostEl);
     pill.onclick = async (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -3267,6 +3631,9 @@ function syncTopbarRoxyButton(plugin, container, state, helpers) {
       coord.deckIndex = 0;
       plugin.settings.roxy2DMinimized = false;
       await plugin.saveSettings().catch(() => {});
+      if (typeof pill._cleanupAnchor === "function") {
+        pill._cleanupAnchor();
+      }
       pill.remove();
       mountRoxy2DMascot(plugin, container, state, helpers);
       const primary = buildPrimaryDeskRecord(plugin, state);
@@ -3413,25 +3780,31 @@ function getRoxy2DMascotStyles() {
     ".curator-roxy-hd-host.roxy-anim-qbounce,.curator-roxy-portrait.roxy-anim-qbounce,.curator-roxy-pixel-fallback.roxy-anim-qbounce{animation:roxy-q-bounce 0.42s cubic-bezier(0.34,1.56,0.64,1) 1 forwards;}",
     ".curator-roxy-bubble.roxy-bubble-popping{animation:roxy-bubble-pop 0.28s cubic-bezier(0.34,1.56,0.64,1) 1 forwards;}",
     ".curator-roxy-widget.is-summon-landing .curator-roxy-stage{animation:roxy-summon-drop 0.48s cubic-bezier(0.34,1.56,0.64,1) 1 forwards;}",
-    /* 预留底部滚动呼吸空间，确保滚到底部时右下角挂件绝不遮挡任何卡片或统计模块 */
-    ".curator-desk-root{padding-bottom:118px !important;}",
-    /* 右下角轻量记录员容器（gap: 0 确保立绘底部紧贴并嵌入底部名牌后方，不留悬空断层） */
-    ".curator-roxy-widget{position:fixed;right:24px;bottom:34px;z-index:40;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;gap:0;user-select:none;}",
+    /* 预留底部滚动呼吸空间：单屏追番页使用紧凑下边距避免无意义留白，长列表页保留 136px 防右下角挂件遮挡 */
+    ".curator-desk-root{padding-bottom:136px !important;}",
+    ".curator-desk-root[data-active-mode=\"desk\"],.curator-desk-root:has(.curator-unified-workspace[data-active-mode=\"desk\"]){padding-bottom:28px !important;}",
+    "@media (max-width: 920px){.curator-desk-root[data-active-mode=\"desk\"],.curator-desk-root:has(.curator-unified-workspace[data-active-mode=\"desk\"]){padding-bottom:84px !important;}}",
+    "@media (max-width: 600px){.curator-roxy-widget:not(.is-pinball-rampage){right:10px !important;bottom:12px !important;transform:scale(0.68) !important;}.curator-roxy-bubble{max-width:min(240px,calc(100vw - 88px)) !important;padding:7px 10px !important;}}",
+    /* 右下角轻量记录员容器（动态锚定于当前 Leaf 内容区右下角，绝不越界覆盖右侧边栏） */
+    ".curator-roxy-widget{position:fixed;right:20px;bottom:24px;z-index:40;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;gap:0;user-select:none;transform-origin:100% 100%;transition:transform .2s ease,opacity .16s ease;}",
+    ".curator-roxy-widget.is-pane-hidden,.curator-roxy-wakeup-pill.is-pane-hidden{opacity:0 !important;visibility:hidden !important;pointer-events:none !important;}",
+    ".curator-roxy-widget.is-compact-pane:not(.is-pinball-rampage){transform:scale(0.86);}",
+    ".curator-roxy-widget.is-tight-pane:not(.is-pinball-rampage){transform:scale(0.76);}",
     ".curator-roxy-widget.is-pinball-rampage{z-index:999 !important;pointer-events:none !important;}",
     /* 纸本档案风对话气泡 */
-    ".curator-roxy-bubble{pointer-events:auto;max-width:268px;padding:9px 12px;margin-right:4px;margin-bottom:6px;border-radius:11px 11px 3px 11px;border:1px solid color-mix(in srgb, #8f683d 44%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 96%, #f6efe3 4%);box-shadow:0 8px 22px rgba(38,28,18,0.13);transform-origin:88% 100%;transition:opacity .18s ease,transform .18s ease;}",
+    ".curator-roxy-bubble{pointer-events:auto;max-width:var(--roxy-pane-max-bubble-w,268px);padding:9px 12px;margin-right:4px;margin-bottom:6px;border-radius:11px 11px 3px 11px;border:1px solid color-mix(in srgb, #8f683d 44%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 96%, #f6efe3 4%);box-shadow:0 8px 22px rgba(38,28,18,0.13);transform-origin:88% 100%;transition:opacity .18s ease,transform .18s ease;}",
     ".curator-roxy-bubble.is-hidden,.curator-roxy-widget.is-pinball-rampage .curator-roxy-bubble{opacity:0 !important;transform:translateY(8px) scale(0.95) !important;pointer-events:none !important;visibility:hidden !important;}",
     ".curator-roxy-bubble.is-visible{opacity:1;transform:translateY(0) scale(1);pointer-events:auto;visibility:visible;}",
     ".curator-roxy-bubble-header{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;padding-bottom:3px;border-bottom:1px dashed color-mix(in srgb, var(--background-modifier-border) 65%, transparent);}",
     ".curator-roxy-bubble-meta{display:inline-flex;align-items:center;gap:5px;min-width:0;}",
-    ".curator-roxy-bubble-badge{font-size:10.5px;font-weight:700;letter-spacing:0.03em;color:#8f683d;white-space:nowrap;}",
+    ".curator-roxy-bubble-badge{font-size:12px;font-weight:700;letter-spacing:0.02em;color:#8f683d;white-space:nowrap;}",
     ".curator-roxy-bubble-badge.is-success{color:#3a7d5c;}",
     ".curator-roxy-bubble-badge.is-warn,.curator-roxy-bubble-badge.is-panic,.curator-roxy-bubble-badge.is-overpoke{color:#b8543d;}",
     ".curator-roxy-bubble-badge.is-warn2{color:#a86428;}",
     ".curator-roxy-bubble-badge.is-surprised{color:#2b72b9;}",
-    ".curator-roxy-bubble-step{font-size:9.5px;padding:0 5px;border-radius:999px;background:color-mix(in srgb, #8f683d 12%, var(--background-secondary));color:var(--text-muted);font-weight:600;white-space:nowrap;}",
+    ".curator-roxy-bubble-step{font-size:12px;padding:0 6px;border-radius:999px;background:color-mix(in srgb, #8f683d 12%, var(--background-secondary));color:var(--text-muted);font-weight:600;white-space:nowrap;}",
     ".curator-roxy-bubble-ctrls{display:inline-flex;align-items:center;gap:3px;flex-shrink:0;}",
-    ".curator-roxy-bubble-restore{cursor:pointer;padding:1px 6px;border-radius:4px;border:1px solid color-mix(in srgb, #8f683d 35%, var(--background-modifier-border));background:var(--background-secondary);color:#8f683d;font-size:10px;font-weight:600;line-height:1.3;transition:all .12s ease;}",
+    ".curator-roxy-bubble-restore{cursor:pointer;padding:1px 6px;border-radius:4px;border:1px solid color-mix(in srgb, #8f683d 35%, var(--background-modifier-border));background:var(--background-secondary);color:#8f683d;font-size:12px;font-weight:600;line-height:1.3;transition:all .12s ease;}",
     ".curator-roxy-bubble-restore:hover{background:#8f683d;color:#fffdf9;border-color:#8f683d;}",
     ".curator-roxy-bubble-restore.is-active-primary{display:none !important;}",
     ".curator-roxy-bubble-close{cursor:pointer;width:17px;height:17px;padding:0;border:none;background:transparent;color:var(--text-faint);font-size:12px;line-height:1;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;}",
@@ -3467,15 +3840,15 @@ function getRoxy2DMascotStyles() {
     ".curator-roxy-widget.is-dock-auto-collapse:not(.is-minimized):not(.is-runaway):not(.is-plushie-mode):not(.is-dock-revealed) .curator-roxy-dock-bar{max-width:0 !important;max-height:0 !important;padding:0 !important;margin:0 !important;border-width:0 !important;opacity:0 !important;transform:translateY(-8px) scale(0.82) !important;pointer-events:none !important;overflow:hidden !important;}",
     ".curator-roxy-widget.is-dock-auto-collapse:not(.is-minimized):not(.is-runaway):not(.is-plushie-mode):not(.is-dock-revealed) .curator-roxy-stage{margin-bottom:0;}",
     ".curator-roxy-widget.is-pinball-rampage .curator-roxy-dock-bar{transform:translateY(28px) scale(0.9) !important;opacity:0 !important;pointer-events:none !important;}",
-    ".curator-roxy-summon-btn,.curator-roxy-unplushie-btn{display:none;cursor:pointer;padding:4px 10px;border:none;border-radius:999px;background:linear-gradient(135deg,#8f683d,#b8543d);color:#fffdf9;font-size:11.5px;font-weight:700;line-height:1.3;box-shadow:0 4px 12px rgba(184,84,61,0.28);transition:transform .15s ease,filter .15s ease;white-space:nowrap;}",
+    ".curator-roxy-summon-btn,.curator-roxy-unplushie-btn{display:none;cursor:pointer;padding:4px 10px;border:none;border-radius:999px;background:linear-gradient(135deg,#8f683d,#b8543d);color:#fffdf9;font-size:12px;font-weight:700;line-height:1.3;box-shadow:0 4px 12px rgba(184,84,61,0.28);transition:transform .15s ease,filter .15s ease;white-space:nowrap;}",
     ".curator-roxy-summon-btn:hover,.curator-roxy-unplushie-btn:hover{transform:translateY(-1px) scale(1.02);filter:brightness(1.08);}",
     ".curator-roxy-widget.is-runaway .curator-roxy-summon-btn{display:inline-flex;align-items:center;gap:4px;}",
     ".curator-roxy-widget.is-plushie-mode .curator-roxy-unplushie-btn{display:inline-flex;align-items:center;gap:4px;}",
     ".curator-roxy-widget.is-runaway .curator-roxy-name-btn,.curator-roxy-widget.is-runaway .curator-roxy-ctrl-group{display:none !important;}",
-    ".curator-roxy-name-btn{cursor:pointer;padding:1px 5px;border:none;background:transparent;font-size:10.5px;font-weight:700;color:#8f683d;line-height:1.2;white-space:nowrap;}",
+    ".curator-roxy-name-btn{cursor:pointer;padding:1px 5px;border:none;background:transparent;font-size:12px;font-weight:700;color:#8f683d;line-height:1.2;white-space:nowrap;}",
     ".curator-roxy-name-btn:hover{text-decoration:underline;}",
     ".curator-roxy-ctrl-group{display:inline-flex;align-items:center;gap:2px;padding-left:4px;border-left:1px solid var(--background-modifier-border);}",
-    ".curator-roxy-ctrl-btn{cursor:pointer;padding:1px 5px;border:none;border-radius:4px;background:transparent;font-size:10.5px;color:var(--text-muted);line-height:1.2;transition:all .12s ease;white-space:nowrap;}",
+    ".curator-roxy-ctrl-btn{cursor:pointer;padding:1px 5px;border:none;border-radius:4px;background:transparent;font-size:12px;color:var(--text-muted);line-height:1.2;transition:all .12s ease;white-space:nowrap;}",
     ".curator-roxy-ctrl-btn:hover{background:var(--background-modifier-hover);color:#8f683d;}",
     ".curator-roxy-ctrl-btn.is-primary-reset{color:#8f683d;font-weight:600;}",
     ".curator-roxy-ctrl-btn.is-quiet-toggle.is-active{color:#b8543d;font-weight:700;background:color-mix(in srgb, #b8543d 12%, transparent);}",
@@ -3485,7 +3858,7 @@ function getRoxy2DMascotStyles() {
     /* 长按回顶教学气泡底栏微弱“不再显示”按钮 */
     ".curator-roxy-bubble-footer{display:flex;justify-content:flex-end;margin-top:6px;padding-top:4px;border-top:1px dashed color-mix(in srgb, var(--background-modifier-border) 48%, transparent);}",
     ".curator-roxy-bubble-footer.is-hidden{display:none !important;}",
-    ".curator-roxy-bubble-dismiss-hint{cursor:pointer;padding:1px 6px;border:none;border-radius:4px;background:transparent;font-size:10px;color:var(--text-faint);opacity:0.76;transition:opacity .15s ease,color .15s ease,background .15s ease;}",
+    ".curator-roxy-bubble-dismiss-hint{cursor:pointer;padding:1px 6px;border:none;border-radius:4px;background:transparent;font-size:12px;color:var(--text-faint);opacity:0.76;transition:opacity .15s ease,color .15s ease,background .15s ease;}",
     ".curator-roxy-bubble-dismiss-hint:hover{opacity:1;color:#8f683d;background:color-mix(in srgb, #8f683d 10%, transparent);}",
     /* 长按满 1 秒 / 向下拉动蓄力时的呼吸向下箭头与法阵指示器 */
     "@keyframes roxy-pull-chevron-flow{0%{transform:translateY(-2px);opacity:0.45;}50%{transform:translateY(3px);opacity:0.95;}100%{transform:translateY(-2px);opacity:0.45;}}",
@@ -3496,10 +3869,10 @@ function getRoxy2DMascotStyles() {
     ".curator-roxy-widget.is-pull-ready .curator-roxy-pull-indicator{opacity:1;border-color:#2b72b9;background:color-mix(in srgb, #2b72b9 14%, var(--background-primary));}",
     ".curator-roxy-pull-arrows{display:inline-block;font-size:12px;line-height:1;color:#8f683d;font-weight:700;animation:roxy-pull-chevron-flow 1.1s ease-in-out infinite;}",
     ".curator-roxy-widget.is-pull-ready .curator-roxy-pull-arrows{color:#2b72b9;}",
-    ".curator-roxy-pull-label{font-size:9.5px;font-weight:600;color:#8f683d;letter-spacing:0.02em;white-space:nowrap;}",
+    ".curator-roxy-pull-label{font-size:12px;font-weight:600;color:#8f683d;letter-spacing:0.02em;white-space:nowrap;}",
     ".curator-roxy-widget.is-pull-ready .curator-roxy-pull-label{color:#2b72b9;font-weight:700;}",
     /* 会话内隐藏时的右下角极轻量唤醒胶囊（不占用顶栏） */
-    ".curator-roxy-wakeup-pill{position:fixed;right:24px;bottom:28px;z-index:39;cursor:pointer;padding:4px 11px;border-radius:999px;border:1px dashed color-mix(in srgb, #8f683d 48%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 94%, #f6efe3 6%);color:#8f683d;font-size:11px;font-weight:600;box-shadow:0 4px 12px rgba(34,24,14,0.1);opacity:0.82;transition:opacity .16s ease,transform .16s ease,border-color .16s ease;}",
+    ".curator-roxy-wakeup-pill{position:fixed;right:24px;bottom:28px;z-index:39;cursor:pointer;padding:4px 11px;border-radius:999px;border:1px dashed color-mix(in srgb, #8f683d 48%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 94%, #f6efe3 6%);color:#8f683d;font-size:12px;font-weight:600;box-shadow:0 4px 12px rgba(34,24,14,0.1);opacity:0.82;transition:opacity .16s ease,transform .16s ease,border-color .16s ease;}",
     ".curator-roxy-wakeup-pill:hover{opacity:1;transform:translateY(-2px);border-style:solid;border-color:#8f683d;}"
   ].join("\n");
 }
@@ -3552,21 +3925,21 @@ function buildPrimary3DRecord(plugin, space) {
     badgeText: "✦ 洛琪希 · 首要事项",
     isPrimary: true,
     priority: PRIORITY.NORMAL,
-    message: `欢迎来到三维原画档案室。当前聚焦于「${laneName}」（共 ${laneList.length} 部），全馆 ${items.length} 部原画封套已按真实状态就位，单击任意封套即可抽阅详情哦。`
+    message: `欢迎来到 3D 原画展厅。当前聚焦于「${laneName}」（共 ${laneList.length} 部），全馆 ${items.length} 部原画封套已按真实状态就位，单击任意封套即可抽阅详情哦。`
   };
 }
 
 /**
- * 在三维原画档案室顶栏同步「✦ 记录员」恢复与开关按钮（零侵入修改）
+ * 在 3D 原画展厅顶栏同步「✦ 记录员」恢复与开关按钮（零侵入修改）
  */
 function sync3DTopbarRoxyButton(plugin, space) {
   if (!space || !space.root) return;
   const coord = ensureRoxyCoordinator(plugin);
 
-  // 统一三维原画档案室左上角主标识文案
+  // 统一 3D 原画展厅左上角主标识文案
   const brandEl = space.root.querySelector(".atelier-mark");
   if (brandEl && brandEl.childNodes[0] && brandEl.childNodes[0].nodeType === 3) {
-    brandEl.childNodes[0].nodeValue = "三维原画档案室 · ATELIER CEL";
+    brandEl.childNodes[0].nodeValue = "3D 原画展厅 · ATELIER CEL";
   }
 
   const actionsEl = space.root.querySelector(".atelier-actions");
@@ -3591,19 +3964,19 @@ function sync3DTopbarRoxyButton(plugin, space) {
   btn.classList.remove("is-roxy3d-off", "is-roxy3d-summon");
   if (!isEnabled) {
     btn.textContent = "✦ 开启记录员";
-    btn.title = "重新启用三维原画档案室像素洛琪希记录员";
+    btn.title = "重新启用 3D 原画展厅像素洛琪希记录员";
     btn.classList.add("is-roxy3d-off");
   } else if (isSessionHidden) {
     btn.textContent = "✦ 唤出记录员";
     btn.title = "恢复显示本次会话隐藏的像素洛琪希记录员";
     btn.classList.add("is-roxy3d-off");
   } else if (isRunaway3D) {
-    btn.textContent = "🔮 召唤洛琪希";
+    btn.textContent = "✦ 召唤洛琪希";
     btn.title = "像素洛琪希被连戳 100 下弹飞躲起来了，点击将她召唤回原画台角";
     btn.classList.add("is-roxy3d-off", "is-roxy3d-summon");
   } else {
     btn.textContent = "✦ 记录员";
-    btn.title = "点击还原洛琪希的首要档案室导览提示（左上角桌角手办框支持点击轮播咨讯、最小化、隐藏或关闭）";
+    btn.title = "点击还原洛琪希的首要展厅导览提示（左上角桌角手办框支持点击轮播咨讯、最小化、隐藏或关闭）";
   }
 
   btn.onclick = async (e) => {
@@ -3630,7 +4003,7 @@ function sync3DTopbarRoxyButton(plugin, space) {
         force: true,
         userInitiated: true,
         autoHideMs: 5500,
-        message: "让您久等了，三维档案室记录员洛琪希已经回到原画分镜台边待命，随时为您登记抽阅动态哦。"
+        message: "让您久等了，3D 原画展厅记录员洛琪希已经回到原画分镜台边待命，随时为您登记抽阅动态哦。"
       });
     } else if (coord && coord.runaway3D) {
       const existing = space.ui && space.ui.querySelector(".atelier-roxy3d-widget");
@@ -4013,7 +4386,7 @@ function hook3DSpaceEvents(plugin, space) {
           priority: PRIORITY.NORMAL,
           force: true,
           autoHideMs: 5500,
-          message: `已从封套夹层中为您抽出《${it?.name || "当前作品"}》的随附笔记纸页，可以在此浏览编目摘要与个人观后手记。`
+          message: `已从封套夹层中为您抽出《${it?.name || "当前作品"}》的随附笔记纸页，可以在此浏览作品摘要与个人观后手记。`
         });
       } else if (prev !== "pending" && this.noteSheetState === "pending") {
         emitRoxyEvent(plugin, {
@@ -4126,7 +4499,7 @@ function hook3DSpaceEvents(plugin, space) {
                   priority: PRIORITY.HIGH,
                   force: true,
                   autoHideMs: 5800,
-                  message: `在三维档案室里翻找了一遍，没有找到包含“${q}”的原画档案呢，要不要换个关键词试试？`
+                  message: `在 3D 原画展厅里翻找了一遍，没有找到包含“${q}”的原画档案呢，要不要换个关键词试试？`
                 });
               }, 240);
             }
@@ -4150,7 +4523,7 @@ function hook3DSpaceEvents(plugin, space) {
         priority: PRIORITY.NORMAL,
         force: true,
         autoHideMs: 4800,
-        message: "三维原画档案室的偏好与轨道配置已经为您妥善保存好了。"
+        message: "3D 原画展厅的偏好与轨道配置已经为您妥善保存好了。"
       });
       return res;
     };
@@ -4351,14 +4724,14 @@ function mountRoxy3DMascot(plugin, space) {
   const summonBtn3D = document.createElement("button");
   summonBtn3D.className = "atelier-roxy3d-summon-btn";
   summonBtn3D.dataset.roxy3dAction = "summon-runaway-3d";
-  summonBtn3D.textContent = `🔮 ${mascotName}被戳飞逃跑了 · 点击召唤回来`;
+  summonBtn3D.textContent = `✦ ${mascotName}被戳飞逃跑了 · 点击召唤回来`;
   summonBtn3D.title = `把被连戳 100 下弹飞出去的${mascotName}重新召唤回原画台角`;
   dockBar.appendChild(summonBtn3D);
 
   const unplushieBtn3D = document.createElement("button");
   unplushieBtn3D.className = "atelier-roxy3d-unplushie-btn";
   unplushieBtn3D.dataset.roxy3dAction = "summon-plushie-3d";
-  unplushieBtn3D.textContent = `🔮 解除玩偶 · 唤回${mascotName}`;
+  unplushieBtn3D.textContent = `✦ 解除玩偶 · 唤回${mascotName}`;
   unplushieBtn3D.title = `解除米格路德替身玩偶术，把${mascotName}真身唤回原画台角`;
   dockBar.appendChild(unplushieBtn3D);
 
@@ -4366,7 +4739,7 @@ function mountRoxy3DMascot(plugin, space) {
     if (plugin.settings.roxy3DMinimized) {
       return `✦ ${mascotName} [展开]`;
     }
-    return plugin.settings.roxyDockExpandOnClickOnly ? "📌 固定底栏" : "📌 点立绘展栏";
+    return plugin.settings.roxyDockExpandOnClickOnly ? "固定底栏" : "点立绘展栏";
   };
   const get3DDockModeTitle = () => {
     if (plugin.settings.roxy3DMinimized) {
@@ -4423,7 +4796,7 @@ function mountRoxy3DMascot(plugin, space) {
   dockPrimaryBtn.className = "atelier-roxy3d-ctrl-btn is-primary-reset";
   dockPrimaryBtn.dataset.roxy3dAction = "dock-restore-primary";
   dockPrimaryBtn.textContent = "首要";
-  dockPrimaryBtn.title = "还原为三维原画档案室首要导览提示";
+  dockPrimaryBtn.title = "还原为 3D 原画展厅首要导览提示";
   ctrlGroup.appendChild(dockPrimaryBtn);
 
   const quietBtn3D = document.createElement("button");
@@ -4432,7 +4805,7 @@ function mountRoxy3DMascot(plugin, space) {
   const sync3DQuietBtnState = () => {
     const active = Boolean(plugin.settings.roxyQuietMode);
     quietBtn3D.classList.toggle("is-active", active);
-    quietBtn3D.textContent = active ? "🩹 解封" : "🤫 静默";
+    quietBtn3D.textContent = active ? "解封" : "静默";
     quietBtn3D.title = active
       ? `当前处于「静默值守」模式（抽阅封套等操作时不主动说话，仅在点击${mascotName}时说话）· 点击揭下静音小封条恢复正常说话`
       : `开启「静默值守」模式：为${mascotName}贴上静音小封条，抽阅三维封套等操作时不再弹出气泡，仅在主动点击她时说话`;
@@ -4492,7 +4865,7 @@ function mountRoxy3DMascot(plugin, space) {
   restorePrimaryBtn.className = "atelier-roxy3d-bubble-restore";
   restorePrimaryBtn.dataset.roxy3dAction = "restore-primary";
   restorePrimaryBtn.textContent = "↺ 首要";
-  restorePrimaryBtn.title = "将气泡内容还原为三维原画档案室首要导览提示";
+  restorePrimaryBtn.title = "将气泡内容还原为 3D 原画展厅首要导览提示";
   bubbleCtrls.appendChild(restorePrimaryBtn);
 
   const bubbleCloseBtn = document.createElement("button");
@@ -4750,7 +5123,7 @@ function mountRoxy3DMascot(plugin, space) {
             emitRoxyEvent(plugin, {
               type: `roxy3d:plushie_transformed_${nextPlushie}`,
               state: nextPlushie,
-              badgeText: `🧸 ${mascotName} · 替身玩偶术`,
+              badgeText: `✦ ${mascotName} · 替身玩偶术`,
               stepHint: "百连击彩蛋",
               priority: PRIORITY.CRITICAL,
               force: true,
@@ -4890,7 +5263,7 @@ function mountRoxy3DMascot(plugin, space) {
         force: true,
         userInitiated: true,
         autoHideMs: 6500,
-        message: "噗哈——！嘴上的静音小封条揭下来啦，接下来在三维原画档案室里我会继续为您播报动态的！"
+        message: "噗哈——！嘴上的静音小封条揭下来啦，接下来在 3D 原画展厅里我会继续为您播报动态的！"
       });
       await plugin.saveSettings().catch(() => {});
     }
@@ -5087,8 +5460,6 @@ function getRoxy3DMascotStyles() {
     "  .atelier-roxy3d-widget{left:12px!important;top:102px!important;bottom:auto!important;transform:scale(0.8);transform-origin:0% 0%;}",
     "  .bangumi-3d-root[data-space-state=\"entering-detail\"] .atelier-roxy3d-bubble,.bangumi-3d-root[data-space-state=\"detail\"] .atelier-roxy3d-bubble{display:none!important;}",
     "  .atelier-roxy3d-bubble{max-width:206px!important;padding:6px 9px!important;}",
-    "  .curator-roxy-widget{right:8px!important;bottom:8px!important;transform:scale(0.82);transform-origin:100% 100%;}",
-    "  .curator-roxy-bubble{max-width:208px!important;}",
     "}"
   ].join("\n");
 }
@@ -5104,6 +5475,10 @@ module.exports = {
   normalizeRoxy2DModeSettings,
   downloadRoxyHdPortraitPack,
   ensureRoxyCoordinator,
+  ensureGestureMemory,
+  recordWandRelationUsed,
+  recordPullToTopUsed,
+  resetRoxyGestureMemory,
   emitRoxyEvent,
   buildPrimaryDeskRecord,
   buildPrimary3DRecord,

@@ -1,5 +1,7 @@
 const noteUtils = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
+const animeActivityService = require("./anime-activity-and-random-service.js");
+const v07Core = require("./v07-core.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -141,7 +143,7 @@ function inferPlayerKindFromExe(exePath) {
   const base = path.basename(String(exePath || "")).toLowerCase();
   if (base.includes("potplayer")) return "potplayer";
   if (base.includes("dandanplay") || base.includes("弹弹play")) return "dandanplay";
-  if (base === "mpv.exe" || base.includes("mpv")) return "mpv";
+  if (base === "mpv.exe" || base.includes("mpv") || base.includes("iina")) return "mpv";
   if (base.includes("vlc")) return "vlc";
   if (base.includes("mpc-hc") || base.includes("mpc-be") || base.includes("mplayerc")) return "mpc";
   return "custom";
@@ -192,9 +194,9 @@ function detectInstalledVideoPlayers(plugin) {
       "C:/Program Files (x86)/弹弹play/dandanplay.exe",
       "D:/Program Files/弹弹play/dandanplay.exe",
       "D:/弹弹play/dandanplay.exe",
-      "D:/ACG/弹弹play/dandanplay.exe",
       "C:/dandanplay/dandanplay.exe",
       "D:/dandanplay/dandanplay.exe",
+      "/Applications/弹弹play.app/Contents/MacOS/弹弹play",
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/弹弹play.lnk"),
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/弹弹play/弹弹play.lnk"),
       path.join(programData, "Microsoft/Windows/Start Menu/Programs/弹弹play/弹弹play.lnk"),
@@ -207,13 +209,20 @@ function detectInstalledVideoPlayers(plugin) {
       path.join(localAppData, "Programs/mpv/mpv.exe"),
       path.join(userProfile, "scoop/apps/mpv/current/mpv.exe"),
       "C:/ProgramData/chocolatey/bin/mpv.exe",
-      path.join(appData, "Microsoft/Windows/Start Menu/Programs/mpv.lnk")
+      path.join(appData, "Microsoft/Windows/Start Menu/Programs/mpv.lnk"),
+      "/Applications/IINA.app/Contents/MacOS/iina-cli",
+      "/opt/homebrew/bin/mpv",
+      "/usr/local/bin/mpv",
+      "/usr/bin/mpv"
     ],
     vlc: [
       "C:/Program Files/VideoLAN/VLC/vlc.exe",
       "C:/Program Files (x86)/VideoLAN/VLC/vlc.exe",
       "D:/Program Files/VideoLAN/VLC/vlc.exe",
-      path.join(programData, "Microsoft/Windows/Start Menu/Programs/VideoLAN/VLC media player.lnk")
+      path.join(programData, "Microsoft/Windows/Start Menu/Programs/VideoLAN/VLC media player.lnk"),
+      "/Applications/VLC.app/Contents/MacOS/VLC",
+      "/usr/bin/vlc",
+      "/usr/local/bin/vlc"
     ],
     mpc: [
       "C:/Program Files/MPC-HC/mpc-hc64.exe",
@@ -402,8 +411,8 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
     if (NoticeClass) {
       new NoticeClass(
         normTs
-          ? `📱 当前为移动端环境，暂不支持拉起电脑端视频播放器（时间码 ${normTs} 已复制到剪贴板）。`
-          : "📱 当前为移动端环境，暂不支持拉起电脑端视频播放器。",
+          ? `当前为移动端环境，暂不支持拉起电脑端视频播放器（时间码 ${normTs} 已复制到剪贴板）。`
+          : "当前为移动端环境，暂不支持拉起电脑端视频播放器。",
         4200
       );
     }
@@ -421,11 +430,11 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
       const epText = episode ? `第 ${String(episode).padStart(2, "0")} 话` : "对应剧集";
       if (normTs) {
         new NoticeClass(
-          `⏱️ 本地暂未找到《${item?.name || "作品"}》${epText}视频文件，已将时间码 ${normTs} 复制到剪贴板。`,
+          `本地暂未找到《${item?.name || "作品"}》${epText}视频文件，已将时间码 ${normTs} 复制到剪贴板。`,
           4500
         );
       } else {
-        new NoticeClass(`📁 本地目录暂未找到《${item?.name || "作品"}》${epText}视频文件。`, 4000);
+        new NoticeClass(`本地目录暂未找到《${item?.name || "作品"}》${epText}视频文件。`, 4000);
       }
     }
     return { ok: false, fallbackCopied: Boolean(normTs), matchRes };
@@ -444,8 +453,8 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
     if (NoticeClass) {
       new NoticeClass(
         normTs
-          ? `🎬 已打开《${item?.name}》${epLabel}（时间码 ${normTs} 已复制到剪贴板）。`
-          : `🎬 已打开《${item?.name}》${epLabel}。`,
+          ? `已打开《${item?.name}》${epLabel}（时间码 ${normTs} 已复制到剪贴板）。`
+          : `已打开《${item?.name}》${epLabel}。`,
         4500
       );
     }
@@ -492,17 +501,17 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
     if (NoticeClass) {
       if (normTs && seekedViaCli) {
         new NoticeClass(
-          `🎬 已通过 ${playerInfo.activeLabel} 空降《${item?.name}》${epLabel} [${normTs}]！`,
+          `已通过 ${playerInfo.activeLabel} 空降《${item?.name}》${epLabel} [${normTs}]！`,
           4200
         );
       } else if (normTs && !seekedViaCli) {
         new NoticeClass(
-          `🎬 已通过 ${playerInfo.activeLabel} 拉起《${item?.name}》${epLabel}！时间码 ${normTs} 已复制到剪贴板，可在播放器内快速定位。`,
+          `已通过 ${playerInfo.activeLabel} 拉起《${item?.name}》${epLabel}！时间码 ${normTs} 已复制到剪贴板，可在播放器内快速定位。`,
           5200
         );
       } else {
         new NoticeClass(
-          `🎬 已通过 ${playerInfo.activeLabel} 播放《${item?.name}》${epLabel}。`,
+          `已通过 ${playerInfo.activeLabel} 播放《${item?.name}》${epLabel}。`,
           3800
         );
       }
@@ -626,6 +635,18 @@ async function saveAnimeReviewsToNote(plugin, item, nextReviews, reasonText = ""
     }
 
     item.reviews = normalizedList;
+    if (normalizedList.length > 0) {
+      const latestRev = normalizedList[0];
+      const snip = String((latestRev && latestRev.content) || "").replace(/\s+/g, " ").trim().slice(0, 32);
+      animeActivityService.recordAnimeActivity(plugin, {
+        type: "review",
+        animeName: item.name,
+        filePath: file.path,
+        cover: item.cover || "",
+        status: item.state || "",
+        detail: `${latestRev && latestRev.scope ? `[${latestRev.scope}] ` : ""}更新观片手札${snip ? `：${snip}${snip.length >= 32 ? "…" : ""}` : ""}`
+      }).catch(() => {});
+    }
 
     // 同步内存态与打开的二维/三维视图
     await plugin.applyQuickUpdateToOpenDashboards(item, { reviewsUpdated: true });
@@ -857,7 +878,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       }
       if (NoticeClass) {
         new NoticeClass(
-          `🖼️ 已将 ${files.length} 张截图存入独立手札图库（${getReviewImageFolderPath(this.plugin)}）`,
+          `已将 ${files.length} 张截图存入独立手札图库（${getReviewImageFolderPath(this.plugin)}）`,
           3200
         );
       }
@@ -963,7 +984,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
         img.src = coverUrl;
         img.alt = this.item.name;
       } else {
-        coverBox.setText("🎬");
+        coverBox.appendChild(v07Core.icon("film", 22));
       }
 
       const titleCol = headerLeft.createDiv("curator-rs-title-col");
@@ -988,7 +1009,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       if (localRes && !localRes.error && localRes.fileCount > 0) {
         metaSub.createSpan({
           cls: "curator-rs-meta-chip is-local-ready",
-          text: `📁 本地已备 ${localRes.fileCount} 集 · 空降播放器：${playerInfo.activeLabel}`
+          text: `本地已备 ${localRes.fileCount} 集 · 空降播放器：${playerInfo.activeLabel}`
         });
       } else {
         metaSub.createSpan({
@@ -1000,7 +1021,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       const headerActions = header.createDiv("curator-rs-header-actions");
       const copyAllBtn = headerActions.createEl("button", {
         cls: "curator-dl-btn is-accent",
-        text: "📋 汇总复制全部手札"
+        text: "汇总复制全部手札"
       });
       copyAllBtn.title = "将当前所有吐槽、短评与长评按集数与体裁排版后一键复制，方便粘贴至 Bangumi 或社交平台";
       copyAllBtn.onclick = async () => {
@@ -1013,13 +1034,13 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
           await navigator.clipboard.writeText(formatted).catch(() => {});
         }
         if (NoticeClass) {
-          new NoticeClass(`📋 已汇总复制《${this.item.name}》全部 ${reviews.length} 条观片手札！`);
+          new NoticeClass(`已汇总复制《${this.item.name}》全部 ${reviews.length} 条观片手札！`);
         }
       };
 
       const openNoteBtn = headerActions.createEl("button", {
         cls: "curator-dl-btn",
-        text: "✎ 打开 Markdown 笔记 ↗"
+        text: "打开 Markdown 笔记 ↗"
       });
       openNoteBtn.onclick = async () => {
         if (this.item.file) {
@@ -1037,9 +1058,9 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       // 体裁切换（吐槽 / 短评 / 长评）
       const typeGroup = compTopBar.createDiv("curator-rs-seg-group");
       [
-        { id: "quip", label: "💬 吐槽", desc: "看番途中的即时反应、单集槽点或名场面感叹（支持回车秒发）" },
-        { id: "short", label: "✒️ 短评", desc: "三集定律小结、篇章观感或精炼总评" },
-        { id: "long", label: "📜 长评", desc: "深度人物考据、分集长文或完结剧评" }
+        { id: "quip", label: "吐槽", desc: "看番途中的即时反应、单集槽点或名场面感叹（支持回车秒发）" },
+        { id: "short", label: "短评", desc: "三集定律小结、篇章观感或精炼总评" },
+        { id: "long", label: "长评", desc: "深度人物考据、分集长文或完结剧评" }
       ].forEach((t) => {
         const btn = typeGroup.createEl("button", {
           cls: `curator-rs-seg-btn ${this.composerType === t.id ? "is-active" : ""}`,
@@ -1327,7 +1348,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
 
       const addImgBtn = compLeftTools.createEl("button", {
         cls: "curator-dl-mini-btn",
-        text: "🖼️ 选择截图"
+        text: "选择截图"
       });
       addImgBtn.title = `点击选择本地图片文件（也支持直接在输入框内按 Ctrl+V 粘贴剪贴板截图，自动保存至「${getReviewImageFolderPath(this.plugin)}」）`;
       addImgBtn.onclick = (e) => {
@@ -1353,8 +1374,8 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       const hintSpan = compLeftTools.createSpan({
         cls: "curator-rs-composer-hint",
         text: enterToSubmit
-          ? "💡 Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Shift+Enter 换行"
-          : "💡 Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Enter 换行 · Ctrl+Enter 提交"
+          ? "Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Shift+Enter 换行"
+          : "Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Enter 换行 · Ctrl+Enter 提交"
       });
 
       enterCheckbox.onchange = async () => {
@@ -1362,14 +1383,14 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
         this.plugin.settings.reviewEnterToSubmit = nextVal;
         enterToggleLabel.classList.toggle("is-checked", nextVal);
         hintSpan.textContent = nextVal
-          ? "💡 Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Shift+Enter 换行"
-          : "💡 Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Enter 换行 · Ctrl+Enter 提交";
+          ? "Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Shift+Enter 换行"
+          : "Ctrl+V 直接粘贴截图 · 开头「时间点+空格+正文」自动提取 · Enter 换行 · Ctrl+Enter 提交";
         await this.plugin.saveSettings();
       };
 
       const submitBtn = compFooter.createEl("button", {
         cls: "curator-dl-btn is-primary",
-        text: "✦ 记入手札并同步笔记"
+        text: "记入手札并同步笔记"
       });
       submitBtn.onclick = async (e) => {
         e.preventDefault();
@@ -1381,14 +1402,14 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       const filterPills = filterBar.createDiv("curator-rs-filter-pills");
       const filterDefs = [
         { id: "all", label: `全部手札 (${reviews.length})` },
-        { id: "quip", label: `💬 吐槽 (${quipCount})` },
-        { id: "short", label: `✒️ 短评 (${shortCount})` },
-        { id: "long", label: `📜 长评 (${longCount})` }
+        { id: "quip", label: `吐槽 (${quipCount})` },
+        { id: "short", label: `短评 (${shortCount})` },
+        { id: "long", label: `长评 (${longCount})` }
       ];
       if (placeholderCount > 0) {
         filterDefs.push({
           id: "placeholder",
-          label: `⏱️ 待补完时间点 (${placeholderCount})`,
+          label: `待补完时间点 (${placeholderCount})`,
           isHighlight: true
         });
       }
@@ -1412,7 +1433,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
         text:
           this.sortMode === "custom"
             ? "排序：⋮⋮ 自定义顺序（可拖拽调序）"
-            : "排序：🎬 按集数与时间点先后"
+            : "排序：按集数与时间点先后"
       });
       sortBtn.onclick = () => {
         this.sortMode = this.sortMode === "custom" ? "chronological" : "custom";
@@ -1560,7 +1581,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
 
       const typeBadge = leftBadges.createSpan({
         cls: `curator-rc-type-badge is-${rev.type}`,
-        text: rev.type === "quip" ? "💬 吐槽" : rev.type === "long" ? "📜 长评" : "✒️ 短评"
+        text: rev.type === "quip" ? "吐槽" : rev.type === "long" ? "长评" : "短评"
       });
 
       // 点击集数/时间戳徽章一键调用本地播放器空降画面！
@@ -1569,7 +1590,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
         ? `▶ ${rev.scopeDisplay} · ${rev.timestamp}`
         : canSeekEpisode
         ? `▶ ${rev.scopeDisplay}`
-        : `📘 ${rev.scopeDisplay}`;
+        : rev.scopeDisplay;
 
       const scopeJumpBtn = leftBadges.createEl("button", {
         cls: `curator-rc-scope-btn curator-mono ${rev.timestamp ? "has-timestamp" : ""} ${
@@ -1663,7 +1684,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
 
       const copyMainBtn = copyCombo.createEl("button", {
         cls: "curator-rc-copy-main-btn",
-        text: "📋 复制"
+        text: "复制"
       });
       copyMainBtn.dataset.reviewAction = "copy-review";
       copyMainBtn.title = "点击复制此条手札（根据右侧「含抬头」勾选状态自动决定复制纯正文或带集数时间点抬头格式）";
@@ -1681,8 +1702,8 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
         if (NoticeClass) {
           new NoticeClass(
             useHeader
-              ? `🏷️ 已复制带【${rev.scopeDisplay}${rev.timestamp ? ` · ${rev.timestamp}` : ""} · ${rev.typeLabel}】抬头的手札内容！`
-              : "📋 已复制手札纯正文！"
+              ? `已复制带【${rev.scopeDisplay}${rev.timestamp ? ` · ${rev.timestamp}` : ""} · ${rev.typeLabel}】抬头的手札内容！`
+              : "已复制手札纯正文！"
           );
         }
       };
@@ -1717,7 +1738,7 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
 
       const editBtn = rightActions.createEl("button", {
         cls: "curator-rc-action-btn",
-        text: rev.isPlaceholder ? "✎ 补写" : "✎ 编辑"
+        text: rev.isPlaceholder ? "补写" : "编辑"
       });
       editBtn.dataset.reviewAction = "edit";
       editBtn.onclick = (e) => {
@@ -1728,9 +1749,9 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       };
 
       const delBtn = rightActions.createEl("button", {
-        cls: "curator-rc-action-btn is-danger",
-        text: "🗑️"
+        cls: "curator-rc-action-btn is-danger"
       });
+      delBtn.appendChild(v07Core.icon("trash", 13));
       delBtn.dataset.reviewAction = "delete";
       delBtn.title = "删除此条手札";
       delBtn.onclick = async (e) => {
@@ -1971,9 +1992,9 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       const row1 = editWrap.createDiv("curator-rc-edit-row");
       const typeSelect = row1.createEl("select", { cls: "curator-sort-select" });
       [
-        { val: "quip", text: "💬 吐槽" },
-        { val: "short", text: "✒️ 短评" },
-        { val: "long", text: "📜 长评" }
+        { val: "quip", text: "吐槽" },
+        { val: "short", text: "短评" },
+        { val: "long", text: "长评" }
       ].forEach((o) => {
         const opt = typeSelect.createEl("option", { value: o.val, text: o.text });
         if (o.val === editType) opt.selected = true;

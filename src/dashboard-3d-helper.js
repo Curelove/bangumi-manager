@@ -1,4 +1,4 @@
-const THREE = require("three");
+import * as THREE from "three";
 const { getCachedAtelierPrototype } = require("./atelier-3d-pack-service");
 
 let _sharedPaperBumpTex = null;
@@ -134,7 +134,7 @@ const DEFAULT_LANE_CONFIGS = Object.freeze([
     sourceValue: "在看",
     sortBy: "progressDesc",
     visible: true,
-    plaqueNote: "案头连载跟进 · 实时进度"
+    plaqueNote: "正在连载跟进 · 实时进度"
   },
   {
     id: "lane-completed",
