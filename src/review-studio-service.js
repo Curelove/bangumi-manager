@@ -169,18 +169,28 @@ function detectInstalledVideoPlayers(plugin) {
   const programData = envObj.PROGRAMDATA || "C:\\ProgramData";
   const userProfile = envObj.USERPROFILE || "";
 
+  const isWin = typeof process !== "undefined" && process.platform === "win32";
+  const winDrives = [];
+  if (isWin) {
+    for (const d of ["C:", "D:", "E:", "F:", "G:"]) {
+      try {
+        if (fs.existsSync(`${d}/`)) winDrives.push(d);
+      } catch (_) {}
+    }
+  }
+
   const playerCandidates = {
     potplayer: [
-      "C:/Program Files/DAUM/PotPlayer/PotPlayerMini64.exe",
-      "C:/Program Files/DAUM/PotPlayer/PotPlayer64.exe",
-      "C:/Program Files/DAUM/PotPlayer/PotPlayerMini.exe",
-      "C:/Program Files/DAUM/PotPlayer/PotPlayer.exe",
-      "C:/Program Files (x86)/DAUM/PotPlayer/PotPlayerMini.exe",
-      "C:/Program Files (x86)/DAUM/PotPlayer/PotPlayerMini64.exe",
-      "D:/Program Files/DAUM/PotPlayer/PotPlayerMini64.exe",
-      "D:/Program Files (x86)/DAUM/PotPlayer/PotPlayerMini.exe",
-      "D:/PotPlayer/PotPlayerMini64.exe",
-      "D:/PotPlayer/PotPlayerMini.exe",
+      ...winDrives.flatMap((d) => [
+        `${d}/Program Files/DAUM/PotPlayer/PotPlayerMini64.exe`,
+        `${d}/Program Files/DAUM/PotPlayer/PotPlayer64.exe`,
+        `${d}/Program Files/DAUM/PotPlayer/PotPlayerMini.exe`,
+        `${d}/Program Files/DAUM/PotPlayer/PotPlayer.exe`,
+        `${d}/Program Files (x86)/DAUM/PotPlayer/PotPlayerMini64.exe`,
+        `${d}/Program Files (x86)/DAUM/PotPlayer/PotPlayerMini.exe`,
+        `${d}/PotPlayer/PotPlayerMini64.exe`,
+        `${d}/PotPlayer/PotPlayerMini.exe`
+      ]),
       path.join(programData, "Microsoft/Windows/Start Menu/Programs/PotPlayer/PotPlayer 64 bit.lnk"),
       path.join(programData, "Microsoft/Windows/Start Menu/Programs/PotPlayer/PotPlayer.lnk"),
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/PotPlayer/PotPlayer 64 bit.lnk"),
@@ -190,12 +200,12 @@ function detectInstalledVideoPlayers(plugin) {
       path.join(appData, "弹弹play/dandanplay.exe"),
       path.join(localAppData, "弹弹play/dandanplay.exe"),
       path.join(localAppData, "Programs/弹弹play/dandanplay.exe"),
-      "C:/Program Files/弹弹play/dandanplay.exe",
-      "C:/Program Files (x86)/弹弹play/dandanplay.exe",
-      "D:/Program Files/弹弹play/dandanplay.exe",
-      "D:/弹弹play/dandanplay.exe",
-      "C:/dandanplay/dandanplay.exe",
-      "D:/dandanplay/dandanplay.exe",
+      ...winDrives.flatMap((d) => [
+        `${d}/Program Files/弹弹play/dandanplay.exe`,
+        `${d}/Program Files (x86)/弹弹play/dandanplay.exe`,
+        `${d}/弹弹play/dandanplay.exe`,
+        `${d}/dandanplay/dandanplay.exe`
+      ]),
       "/Applications/弹弹play.app/Contents/MacOS/弹弹play",
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/弹弹play.lnk"),
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/弹弹play/弹弹play.lnk"),
@@ -203,35 +213,37 @@ function detectInstalledVideoPlayers(plugin) {
       path.join(programData, "Microsoft/Windows/Start Menu/Programs/弹弹play.lnk")
     ],
     mpv: [
-      "C:/Program Files/mpv/mpv.exe",
-      "D:/Program Files/mpv/mpv.exe",
-      "D:/mpv/mpv.exe",
+      ...winDrives.flatMap((d) => [`${d}/Program Files/mpv/mpv.exe`, `${d}/mpv/mpv.exe`]),
       path.join(localAppData, "Programs/mpv/mpv.exe"),
+      path.join(localAppData, "Microsoft/WinGet/Links/mpv.exe"),
       path.join(userProfile, "scoop/apps/mpv/current/mpv.exe"),
+      path.join(userProfile, "scoop/shims/mpv.exe"),
       "C:/ProgramData/chocolatey/bin/mpv.exe",
       path.join(appData, "Microsoft/Windows/Start Menu/Programs/mpv.lnk"),
       "/Applications/IINA.app/Contents/MacOS/iina-cli",
+      "/opt/homebrew/bin/iina",
       "/opt/homebrew/bin/mpv",
       "/usr/local/bin/mpv",
       "/usr/bin/mpv"
     ],
     vlc: [
-      "C:/Program Files/VideoLAN/VLC/vlc.exe",
-      "C:/Program Files (x86)/VideoLAN/VLC/vlc.exe",
-      "D:/Program Files/VideoLAN/VLC/vlc.exe",
+      ...winDrives.flatMap((d) => [
+        `${d}/Program Files/VideoLAN/VLC/vlc.exe`,
+        `${d}/Program Files (x86)/VideoLAN/VLC/vlc.exe`,
+        `${d}/VLC/vlc.exe`
+      ]),
       path.join(programData, "Microsoft/Windows/Start Menu/Programs/VideoLAN/VLC media player.lnk"),
       "/Applications/VLC.app/Contents/MacOS/VLC",
       "/usr/bin/vlc",
-      "/usr/local/bin/vlc"
+      "/usr/local/bin/vlc",
+      "/snap/bin/vlc"
     ],
-    mpc: [
-      "C:/Program Files/MPC-HC/mpc-hc64.exe",
-      "C:/Program Files (x86)/MPC-HC/mpc-hc.exe",
-      "C:/Program Files/MPC-BE x64/mpc-be64.exe",
-      "C:/Program Files/MPC-BE/mpc-be64.exe",
-      "D:/Program Files/MPC-HC/mpc-hc64.exe",
-      "D:/Program Files/MPC-BE x64/mpc-be64.exe"
-    ]
+    mpc: winDrives.flatMap((d) => [
+      `${d}/Program Files/MPC-HC/mpc-hc64.exe`,
+      `${d}/Program Files (x86)/MPC-HC/mpc-hc.exe`,
+      `${d}/Program Files/MPC-BE x64/mpc-be64.exe`,
+      `${d}/Program Files/MPC-BE/mpc-be64.exe`
+    ])
   };
 
   const detected = {};
@@ -254,24 +266,28 @@ function detectInstalledVideoPlayers(plugin) {
     };
   }
 
-  // 注册表兜底探测 PotPlayer 与 弹弹play
-  const isWin = typeof process !== "undefined" && process.platform === "win32";
+  // 注册表兜底探测 PotPlayer（HKCU + HKLM + App Paths）与 弹弹play
   if (!detected.potplayer.installed && isWin) {
-    try {
-      const regOut = execSync(
-        'reg query "HKCU\\Software\\DAUM\\PotPlayer64" /v ProgramPath',
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1200 }
-      );
-      const m = regOut.match(/([A-Za-z]:\\[^\r\n"]+\.exe)/i);
-      if (m && m[1] && fs.existsSync(m[1])) {
-        detected.potplayer = {
-          kind: "potplayer",
-          installed: true,
-          exePath: path.normalize(m[1]),
-          sourceCandidate: "HKCU\\Software\\DAUM\\PotPlayer64"
-        };
-      }
-    } catch (e) {}
+    const potRegQueries = [
+      'reg query "HKCU\\Software\\DAUM\\PotPlayer64" /v ProgramPath',
+      'reg query "HKLM\\SOFTWARE\\DAUM\\PotPlayer64" /v ProgramPath',
+      'reg query "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\PotPlayerMini64.exe" /ve'
+    ];
+    for (const rq of potRegQueries) {
+      try {
+        const regOut = execSync(rq, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1200 });
+        const m = regOut.match(/([A-Za-z]:\\[^\r\n"]+\.exe)/i);
+        if (m && m[1] && fs.existsSync(m[1])) {
+          detected.potplayer = {
+            kind: "potplayer",
+            installed: true,
+            exePath: path.normalize(m[1]),
+            sourceCandidate: rq
+          };
+          break;
+        }
+      } catch (e) {}
+    }
   }
 
   if (!detected.dandanplay.installed && isWin) {
@@ -472,7 +488,8 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
       cliArgs = [videoPath, `/seek=${hhmmss}`];
       seekedViaCli = true;
     } else if (kind === "mpv") {
-      cliArgs = [`--start=${hhmmss}`, videoPath];
+      const isIinaCli = /iina(?:-cli)?$/i.test(path.basename(exePath));
+      cliArgs = isIinaCli ? [`--mpv-start=${hhmmss}`, videoPath] : [`--start=${hhmmss}`, videoPath];
       seekedViaCli = true;
     } else if (kind === "vlc") {
       cliArgs = [`--start-time=${Math.floor(seconds)}`, videoPath];

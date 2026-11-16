@@ -2544,7 +2544,7 @@ async function saveCharacterAvatarLocally(app, coverFolder, charId, remoteUrl) {
           ? app.vault.adapter.getBasePath()
           : "";
       if (!fs || !path || !vaultBase) return "";
-      const roxySrc = path.join(vaultBase, ".obsidian", "plugins", "bangumi-manager", "assets", "roxy", "roxy_explain.png");
+      const roxySrc = path.join(vaultBase, configDir, "plugins", "bangumi-manager", "assets", "roxy", "roxy_explain.png");
       if (!fs.existsSync(roxySrc)) return "";
       await noteManager.ensureVaultFolder(app, folder);
       const targetAbs = path.join(vaultBase, ...targetRel.split("/"));

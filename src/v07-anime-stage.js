@@ -897,7 +897,7 @@ function renderAnimeStage(host, ctx) {
     );
   };
 
-  const openHeroMoreMenu = (anchorBtn, item, info, bgmUrl, watchMeta, onUpdated) => {
+  const openHeroMoreMenu = (anchorBtn, item, info, local, bgmUrl, watchMeta, onUpdated) => {
     popover(
       anchorBtn,
       (box, close) => {
@@ -933,6 +933,27 @@ function renderAnimeStage(host, ctx) {
             menuItem("folder", "打开本地番剧文件夹", () => {
               close();
               actions.openFolder(item);
+            })
+          );
+        }
+
+        if (
+          desktop &&
+          local &&
+          (local.hasAttentionNeeded || local.subfolderCount > 0 || local.extraCount > 0) &&
+          actions.openLocalDiagnostics
+        ) {
+          const diagLabel = local.hasAttentionNeeded
+            ? "核对重复剧集 / 本地目录异常"
+            : local.extraCount > 0
+            ? `查看子目录与特典视频（${local.extraCount} 项）`
+            : `管理子目录剧集（${local.subfolderCount} 集）`;
+          box.appendChild(
+            menuItem(local.hasAttentionNeeded ? "alert" : "package", diagLabel, () => {
+              close();
+              actions.openLocalDiagnostics(item, () => {
+                if (onUpdated) onUpdated();
+              });
             })
           );
         }
@@ -1302,7 +1323,7 @@ function renderAnimeStage(host, ctx) {
         : null;
 
       const moreBtn = iconButton("more", "更多操作", (e) =>
-        openHeroMoreMenu(e.currentTarget, item, info, bgmUrl, watchMeta, () => paintHero({ inPlace: true }))
+        openHeroMoreMenu(e.currentTarget, item, info, local, bgmUrl, watchMeta, () => paintHero({ inPlace: true }))
       );
 
       // 舞台内嵌「随手记一句」展开条
@@ -1375,6 +1396,29 @@ function renderAnimeStage(host, ctx) {
             h("span", { text: info.total ? ` / ${info.total} 集` : " 集" }),
             info.localMax > info.watched
               ? h("span.bm7-hero-local", [icon("folder", 13), `本地已备至第 ${info.localMax} 集`])
+              : null,
+            local && local.hasAttentionNeeded && actions.openLocalDiagnostics
+              ? h(
+                  "button.bm7-hero-local-alert",
+                  {
+                    attr: { type: "button" },
+                    title: "本地目录存在同集重复版本或路径异常，点击查看并处理",
+                    on: {
+                      click: (ev) => {
+                        ev.stopPropagation();
+                        actions.openLocalDiagnostics(item, () => applyItemMutation(item, {}));
+                      }
+                    }
+                  },
+                  [
+                    icon("alert", 13),
+                    local.suspectedParent
+                      ? "目录层级待核对"
+                      : local.duplicateCount > 0
+                      ? `有重集 (${local.duplicateCount}话)`
+                      : "目录待核对"
+                  ]
+                )
               : null,
             !info.next ? h("span.bm7-hero-local", [icon("flag", 13), "已看完最后一集"]) : null
           ]),

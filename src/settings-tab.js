@@ -13,8 +13,15 @@ const {
   isDesktopNodeAvailable,
   isMobileEnv,
   pluginAssetExists,
-  getPluginAssetResourceUrl
+  getPluginAssetResourceUrl,
+  pickNativeFolderOnDesktop,
+  getNativeFilePathCrossPlatform
 } = require("./platform-env");
+const {
+  updateFrontmatterField,
+  updateFolderLine,
+  syncNoteCalloutFromFrontmatter
+} = require("./note-utils");
 const bilibiliLiveService = require("./bilibili-live-service");
 const {
   STYLE_CATALOG,
@@ -1194,11 +1201,127 @@ module.exports = function createSettingsTabClass({
   addLocalAnimeRootSetting(container, descText) {
     const promptHost = document.createElement("div");
     let baselineRoot = String(this.plugin.settings.localAnimeRoot || "").trim();
+    let rootInputEl = null;
 
-    new Setting(container)
+    const commitLocalRootValue = async (rawNextVal) => {
+      const nextRoot = String(rawNextVal || "").trim();
+      const prevRoot = baselineRoot;
+      if (nextRoot === String(this.plugin.settings.localAnimeRoot || "").trim() && nextRoot === prevRoot) {
+        return;
+      }
+      this.plugin.settings.localAnimeRoot = nextRoot;
+      this.plugin._v07LocalFolderCache = null;
+      baselineRoot = nextRoot;
+      await this.plugin.saveSettings();
+
+      promptHost.empty();
+      if (!isDesktopNodeAvailable()) return;
+
+      const files =
+        typeof this.plugin.getAnimeMarkdownFiles === "function"
+          ? this.plugin.getAnimeMarkdownFiles()
+          : this.app.vault.getMarkdownFiles().filter((f) => this.plugin.isTargetNote(f));
+      const affected = [];
+      for (const file of files) {
+        const fm = this.app.metadataCache?.getFileCache(file)?.frontmatter;
+        const dl = fm && fm["下载路径"] ? String(fm["下载路径"]).trim() : "";
+        if (!dl || dl === "无") continue;
+        const fromOldRoot = prevRoot && isPathInsideAnimeRoot(prevRoot, dl);
+        const outsideNewRoot = nextRoot && !isPathInsideAnimeRoot(nextRoot, dl);
+        if (fromOldRoot || outsideNewRoot) {
+          affected.push({ file, dl, fromOldRoot });
+        }
+      }
+
+      if (affected.length === 0) {
+        await this.plugin.refreshOpenDashboardViews();
+        return;
+      }
+
+      const box = promptHost.createDiv();
+      box.style.cssText =
+        "margin:-4px 0 14px 0;padding:10px 12px;border-radius:8px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;";
+      box.createDiv({
+        text: `检测到 ${affected.length} 部已有动画笔记的「下载路径」仍指向旧目录（音声抽取已自动限制在当前根目录内）。是否同步更新这些笔记的路径绑定？`,
+        attr: { style: "font-size:12px;line-height:1.5;color:var(--text-muted);flex:1 1 280px;" }
+      });
+      const btnRow = box.createDiv({
+        attr: { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;" }
+      });
+
+      if (prevRoot && nextRoot && affected.some((a) => a.fromOldRoot)) {
+        const rebaseBtn = btnRow.createEl("button", {
+          cls: "mod-cta",
+          text: "替换旧根目录前缀"
+        });
+        rebaseBtn.onclick = async () => {
+          rebaseBtn.disabled = true;
+          let updated = 0;
+          const normPrev = prevRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+          const normNext = nextRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+          for (const item of affected) {
+            if (!item.fromOldRoot) continue;
+            const normDl = item.dl.replace(/\\/g, "/");
+            if (normDl.toLowerCase().startsWith(normPrev.toLowerCase())) {
+              const suffix = normDl.slice(normPrev.length);
+              const rebased = `${normNext}${suffix}`;
+              try {
+                let rawMd = await this.app.vault.read(item.file);
+                rawMd = updateFrontmatterField(rawMd, "下载路径", rebased);
+                rawMd = updateFolderLine(rawMd, { downloadPath: rebased, error: null });
+                rawMd = syncNoteCalloutFromFrontmatter(rawMd);
+                await this.plugin.modifyNoteSafely(item.file, rawMd, 2400);
+                updated += 1;
+              } catch (_) {}
+            }
+          }
+          this.plugin._v07LocalFolderCache = null;
+          promptHost.empty();
+          if (Notice) new Notice(`已将 ${updated} 部动画笔记的下载路径前缀更新至新根目录`);
+          if (typeof this.plugin.checkAllLocalStatus === "function") {
+            await this.plugin.checkAllLocalStatus(false);
+          }
+          await this.plugin.refreshOpenDashboardViews();
+        };
+      }
+
+      const unbindBtn = btnRow.createEl("button", {
+        text: "解绑旧目录关联（设为“无”）"
+      });
+      unbindBtn.onclick = async () => {
+        unbindBtn.disabled = true;
+        let cleared = 0;
+        for (const item of affected) {
+          try {
+            let rawMd = await this.app.vault.read(item.file);
+            rawMd = updateFrontmatterField(rawMd, "下载路径", "无");
+            rawMd = updateFrontmatterField(rawMd, "本地更新状态", "未设置下载路径");
+            rawMd = updateFolderLine(rawMd, { downloadPath: "", error: null });
+            rawMd = syncNoteCalloutFromFrontmatter(rawMd);
+            await this.plugin.modifyNoteSafely(item.file, rawMd, 2400);
+            cleared += 1;
+          } catch (_) {}
+        }
+        this.plugin._v07LocalFolderCache = null;
+        promptHost.empty();
+        if (Notice) new Notice(`已解绑 ${cleared} 部动画笔记的旧目录关联`);
+        await this.plugin.refreshOpenDashboardViews();
+      };
+
+      const keepBtn = btnRow.createEl("button", {
+        text: "保持原状"
+      });
+      keepBtn.onclick = async () => {
+        promptHost.empty();
+        await this.plugin.refreshOpenDashboardViews();
+      };
+    };
+
+    const settingRow = new Setting(container)
       .setName("本地动画根目录")
       .setDesc(descText)
       .addText((text) => {
+        rootInputEl = text.inputEl;
         text
           .setPlaceholder("例如：D:/Anime（未配置本地视频可留空）")
           .setValue(baselineRoot);
@@ -1206,116 +1329,8 @@ module.exports = function createSettingsTabClass({
         text.inputEl.addEventListener("focus", () => {
           baselineRoot = String(this.plugin.settings.localAnimeRoot || "").trim();
         });
-
-        const commitLocalRoot = async () => {
-          const nextRoot = String(text.inputEl.value || "").trim();
-          const prevRoot = baselineRoot;
-          if (nextRoot === String(this.plugin.settings.localAnimeRoot || "").trim() && nextRoot === prevRoot) {
-            return;
-          }
-          this.plugin.settings.localAnimeRoot = nextRoot;
-          this.plugin._v07LocalFolderCache = null;
-          baselineRoot = nextRoot;
-          await this.plugin.saveSettings();
-
-          promptHost.empty();
-          if (!isDesktopNodeAvailable()) return;
-
-          const files = typeof this.plugin.getAnimeMarkdownFiles === "function"
-            ? this.plugin.getAnimeMarkdownFiles()
-            : [];
-          const affected = [];
-          for (const file of files) {
-            const fm = this.app.metadataCache?.getFileCache(file)?.frontmatter;
-            const dl = fm && fm["下载路径"] ? String(fm["下载路径"]).trim() : "";
-            if (!dl || dl === "无") continue;
-            const fromOldRoot = prevRoot && isPathInsideAnimeRoot(prevRoot, dl);
-            const outsideNewRoot = nextRoot && !isPathInsideAnimeRoot(nextRoot, dl);
-            if (fromOldRoot || outsideNewRoot) {
-              affected.push({ file, dl, fromOldRoot });
-            }
-          }
-
-          if (affected.length === 0) {
-            await this.plugin.refreshOpenDashboardViews();
-            return;
-          }
-
-          const box = promptHost.createDiv();
-          box.style.cssText =
-            "margin:-4px 0 14px 0;padding:10px 12px;border-radius:8px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;";
-          box.createDiv({
-            text: `检测到 ${affected.length} 部已有动画笔记的「下载路径」仍指向旧目录（音声抽取已自动限制在当前根目录内）。是否同步更新这些笔记的路径绑定？`,
-            attr: { style: "font-size:12px;line-height:1.5;color:var(--text-muted);flex:1 1 280px;" }
-          });
-          const btnRow = box.createDiv({
-            attr: { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;" }
-          });
-
-          if (prevRoot && nextRoot && affected.some((a) => a.fromOldRoot)) {
-            const rebaseBtn = btnRow.createEl("button", {
-              cls: "mod-cta",
-              text: "替换旧根目录前缀"
-            });
-            rebaseBtn.onclick = async () => {
-              rebaseBtn.disabled = true;
-              let updated = 0;
-              const normPrev = prevRoot.replace(/\\/g, "/").replace(/\/+$/, "");
-              const normNext = nextRoot.replace(/\\/g, "/").replace(/\/+$/, "");
-              for (const item of affected) {
-                if (!item.fromOldRoot) continue;
-                const normDl = item.dl.replace(/\\/g, "/");
-                if (normDl.toLowerCase().startsWith(normPrev.toLowerCase())) {
-                  const suffix = normDl.slice(normPrev.length);
-                  const rebased = `${normNext}${suffix}`;
-                  if (typeof this.app.fileManager?.processFrontMatter === "function") {
-                    await this.app.fileManager.processFrontMatter(item.file, (fm) => {
-                      fm["下载路径"] = rebased;
-                    });
-                    updated += 1;
-                  }
-                }
-              }
-              this.plugin._v07LocalFolderCache = null;
-              promptHost.empty();
-              if (Notice) new Notice(`已将 ${updated} 部动画笔记的下载路径前缀更新至新根目录`);
-              await this.plugin.checkAllLocalStatuses();
-              await this.plugin.refreshOpenDashboardViews();
-            };
-          }
-
-          const unbindBtn = btnRow.createEl("button", {
-            text: "解绑旧目录关联（设为“无”）"
-          });
-          unbindBtn.onclick = async () => {
-            unbindBtn.disabled = true;
-            let cleared = 0;
-            for (const item of affected) {
-              if (typeof this.app.fileManager?.processFrontMatter === "function") {
-                await this.app.fileManager.processFrontMatter(item.file, (fm) => {
-                  fm["下载路径"] = "无";
-                  fm["本地更新状态"] = "未设置下载路径";
-                });
-                cleared += 1;
-              }
-            }
-            this.plugin._v07LocalFolderCache = null;
-            promptHost.empty();
-            if (Notice) new Notice(`已解绑 ${cleared} 部动画笔记的旧目录关联`);
-            await this.plugin.refreshOpenDashboardViews();
-          };
-
-          const keepBtn = btnRow.createEl("button", {
-            text: "保持原状"
-          });
-          keepBtn.onclick = async () => {
-            promptHost.empty();
-            await this.plugin.refreshOpenDashboardViews();
-          };
-        };
-
         text.inputEl.addEventListener("blur", () => {
-          commitLocalRoot();
+          commitLocalRootValue(text.inputEl.value);
         });
         text.inputEl.addEventListener("keydown", (ev) => {
           if (ev.key === "Enter") {
@@ -1324,6 +1339,22 @@ module.exports = function createSettingsTabClass({
           }
         });
       });
+
+    if (isDesktopNodeAvailable()) {
+      settingRow.addButton((btn) => {
+        btn.setButtonText("选择文件夹…").onClick(async () => {
+          baselineRoot = String(this.plugin.settings.localAnimeRoot || "").trim();
+          const picked = await pickNativeFolderOnDesktop({
+            title: "选择本地动画根目录",
+            initialDir: baselineRoot
+          });
+          if (picked) {
+            if (rootInputEl) rootInputEl.value = picked;
+            await commitLocalRootValue(picked);
+          }
+        });
+      });
+    }
 
     container.appendChild(promptHost);
   }
@@ -1374,11 +1405,7 @@ module.exports = function createSettingsTabClass({
           fInput.onchange = async () => {
             const file = fInput.files && fInput.files[0];
             if (!file) return;
-            const electron = tryRequireNode("electron");
-            const picked =
-              (electron?.webUtils?.getPathForFile && electron.webUtils.getPathForFile(file)) ||
-              file.path ||
-              "";
+            const picked = getNativeFilePathCrossPlatform(file);
             if (picked) {
               this.plugin.settings.ffmpegCustomPath = picked;
               this.plugin._resolvedFfmpegCustom = null;
@@ -2886,20 +2913,41 @@ module.exports = function createSettingsTabClass({
     }
 
     if (!compact || this.plugin.settings.localVideoPlayerMode === "custom" || rawCustomPath) {
-      new Setting(container)
-        .setName("自定义视频播放器路径（支持 .exe 或 .lnk 快捷方式）")
+      const playerPathSetting = new Setting(container)
+        .setName("自定义视频播放器路径（支持 .exe / .lnk / macOS .app）")
         .setDesc(
-          "可填写播放器可执行文件（如 D:\\PotPlayer\\PotPlayerMini64.exe、%APPDATA%\\弹弹play\\dandanplay.exe）或桌面/开始菜单快捷方式（如 C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\PotPlayer\\PotPlayer 64 bit.lnk），插件会自动解析 .lnk 指向的真实 .exe。" +
+          "可填写或浏览选择播放器可执行文件、快捷方式或应用路径；留空则按所选模式自动探测本机安装的播放器。" +
             resolvedHint
         )
         .addText((text) => {
-          text.setPlaceholder("留空则自动探测本机安装的播放器（支持 .exe 或 .lnk）");
+          text.setPlaceholder("留空则自动探测本机安装的播放器");
           text.setValue(rawCustomPath);
           text.onChange(async (value) => {
             this.plugin.settings.localVideoPlayerCustomPath = value.trim();
             await this.plugin.saveSettings();
           });
         });
+      if (isDesktopNodeAvailable()) {
+        playerPathSetting.addButton((btn) => {
+          btn.setButtonText("浏览...").onClick(() => {
+            const fInput = document.createElement("input");
+            fInput.type = "file";
+            if (typeof process !== "undefined" && process.platform === "win32") {
+              fInput.accept = ".exe,.lnk,.bat,.cmd";
+            }
+            fInput.onchange = async () => {
+              const file = fInput.files && fInput.files[0];
+              const picked = getNativeFilePathCrossPlatform(file);
+              if (picked) {
+                this.plugin.settings.localVideoPlayerCustomPath = picked;
+                await this.plugin.saveSettings();
+                this.display();
+              }
+            };
+            fInput.click();
+          });
+        });
+      }
     }
   }
 
@@ -3545,19 +3593,40 @@ module.exports = function createSettingsTabClass({
         });
 
       if (this.plugin.settings.enableQbittorrentIntegration !== false) {
-        new Setting(container)
+        const qbPathSetting = new Setting(container)
           .setName("qBittorrent 程序路径（可选）")
           .setDesc(
-            "留空将自动探测 C:/Program Files/qBittorrent/qbittorrent.exe 及系统注册表；如安装在其他位置可在此手动填写。"
+            "留空将自动探测本机各盘符、注册表及系统应用目录中的 qBittorrent；如安装在自定义目录可点右侧浏览指定。"
           )
           .addText((text) => {
-            text.setPlaceholder("留空自动检测，例如 C:/Program Files/qBittorrent/qbittorrent.exe");
+            text.setPlaceholder("留空自动检测，或点击右侧浏览选择");
             text.setValue(String(this.plugin.settings.qbittorrentExecutablePath || ""));
             text.onChange(async (value) => {
               this.plugin.settings.qbittorrentExecutablePath = value.trim();
               await this.plugin.saveSettings();
             });
           });
+        if (isDesktopNodeAvailable()) {
+          qbPathSetting.addButton((btn) => {
+            btn.setButtonText("浏览...").onClick(() => {
+              const fInput = document.createElement("input");
+              fInput.type = "file";
+              if (typeof process !== "undefined" && process.platform === "win32") {
+                fInput.accept = ".exe,.lnk";
+              }
+              fInput.onchange = async () => {
+                const file = fInput.files && fInput.files[0];
+                const picked = getNativeFilePathCrossPlatform(file);
+                if (picked) {
+                  this.plugin.settings.qbittorrentExecutablePath = picked;
+                  await this.plugin.saveSettings();
+                  this.display();
+                }
+              };
+              fInput.click();
+            });
+          });
+        }
 
         new Setting(container)
           .setName("投递到 qBittorrent 时跳过添加确认框")

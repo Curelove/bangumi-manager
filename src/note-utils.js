@@ -1,4 +1,12 @@
-const { tryRequireNode, isDesktopNodeAvailable, extnameLower, joinPosixPath } = require("./platform-env.js");
+const {
+  tryRequireNode,
+  isDesktopNodeAvailable,
+  normalizeUnicodeNfc,
+  toSafeFileUrl,
+  toMarkdownSafeFileUrl,
+  extnameLower,
+  joinPosixPath
+} = require("./platform-env.js");
 
 var VIDEO_EXTENSIONS = [
   ".mp4",
@@ -8,7 +16,8 @@ var VIDEO_EXTENSIONS = [
   ".wmv",
   ".flv",
   ".webm",
-  ".m4v"
+  ".m4v",
+  ".ts"
 ];
 
 function cleanValue(value) {
@@ -89,68 +98,326 @@ function extractWatchedEpisodes(content) {
   }
   return 0;
 }
-function extractEpisodeNumberFromFileName(fileName) {
-  if (!fileName) return null;
-  const baseName = String(fileName).replace(/\.[^/.]+$/, "");
-  const cleaned = baseName
+const CN_SEASON_MAP = {
+  一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10
+};
+
+function parseExplicitSeasonNumber(rawName) {
+  const s = normalizeUnicodeNfc(String(rawName || ""));
+  if (!s) return null;
+  const cn = s.match(/第\s*([一二三四五六七八九十\d]{1,2})\s*[季期]/);
+  if (cn && cn[1]) {
+    const n = /^\d+$/.test(cn[1]) ? parseInt(cn[1], 10) : CN_SEASON_MAP[cn[1]];
+    if (n >= 1 && n <= 20) return n;
+  }
+  const sCode = s.match(/(?:^|[\s_\-\[\(])(?:Season\s*(\d{1,2})|(\d)(?:st|nd|rd|th)\s*Season|S(\d{1,2})(?:E\d{1,3}|\b|[\s_\-\]\)]))/i);
+  if (sCode) {
+    const n = parseInt(sCode[1] || sCode[2] || sCode[3], 10);
+    if (n >= 1 && n <= 20) return n;
+  }
+  return null;
+}
+
+function isPackOrRangeTitle(rawName) {
+  const s = normalizeUnicodeNfc(String(rawName || ""));
+  if (!s) return false;
+  return (
+    /(?:^|[\s_\-\[\(])(\d{1,3})\s*[-~～]\s*(\d{1,3})(?:\s*(?:Fin|END|话|集|話|完))?(?:$|[\s_\-\]\)])/i.test(s) ||
+    /全\s*\d+\s*[话集話]|季度全集|合集|全集|BD[\s_-]*BOX/i.test(s)
+  );
+}
+
+/**
+ * 解析视频文件名或单集子目录名的集数、修订版本 (v2/v3)、分辨率权重及是否为特典/OP/ED/总集篇
+ */
+function parseVideoEpisodeMeta(fileName, options = {}) {
+  const raw = normalizeUnicodeNfc(String(fileName || "").trim());
+  if (!raw) {
+    return {
+      episode: null,
+      version: 1,
+      resolutionScore: 0,
+      formatScore: 0,
+      hasExplicitEp: false,
+      isExtra: false,
+      extraKind: "",
+      isOvaCandidate: false,
+      fractionalEp: null,
+      isPackRange: false
+    };
+  }
+
+  const ext = options.isDirectory ? "" : extnameLower(raw);
+  const baseName = options.isDirectory ? raw : raw.replace(/\.[^/.]+$/, "");
+  const isPackRange = isPackOrRangeTitle(baseName);
+
+  let resolutionScore = 2;
+  if (/\b(?:2160[pP]|3840x2160|4K|UHD)\b/i.test(baseName)) resolutionScore = 4;
+  else if (/\b(?:1440[pP]|2560x1440|2K)\b/i.test(baseName)) resolutionScore = 3.5;
+  else if (/\b(?:1080[pPiI]?|1920x1080|FHD)\b/i.test(baseName)) resolutionScore = 3;
+  else if (/\b(?:720[pP]|1280x720|HD)\b/i.test(baseName)) resolutionScore = 1;
+  else if (/\b(?:576[pP]|480[pP]|360[pP])\b/i.test(baseName)) resolutionScore = 0.5;
+
+  const formatScore = ext === ".mkv" ? 2 : ext === ".mp4" ? 1.5 : 1;
+
+  // 先剥离常见音视频编码参数，防止 5.1 声道 / H.264 / 23.976fps / AV1 干扰特典或 .5 总集篇与集数识别
+  const techCleaned = baseName
     .replace(/^\s*\[[^\]]*[A-Za-z\u4e00-\u9fa5][^\]]*\]\s*/, " ")
+    .replace(/\[\s*\d{1,2}\s*月新番\s*\]/g, " ")
     .replace(/\[[0-9a-fA-F]{8}\]/g, " ")
-    .replace(/\[(?:1080|720|2160|1440|576|480)[pPiI]?\]/g, " ")
+    .replace(/\[(?:1080|720|2160|1440|576|480)[pPiI]?(?:@\d+(?:\.\d+)?(?:fps)?)?\]/gi, " ")
     .replace(
-      /\b(?:1920x1080|1280x720|3840x2160|2560x1440|10bit|8bit|Hi10p|Ma10p|YUV420P10|x264|x265|H\.?264|H\.?265|HEVC|AVC|AAC|FLAC|AC3|OPUS|MP4|MKV|AVI|WEB-DL|WebRip|BDRip|BluRay|1080[pP]|720[pP]|2160[pP]|480[pP]|4K)\b/gi,
+      /\b(?:1920x1080|1280x720|3840x2160|2560x1440|10bit|8bit|Hi10p|Ma10p|Hi444PP|YUV420P10|x264|x265|H\.?264|H\.?265|HEVC|AVC|AV1|VP9|MPEG2|HDR10\+?|DoVi|SDR|(?:AAC|DDP|EAC3|AC3|DTS|FLAC|OPUS|LPCM|PCM)(?:[\s._-]?\d\.\d|x\d+)?|[257]\.[01](?:ch)?|(?:ASS|SRT|SUP|PGS)x\d+|\d{2,3}(?:\.\d+)?\s*fps|MP4(?:v\d+)?|MKV|AVI|WMV|WEBM|WEB-DL|WebRip|BDRip|BD(?:Remux)?|BluRay|Blu-ray|DVDRip|1080[pPiI]|720[pP]|2160[pP]|1440[pP]|576[pP]|480[pP]|4K)\b/gi,
       " "
     );
 
-  // 1. 显式 EP / Episode / S01E05 / 第05话 / 05话
-  const epExplicit = cleaned.match(
-    /(?:^|[\s_\-\[\(])(?:(?:S\d{1,2})?E|EP|Episode)\s*(\d{1,4})(?:v\d+)?(?=$|[\s_\-\]\)]|[话集話])/i
+  // 1. 显式 OP/ED/NCOP/NCED/PV/CM/Menu/特典 检测（不计入正片常规话数）
+  if (
+    /(?:^|[\s_\-\[\(])(?:NCOP|NCED|Creditless\s*(?:OP|ED)|Clean\s*(?:OP|ED)|无字\s*(?:OP|ED))(?:\s*\d*[a-zA-Z]?)?(?:v\d+)?(?=$|[\s_\-\]\).])/i.test(
+      techCleaned
+    )
+  ) {
+    return {
+      episode: null,
+      version: 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: false,
+      isExtra: true,
+      extraKind: "OP/ED",
+      isOvaCandidate: false,
+      fractionalEp: null,
+      isPackRange
+    };
+  }
+
+  if (
+    /(?:^|[\s_\-\[\(])(?:BD\s*Menu|Menu\s*\d*|PV\s*\d*|CM\s*\d*|Trailer\s*\d*|Preview\s*\d*|映像特典|特典映像|下集预告|番宣|Web\s*Preview)(?:v\d+)?(?=$|[\s_\-\]\).])/i.test(
+      techCleaned
+    )
+  ) {
+    return {
+      episode: null,
+      version: 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: false,
+      isExtra: true,
+      extraKind: "PV/特典",
+      isOvaCandidate: false,
+      fractionalEp: null,
+      isPackRange
+    };
+  }
+
+  if (/(?:^|[\s_\-\[\(])(?:SP|Special|特典|小剧场|迷你动画)\s*(\d{0,3})(?:v\d+)?(?=$|[\s_\-\]\).])/i.test(techCleaned)) {
+    return {
+      episode: null,
+      version: 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: false,
+      isExtra: true,
+      extraKind: "SP/特典",
+      isOvaCandidate: false,
+      fractionalEp: null,
+      isPackRange
+    };
+  }
+
+  // 2. 总集篇小数话数（如 07.5 / E07.5 / [07.5] / 第7.5话）：专门拦截，防止掉入兜底规则误抓作品标题里的数字
+  const fracMatch = techCleaned.match(
+    /(?:^|[\s_\-\[\(])(?:(?:S\d{1,2})?E|EP|Episode\s*|第\s*)?(\d{1,3}\.5)(?:v(\d+))?(?:\s*[话集話])?(?=$|[\s_\-\]\)])/i
+  );
+  if (fracMatch && fracMatch[1]) {
+    return {
+      episode: null,
+      version: fracMatch[2] ? parseInt(fracMatch[2], 10) : 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: false,
+      isExtra: true,
+      extraKind: "总集篇(.5)",
+      isOvaCandidate: false,
+      fractionalEp: parseFloat(fracMatch[1]),
+      isPackRange
+    };
+  }
+
+  const isOvaCandidate = /(?:^|[\s_\-\[\(])(?:OVA|OAD)\s*(\d{0,2})(?:v\d+)?(?=$|[\s_\-\]\).])/i.test(techCleaned);
+
+  // 若目录名为合集区间（如 01-12Fin），不将其本身解析为单集编号
+  if (options.isDirectory && isPackRange) {
+    return {
+      episode: null,
+      version: 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: false,
+      isExtra: false,
+      extraKind: "",
+      isOvaCandidate,
+      fractionalEp: null,
+      isPackRange: true
+    };
+  }
+
+  // 3. 显式正片集数：EP / Episode / S01E05 / 第05话 / 05话
+  const epExplicit = techCleaned.match(
+    /(?:^|[\s_\-\[\(])(?:(?:S\d{1,2})?E|EP|Episode)\s*(\d{1,4})(?:v(\d+))?(?=$|[\s_\-\]\)]|[话集話])/i
   );
   if (epExplicit && epExplicit[1]) {
-    return parseInt(epExplicit[1], 10);
-  }
-  const cnEpMatch = cleaned.match(/(?:第\s*(\d{1,4})\s*[话集話]?|(\d{1,3})\s*[话集話])/);
-  if (cnEpMatch && (cnEpMatch[1] || cnEpMatch[2])) {
-    return parseInt(cnEpMatch[1] || cnEpMatch[2], 10);
+    return {
+      episode: parseInt(epExplicit[1], 10),
+      version: epExplicit[2] ? parseInt(epExplicit[2], 10) : 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: true,
+      isExtra: false,
+      extraKind: "",
+      isOvaCandidate,
+      fractionalEp: null,
+      isPackRange
+    };
   }
 
-  // 2. 字幕组常见横杠格式: " - 05 [", " - 05v2 "
-  const dashMatch = cleaned.match(/-\s*(\d{1,3})(?:v\d+)?(?=\s*[\[\(]|\s+(?:END|Fin)\b|\s*$)/i);
+  const cnEpMatch = techCleaned.match(/(?:第\s*(\d{1,4})\s*[话集話]?|(\d{1,3})\s*[话集話])(?:v(\d+))?/i);
+  if (cnEpMatch && (cnEpMatch[1] || cnEpMatch[2])) {
+    return {
+      episode: parseInt(cnEpMatch[1] || cnEpMatch[2], 10),
+      version: cnEpMatch[3] ? parseInt(cnEpMatch[3], 10) : 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: true,
+      isExtra: false,
+      extraKind: "",
+      isOvaCandidate,
+      fractionalEp: null,
+      isPackRange
+    };
+  }
+
+  // 4. 字幕组常见横杠格式: " - 05 [", " - 05v2 ", " - 12 END"
+  const dashMatch = techCleaned.match(/-\s*(\d{1,3})(?:v(\d+))?(?=\s*[\[\(]|\s+(?:END|Fin|完)\b|\s*$)/i);
   if (dashMatch && dashMatch[1]) {
     const ep = parseInt(dashMatch[1], 10);
-    if (ep >= 0 && ep < 1900) return ep;
+    if (ep >= 0 && ep < 1900) {
+      return {
+        episode: ep,
+        version: dashMatch[2] ? parseInt(dashMatch[2], 10) : 1,
+        resolutionScore,
+        formatScore,
+        hasExplicitEp: true,
+        isExtra: false,
+        extraKind: "",
+        isOvaCandidate,
+        fractionalEp: null,
+        isPackRange
+      };
+    }
   }
 
-  // 3. 方括号集数格式: "[05]", "[05v2]", "[12 END]"（取最后一个合法集数括号，避开前置年份）
+  // 5. 方括号集数格式: "[05]", "[05v2]", "[12 END]"（取最右侧合法集数括号，避开前置年份/标题数字）
   const bracketMatches = [
-    ...cleaned.matchAll(/\[(\d{1,3})(?:v\d+)?(?:\s*(?:END|Fin|话|集|話))?\]/gi)
+    ...techCleaned.matchAll(/\[(\d{1,3})(?:v(\d+))?(?:\s*(?:END|Fin|完|话|集|話))?\]/gi)
   ];
   if (bracketMatches.length > 0) {
     for (let i = bracketMatches.length - 1; i >= 0; i--) {
       const ep = parseInt(bracketMatches[i][1], 10);
-      if (ep >= 0 && ep < 1900 && ep !== 480 && ep !== 720) {
-        return ep;
+      if (ep >= 0 && ep < 1900 && ep !== 480 && ep !== 576 && ep !== 720 && ep !== 1080) {
+        return {
+          episode: ep,
+          version: bracketMatches[i][2] ? parseInt(bracketMatches[i][2], 10) : 1,
+          resolutionScore,
+          formatScore,
+          hasExplicitEp: true,
+          isExtra: false,
+          extraKind: "",
+          isOvaCandidate,
+          fractionalEp: null,
+          isPackRange
+        };
       }
     }
   }
 
-  // 4. 通用分隔符与尾部数字兜底
-  const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:v\d+)?(?:[\s_\-\]\)])/;
-  const match2 = cleaned.match(delimPattern);
-  if (match2 && match2[1]) {
-    const ep = parseInt(match2[1], 10);
-    if (ep >= 0 && ep !== 480 && ep !== 720 && ep !== 264 && ep !== 265) {
-      return ep;
+  // 6. 通用分隔符与尾部数字兜底（合集区间名跳过兜底，防误取 01-12 的 01）
+  if (!isPackRange) {
+    const delimPattern = /(?:[\s_\-\[\(])(\d{1,3})(?:v(\d+))?(?:[\s_\-\]\)])/i;
+    const match2 = techCleaned.match(delimPattern);
+    if (match2 && match2[1]) {
+      const ep = parseInt(match2[1], 10);
+      if (ep >= 0 && ep < 1900 && ep !== 480 && ep !== 576 && ep !== 720 && ep !== 264 && ep !== 265) {
+        return {
+          episode: ep,
+          version: match2[2] ? parseInt(match2[2], 10) : 1,
+          resolutionScore,
+          formatScore,
+          hasExplicitEp: true,
+          isExtra: false,
+          extraKind: "",
+          isOvaCandidate,
+          fractionalEp: null,
+          isPackRange
+        };
+      }
+    }
+    const tailPattern = /(?:^|[\s_\-])(\d{1,3})(?:v(\d+))?$/i;
+    const match3 = techCleaned.trim().match(tailPattern);
+    if (match3 && match3[1]) {
+      const ep = parseInt(match3[1], 10);
+      if (ep >= 0 && ep < 1900 && ep !== 480 && ep !== 576 && ep !== 720 && ep !== 264 && ep !== 265) {
+        return {
+          episode: ep,
+          version: match3[2] ? parseInt(match3[2], 10) : 1,
+          resolutionScore,
+          formatScore,
+          hasExplicitEp: true,
+          isExtra: false,
+          extraKind: "",
+          isOvaCandidate,
+          fractionalEp: null,
+          isPackRange
+        };
+      }
     }
   }
-  const tailPattern = /(?:^|[\s_\-])(\d{1,3})(?:v\d+)?$/i;
-  const match3 = cleaned.trim().match(tailPattern);
-  if (match3 && match3[1]) {
-    const ep = parseInt(match3[1], 10);
-    if (ep >= 0 && ep !== 480 && ep !== 720 && ep !== 264 && ep !== 265) {
-      return ep;
-    }
+
+  if (isOvaCandidate) {
+    const ovaNum = techCleaned.match(/(?:OVA|OAD)\s*(\d{1,2})(?:v(\d+))?/i);
+    return {
+      episode: ovaNum && ovaNum[1] ? parseInt(ovaNum[1], 10) : null,
+      version: ovaNum && ovaNum[2] ? parseInt(ovaNum[2], 10) : 1,
+      resolutionScore,
+      formatScore,
+      hasExplicitEp: Boolean(ovaNum && ovaNum[1]),
+      isExtra: false,
+      extraKind: "OVA/OAD",
+      isOvaCandidate: true,
+      fractionalEp: null,
+      isPackRange
+    };
   }
-  return null;
+
+  return {
+    episode: null,
+    version: 1,
+    resolutionScore,
+    formatScore,
+    hasExplicitEp: false,
+    isExtra: false,
+    extraKind: "",
+    isOvaCandidate: false,
+    fractionalEp: null,
+    isPackRange
+  };
+}
+
+function extractEpisodeNumberFromFileName(fileName) {
+  if (!fileName) return null;
+  const meta = parseVideoEpisodeMeta(fileName);
+  if (meta.isExtra) return null;
+  return meta.episode;
 }
 
 let electronShell = null;
@@ -160,103 +427,546 @@ try {
 } catch (e) {}
 
 async function openLocalPathSafely(targetPath) {
-  if (!targetPath) return false;
+  const raw = String(targetPath || "").trim();
+  if (!raw) return false;
   if (!isDesktopNodeAvailable()) {
     return false;
   }
+  const pathMod = tryRequireNode("path");
+  const normPath = pathMod ? pathMod.normalize(raw) : raw;
+
   try {
-    if (electronShell && typeof electronShell.openPath === "function") {
-      const errMsg = await electronShell.openPath(targetPath);
+    const shellNow = electronShell || tryRequireNode("electron")?.shell || null;
+    if (shellNow && typeof shellNow.openPath === "function") {
+      const errMsg = await shellNow.openPath(normPath);
       if (!errMsg) return true;
     }
   } catch (e) {}
+
   try {
-    const normalized = String(targetPath).replace(/\\/g, "/");
-    window.open("file:///" + encodeURI(normalized));
-    return true;
-  } catch (e) {
-    return false;
-  }
+    const cp = tryRequireNode("child_process");
+    const plat = typeof process !== "undefined" ? process.platform : "";
+    if (cp && typeof cp.spawn === "function") {
+      const cmd = plat === "win32" ? "explorer.exe" : plat === "darwin" ? "open" : "xdg-open";
+      const child = cp.spawn(cmd, [normPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false
+      });
+      child.unref();
+      return true;
+    }
+  } catch (e) {}
+
+  try {
+    const safeHref = toSafeFileUrl(normPath);
+    if (safeHref && typeof window !== "undefined" && typeof window.open === "function") {
+      window.open(safeHref);
+      return true;
+    }
+  } catch (e) {}
+  return false;
 }
 
-function inspectLocalFolder(downloadPath, watchedEpisodes) {
+const SKIP_PURE_ASSET_DIRS = new Set([
+  ".git",
+  ".obsidian",
+  ".stfolder",
+  ".sync",
+  ".trash",
+  ".spotlight-v100",
+  ".fseventsd",
+  "$recycle.bin",
+  "system volume information",
+  "node_modules",
+  "fonts",
+  "font",
+  "字体",
+  "附件字体",
+  "subs",
+  "sub",
+  "subtitle",
+  "subtitles",
+  "字幕",
+  "外挂字幕",
+  "scans",
+  "scan",
+  "bk",
+  "booklet",
+  "booklets",
+  "扫图",
+  "设定集",
+  "画集",
+  "cds",
+  "cd",
+  "ost",
+  "soundtrack",
+  "music",
+  "audio",
+  "特典cd",
+  "角色歌",
+  "sample",
+  "samples",
+  "featurettes",
+  "certificate",
+  "adv_obj",
+  "clipinf",
+  "playlist",
+  "auxdata",
+  "bdjo",
+  "jar",
+  "meta"
+]);
+
+const EXTRA_SUBDIR_NAME_RX =
+  /^(?:sp|sps|special|specials|extra|extras|bonus|ova|ovas|oad|oads|ncop|nced|op|ed|op[_\s-]*ed|creditless|clean\s*op|clean\s*ed|pv|pvs|cm|cms|menu|menus|preview|previews|trailer|trailers|特典|映像特典|花絮|预告|预告片|小剧场|迷你动画|总集篇|番外|番外篇)$/i;
+
+const EXTRA_SUBDIR_SUFFIX_RX =
+  /(?:^|[\s\[\(_-])(?:SPs|Specials|Extras|Bonus|映像特典|特典映像|NCOP|NCED|Menus|PVs|CMs)(?:$|[\s\]\)_-])/i;
+
+const INCOMPLETE_FILE_RX =
+  /\.(?:!qB|part|aria2|bc!|crdownload|xltd|downloading|baiduyun\.uploading\.cfg)$/i;
+
+const GENERIC_PARENT_ROOT_NAME_RX =
+  /^(?:\d{4}\s*年?|\d{1,2}\s*月(?:新番|番剧)?|(?:春|夏|秋|冬)季(?:新番)?|Anime|ACG|番剧|动画|Obsidian\s*ACG|Downloads|QuarkDownload|夸克网盘下载|BaiduNetdiskDownload|迅雷下载)$/i;
+
+function extractTitleStemForCluster(name) {
+  return normalizeUnicodeNfc(String(name || ""))
+    .replace(/\.[^/.]+$/, "")
+    .replace(/^\s*\[[^\]]+\]\s*/g, "")
+    .replace(/\[[^\]]*\]|\([^\)]*\)/g, " ")
+    .replace(/-\s*\d{1,3}(?:v\d+)?.*$/i, " ")
+    .replace(/\b(?:S\d{1,2}E\d{1,3}|EP?\d{1,3}|Season\s*\d+|1080p|720p|2160p|WebRip|WEB-DL|BDRip|MP4|MKV)\b/gi, " ")
+    .replace(/[\s_\-!！?？:：~～·.。]+/g, "")
+    .toLowerCase()
+    .slice(0, 18);
+}
+
+function makeEmptyInspectResult(error, downloadPath = "") {
+  return {
+    error,
+    downloadPath,
+    fileCount: 0,
+    newCount: 0,
+    videoFiles: [],
+    allRawVideoFiles: [],
+    extraFiles: [],
+    unwatchedFiles: [],
+    maxEpisodeNumber: 0,
+    nextEpisodeFile: null,
+    nextEpisodeNumber: null,
+    hasAttentionNeeded: false,
+    anomalies: {
+      duplicateEpisodes: [],
+      suspectedParentContainer: null,
+      skippedOtherSeasonDirs: [],
+      unnumberedMultipleVideos: [],
+      hasBdmvStructure: false,
+      incompleteCount: 0,
+      subfolderStats: {
+        totalInSubfolders: 0,
+        subfolderNames: []
+      }
+    }
+  };
+}
+
+/**
+ * 智能本地番剧目录检测引擎（v0.8.1 升级版）：
+ * - 原生支持：直铺单集、合集自带子文件夹（如 `[Comicat...] Make Heroine (01-12Fin...)`）、单集独立子文件夹（如每集套一层目录）及多层解压目录（深度 <= 3）；
+ * - 防错乱隔离：自动剥离 SP/NCOP/NCED/PV/CM/Menu/.5总集篇/Fonts/Scans/CDs/BDMV 原盘流，不污染正片话数；
+ * - 防串番保护：自动识别误绑至「季度总目录 / 下载总目录」（含多部不同番剧重叠话数）或误混入「其他季度子目录（如第二季）」并拦截提示；
+ * - 无损去重与冲突提示：同话数存在多版本（如 v1+v2、双字幕组、内外重复）时正片按 1 话计（支持用户指定默认播放文件），同时标记 `hasAttentionNeeded` 供界面温和提示用户核对。
+ */
+function inspectLocalFolder(downloadPath, watchedEpisodes, options = {}) {
   if (!downloadPath || downloadPath === "\u65E0") {
-    return {
-      error: "\u65E0\u4E0B\u8F7D\u8DEF\u5F84",
-      downloadPath: "",
-      fileCount: 0,
-      newCount: 0,
-      videoFiles: [],
-      nextEpisodeFile: null,
-      nextEpisodeNumber: null
-    };
+    return makeEmptyInspectResult("\u65E0\u4E0B\u8F7D\u8DEF\u5F84", "");
   }
   const fs = tryRequireNode("fs");
   const path = tryRequireNode("path");
   if (!fs || !isDesktopNodeAvailable()) {
-    return {
-      error: "\u79FB\u52A8\u7AEF\u73AF\u5883",
-      downloadPath,
-      fileCount: 0,
-      newCount: 0,
-      videoFiles: [],
-      nextEpisodeFile: null,
-      nextEpisodeNumber: null
-    };
+    return makeEmptyInspectResult("\u79FB\u52A8\u7AEF\u73AF\u5883", downloadPath);
   }
-  if (!fs.existsSync(downloadPath)) {
-    return {
-      error: "\u6587\u4EF6\u5939\u4E0D\u5B58\u5728",
-      downloadPath,
-      fileCount: 0,
-      newCount: 0,
-      videoFiles: [],
-      nextEpisodeFile: null,
-      nextEpisodeNumber: null
-    };
+  const normDownloadPath = path ? path.normalize(String(downloadPath).trim()) : String(downloadPath).trim();
+  if (!fs.existsSync(normDownloadPath)) {
+    return makeEmptyInspectResult("\u6587\u4EF6\u5939\u4E0D\u5B58\u5728", downloadPath);
   }
-  let entries = [];
+
+  let topEntries = [];
   try {
-    entries = fs.readdirSync(downloadPath, { withFileTypes: true });
+    topEntries = fs.readdirSync(normDownloadPath, { withFileTypes: true });
   } catch (err) {
-    return {
-      error: "\u6587\u4EF6\u5939\u8BFB\u53D6\u5931\u8D25",
-      downloadPath,
-      fileCount: 0,
-      newCount: 0,
-      videoFiles: [],
-      nextEpisodeFile: null,
-      nextEpisodeNumber: null
-    };
+    return makeEmptyInspectResult("\u6587\u4EF6\u5939\u8BFB\u53D6\u5931\u8D25", downloadPath);
   }
-  const rawVideoEntries = entries.filter((entry) => {
+
+  const maxDepth = typeof options.maxDepth === "number" ? options.maxDepth : 3;
+  const maxVisitedDirs = 96;
+  let visitedDirs = 0;
+  let hasBdmvStructure = false;
+  let incompleteCount = 0;
+
+  const rootFolderBase = path
+    ? path.basename(normDownloadPath.replace(/[\\/]+$/, ""))
+    : normDownloadPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+  const rootExplicitSeason = parseExplicitSeasonNumber(rootFolderBase);
+
+  const collectedMainCandidates = [];
+  const collectedExtras = [];
+  const skippedOtherSeasonDirs = [];
+  const topSubdirSummaries = new Map(); // topSubdirName -> { epSet, stems, count }
+
+  const recordCandidate = (entryName, fullPath, relPath, depth, topSubdirName, parentDirName, inExtraBranch, siblingVideoCountInDir) => {
+    let fileSize = 0;
+    let mtimeMs = 0;
     try {
-      if (!entry || typeof entry.isFile !== "function" || !entry.isFile()) {
-        return false;
+      const st = fs.statSync(fullPath);
+      fileSize = Number(st?.size) || 0;
+      mtimeMs = Number(st?.mtimeMs) || 0;
+    } catch (_) {}
+
+    const ext = extnameLower(entryName);
+    // .ts 仅当体积 > 2MB 时视为电视传输流视频，避免误判小型 TypeScript 脚本
+    if (ext === ".ts" && fileSize > 0 && fileSize < 2 * 1024 * 1024) {
+      return;
+    }
+
+    const meta = parseVideoEpisodeMeta(entryName);
+    let resolvedEp = meta.episode;
+    let resolvedVersion = meta.version || 1;
+    let hasExplicitEp = meta.hasExplicitEp;
+    let inferredFromFolder = false;
+
+    // 若单集子文件夹内仅有 1 个主视频文件且文件名本身不含集数（如 `第07话/video.mp4`），安全回退从父文件夹名提取集数
+    if (
+      !inExtraBranch &&
+      !meta.isExtra &&
+      resolvedEp === null &&
+      depth > 0 &&
+      siblingVideoCountInDir === 1 &&
+      parentDirName
+    ) {
+      const parentMeta = parseVideoEpisodeMeta(parentDirName, { isDirectory: true });
+      if (!parentMeta.isExtra && !parentMeta.isPackRange && parentMeta.episode !== null) {
+        resolvedEp = parentMeta.episode;
+        resolvedVersion = parentMeta.version || 1;
+        hasExplicitEp = true;
+        inferredFromFolder = true;
       }
-      return VIDEO_EXTENSIONS.includes(
-        extnameLower(entry.name)
-      );
+    }
+
+    const fileObj = {
+      name: entryName,
+      path: fullPath,
+      relPath,
+      depth,
+      inSubfolder: depth > 0,
+      topSubdirName: topSubdirName || "",
+      parentDirName: parentDirName || "",
+      episode: resolvedEp,
+      version: resolvedVersion,
+      resolutionScore: meta.resolutionScore,
+      formatScore: meta.formatScore,
+      hasExplicitEp,
+      inferredFromFolder,
+      isOvaCandidate: meta.isOvaCandidate,
+      extraKind: inExtraBranch ? (meta.extraKind || "特典子目录") : meta.extraKind,
+      fractionalEp: meta.fractionalEp,
+      size: fileSize,
+      mtimeMs
+    };
+
+    if (inExtraBranch || meta.isExtra) {
+      collectedExtras.push(fileObj);
+      return;
+    }
+
+    collectedMainCandidates.push(fileObj);
+    if (topSubdirName) {
+      if (!topSubdirSummaries.has(topSubdirName)) {
+        topSubdirSummaries.set(topSubdirName, { epSet: new Set(), stems: new Set(), count: 0 });
+      }
+      const sum = topSubdirSummaries.get(topSubdirName);
+      sum.count += 1;
+      if (resolvedEp !== null) sum.epSet.add(resolvedEp);
+      const stem = extractTitleStemForCluster(entryName) || extractTitleStemForCluster(topSubdirName);
+      if (stem && stem.length >= 2) sum.stems.add(stem);
+    }
+  };
+
+  // 先检查顶层直铺的视频文件，以便后续判断子目录是否存在跨季混放
+  const topLevelDirectVideos = topEntries.filter((e) => {
+    try {
+      return e && typeof e.isFile === "function" && e.isFile() && VIDEO_EXTENSIONS.includes(extnameLower(e.name));
     } catch (_) {
       return false;
     }
   });
-  const videoFiles = rawVideoEntries.map((entry, index) => {
-    const fullPath = path ? path.join(downloadPath, entry.name) : joinPosixPath(downloadPath, entry.name);
-    const parsedEp = extractEpisodeNumberFromFileName(entry.name);
-    return {
-      name: entry.name,
-      path: fullPath,
-      episode: parsedEp !== null ? parsedEp : (index + 1),
-      hasExplicitEp: parsedEp !== null
-    };
+  for (const e of topEntries) {
+    try {
+      if (e && typeof e.isFile === "function" && e.isFile() && INCOMPLETE_FILE_RX.test(e.name)) {
+        incompleteCount += 1;
+      }
+    } catch (_) {}
+  }
+
+  for (const entry of topLevelDirectVideos) {
+    const fullPath = path ? path.join(normDownloadPath, entry.name) : joinPosixPath(normDownloadPath, entry.name);
+    recordCandidate(entry.name, fullPath, entry.name, 0, "", rootFolderBase, false, topLevelDirectVideos.length);
+  }
+
+  // 检测是否误将下载路径绑定到了「2024 / 07月新番 / Downloads」等上级多番剧总目录
+  const isRootNamedLikeContainer = GENERIC_PARENT_ROOT_NAME_RX.test(rootFolderBase.trim());
+
+  const walkSubDir = (absDir, relDir, depth, topSubdirName, inExtraBranch) => {
+    if (depth > maxDepth || visitedDirs >= maxVisitedDirs) return;
+    visitedDirs += 1;
+    let subEntries = [];
+    try {
+      subEntries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+
+    const dirVideoEntries = [];
+    const childDirs = [];
+
+    for (const ent of subEntries) {
+      if (!ent || !ent.name) continue;
+      const entName = String(ent.name);
+      try {
+        if (typeof ent.isFile === "function" && ent.isFile()) {
+          if (INCOMPLETE_FILE_RX.test(entName)) {
+            incompleteCount += 1;
+            continue;
+          }
+          if (VIDEO_EXTENSIONS.includes(extnameLower(entName))) {
+            dirVideoEntries.push(ent);
+          }
+        } else if (typeof ent.isDirectory === "function" && ent.isDirectory()) {
+          const lower = entName.toLowerCase().trim();
+          if (lower.startsWith(".")) continue;
+          if (lower === "bdmv") {
+            hasBdmvStructure = true;
+            continue;
+          }
+          if (SKIP_PURE_ASSET_DIRS.has(lower)) continue;
+          childDirs.push(ent);
+        }
+      } catch (_) {}
+    }
+
+    const curDirBase = path ? path.basename(absDir) : absDir.split(/[\\/]/).pop() || "";
+    for (const vEnt of dirVideoEntries) {
+      const fullPath = path ? path.join(absDir, vEnt.name) : joinPosixPath(absDir, vEnt.name);
+      const relPath = relDir ? `${relDir}/${vEnt.name}` : vEnt.name;
+      recordCandidate(
+        vEnt.name,
+        fullPath,
+        relPath,
+        depth,
+        topSubdirName,
+        curDirBase,
+        inExtraBranch,
+        dirVideoEntries.length
+      );
+    }
+
+    for (const dEnt of childDirs) {
+      if (visitedDirs >= maxVisitedDirs) break;
+      const dName = String(dEnt.name);
+      const nextExtra =
+        inExtraBranch ||
+        EXTRA_SUBDIR_NAME_RX.test(dName.trim()) ||
+        EXTRA_SUBDIR_SUFFIX_RX.test(dName.trim());
+      const nextAbs = path ? path.join(absDir, dName) : joinPosixPath(absDir, dName);
+      const nextRel = relDir ? `${relDir}/${dName}` : dName;
+      walkSubDir(nextAbs, nextRel, depth + 1, topSubdirName || dName, nextExtra);
+    }
+  };
+
+  // 遍历顶层子目录（含跨季度隔离判断）
+  const topDirs = topEntries.filter((e) => {
+    try {
+      if (!e || typeof e.isDirectory !== "function" || !e.isDirectory()) return false;
+      const lower = String(e.name || "").toLowerCase().trim();
+      if (!lower || lower.startsWith(".")) return false;
+      if (lower === "bdmv") {
+        hasBdmvStructure = true;
+        return false;
+      }
+      return !SKIP_PURE_ASSET_DIRS.has(lower);
+    } catch (_) {
+      return false;
+    }
   });
+
+  // 先探测各顶层子目录的显式季数，防止把附带的「第二季」混进第一季
+  const topDirMetas = topDirs.map((d) => {
+    const dName = String(d.name);
+    const isExtraDir = EXTRA_SUBDIR_NAME_RX.test(dName.trim()) || EXTRA_SUBDIR_SUFFIX_RX.test(dName.trim());
+    const dirEpMeta = isExtraDir ? null : parseVideoEpisodeMeta(dName, { isDirectory: true });
+    const isSingleEpDir = Boolean(dirEpMeta && dirEpMeta.hasExplicitEp && !dirEpMeta.isPackRange);
+    const explicitSeason = isExtraDir ? null : parseExplicitSeasonNumber(dName);
+    return { dirent: d, name: dName, isExtraDir, isSingleEpDir, explicitSeason };
+  });
+
+  const hasSeasonOneSource =
+    collectedMainCandidates.length > 0 ||
+    topDirMetas.some((m) => !m.isExtraDir && !m.isSingleEpDir && (m.explicitSeason === null || m.explicitSeason === 1));
+
+  for (const dm of topDirMetas) {
+    if (!dm.isExtraDir && !dm.isSingleEpDir && dm.explicitSeason !== null) {
+      if (rootExplicitSeason !== null && dm.explicitSeason !== rootExplicitSeason) {
+        skippedOtherSeasonDirs.push(dm.name);
+        continue;
+      }
+      if (rootExplicitSeason === null && dm.explicitSeason >= 2 && hasSeasonOneSource && topDirMetas.length >= 2) {
+        skippedOtherSeasonDirs.push(dm.name);
+        continue;
+      }
+    }
+    const subAbs = path ? path.join(normDownloadPath, dm.name) : joinPosixPath(normDownloadPath, dm.name);
+    walkSubDir(subAbs, dm.name, 1, dm.name, dm.isExtraDir);
+  }
+
+  // 检查是否误指向包含多部不同番剧的上级总目录（例如指向 `2026/07月新番` 或 `Downloads`）
+  let suspectedParentContainer = null;
+  const multiEpSubdirs = Array.from(topSubdirSummaries.entries()).filter(([, info]) => info.count >= 2);
+  const allDistinctStems = new Set();
+  for (const [, info] of multiEpSubdirs) {
+    for (const st of info.stems) allDistinctStems.add(st);
+  }
+  const ep1SubdirCount = multiEpSubdirs.filter(([, info]) => info.epSet.has(1) || info.epSet.has(2)).length;
+
+  if (
+    (isRootNamedLikeContainer && topSubdirSummaries.size >= 2 && topLevelDirectVideos.length === 0) ||
+    (multiEpSubdirs.length >= 3 && ep1SubdirCount >= 3 && allDistinctStems.size >= 3)
+  ) {
+    suspectedParentContainer = {
+      detected: true,
+      folderName: rootFolderBase,
+      childDirNames: Array.from(topSubdirSummaries.keys()).slice(0, 12)
+    };
+    // 拦截跨番混算：仅保留顶层直铺文件（通常为 0），避免把整个季度的几十部番剧混成一部
+    collectedMainCandidates.splice(
+      0,
+      collectedMainCandidates.length,
+      ...collectedMainCandidates.filter((c) => c.depth === 0)
+    );
+  }
+
+  // 若目录内既有常规 TV 正片（>=2 话且非 OVA），又有散落的 OVA/OAD 文件，将散落 OVA/OAD 归入特典列表，避免挤占常规集数
+  const nonOvaMain = collectedMainCandidates.filter((c) => !c.isOvaCandidate);
+  const ovaMain = collectedMainCandidates.filter((c) => c.isOvaCandidate);
+  let effectiveMainPool = collectedMainCandidates;
+  if (nonOvaMain.length >= 2 && ovaMain.length > 0) {
+    effectiveMainPool = nonOvaMain;
+    for (const ov of ovaMain) {
+      ov.extraKind = ov.extraKind || "OVA/OAD";
+      collectedExtras.push(ov);
+    }
+  }
+
+  // 用户手动指定的优先版本映射（规范化路径键）
+  const preferredMap =
+    (options && options.preferredEpisodeFiles) ||
+    (typeof globalThis !== "undefined" ? globalThis.__BangumiPreferredEpisodeFiles : null) ||
+    null;
+  const isPreferredPath = (fp) => {
+    if (!preferredMap || !fp) return false;
+    const normKey = String(fp).replace(/\\/g, "/").toLowerCase();
+    return Boolean(preferredMap[normKey] || preferredMap[fp]);
+  };
+
+  const rankCandidate = (a, b) => {
+    const aPref = isPreferredPath(a.path) ? 1 : 0;
+    const bPref = isPreferredPath(b.path) ? 1 : 0;
+    if (aPref !== bPref) return bPref - aPref;
+    if ((a.version || 1) !== (b.version || 1)) return (b.version || 1) - (a.version || 1);
+    if ((a.resolutionScore || 0) !== (b.resolutionScore || 0)) return (b.resolutionScore || 0) - (a.resolutionScore || 0);
+    if ((a.formatScore || 0) !== (b.formatScore || 0)) return (b.formatScore || 0) - (a.formatScore || 0);
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    if ((a.size || 0) !== (b.size || 0)) return (b.size || 0) - (a.size || 0);
+    return a.relPath.localeCompare(b.relPath, undefined, { numeric: true, sensitivity: "base" });
+  };
+
+  const explicitByEp = new Map();
+  const unnumberedCandidates = [];
+
+  for (const cand of effectiveMainPool) {
+    if (cand.hasExplicitEp && cand.episode !== null && Number.isFinite(cand.episode)) {
+      if (!explicitByEp.has(cand.episode)) {
+        explicitByEp.set(cand.episode, []);
+      }
+      explicitByEp.get(cand.episode).push(cand);
+    } else {
+      unnumberedCandidates.push(cand);
+    }
+  }
+
+  const duplicateEpisodes = [];
+  const dedupedExplicitVideos = [];
+
+  for (const [ep, group] of explicitByEp.entries()) {
+    group.sort(rankCandidate);
+    const primary = group[0];
+    const others = group.slice(1);
+    primary.duplicates = others;
+    dedupedExplicitVideos.push(primary);
+    if (others.length > 0) {
+      duplicateEpisodes.push({
+        episode: ep,
+        primaryFile: primary,
+        duplicateFiles: others,
+        allFiles: group
+      });
+    }
+  }
+  duplicateEpisodes.sort((a, b) => a.episode - b.episode);
+
+  let videoFiles = [];
+  const unnumberedMultipleVideos = [];
+
+  if (dedupedExplicitVideos.length > 0) {
+    videoFiles = dedupedExplicitVideos;
+    // 若同时还存在完全无法识别集数的其他视频文件，不盲目猜集数，记录提醒用户核对
+    if (unnumberedCandidates.length > 0) {
+      for (const u of unnumberedCandidates) {
+        unnumberedMultipleVideos.push(u.relPath || u.name);
+      }
+    }
+  } else if (unnumberedCandidates.length > 0) {
+    unnumberedCandidates.sort((a, b) =>
+      (a.relPath || a.name).localeCompare(b.relPath || b.name, undefined, { numeric: true, sensitivity: "base" })
+    );
+    videoFiles = unnumberedCandidates.map((u, idx) => ({
+      ...u,
+      episode: idx + 1,
+      hasExplicitEp: false,
+      duplicates: []
+    }));
+    if (unnumberedCandidates.length >= 2) {
+      for (const u of unnumberedCandidates) {
+        unnumberedMultipleVideos.push(u.relPath || u.name);
+      }
+    }
+  }
+
   videoFiles.sort((a, b) => {
     if (a.episode !== b.episode) {
       return a.episode - b.episode;
     }
     return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
   });
+
+  const subfolderSet = new Set();
+  let totalInSubfolders = 0;
+  for (const vf of videoFiles) {
+    if (vf.inSubfolder) {
+      totalInSubfolders += 1;
+      if (vf.topSubdirName) subfolderSet.add(vf.topSubdirName);
+    }
+  }
 
   const currentWatched = Number(watchedEpisodes) || 0;
   const targetNextEp = currentWatched + 1;
@@ -287,6 +997,14 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
     0
   );
 
+  const hasAttentionNeeded = Boolean(
+    duplicateEpisodes.length > 0 ||
+      suspectedParentContainer?.detected ||
+      skippedOtherSeasonDirs.length > 0 ||
+      unnumberedMultipleVideos.length > 0 ||
+      (hasBdmvStructure && videoFiles.length === 0)
+  );
+
   return {
     error: null,
     downloadPath,
@@ -295,10 +1013,25 @@ function inspectLocalFolder(downloadPath, watchedEpisodes) {
       ? unwatchedFiles.length
       : Math.max(0, videoFiles.length - currentWatched),
     videoFiles,
+    allRawVideoFiles: effectiveMainPool,
+    extraFiles: collectedExtras,
     unwatchedFiles,
     maxEpisodeNumber,
     nextEpisodeFile,
-    nextEpisodeNumber
+    nextEpisodeNumber,
+    hasAttentionNeeded,
+    anomalies: {
+      duplicateEpisodes,
+      suspectedParentContainer,
+      skippedOtherSeasonDirs,
+      unnumberedMultipleVideos,
+      hasBdmvStructure,
+      incompleteCount,
+      subfolderStats: {
+        totalInSubfolders,
+        subfolderNames: Array.from(subfolderSet)
+      }
+    }
   };
 }
 function getLocalStatusText(result) {
@@ -310,6 +1043,9 @@ function getLocalStatusText(result) {
   }
   if (result.error) {
     return "\u68C0\u6D4B\u5931\u8D25";
+  }
+  if (result.anomalies?.suspectedParentContainer?.detected && result.fileCount === 0) {
+    return "\u76EE\u5F55\u8DEF\u5F84\u5F85\u6838\u5BF9";
   }
   if (result.newCount > 0) {
     return "\u5DF2\u66F4\u65B0 " + result.newCount + " \u96C6";
@@ -550,11 +1286,8 @@ function updateFolderLine(content, result) {
       : result || {};
   let folderLine;
   if (normalizedResult.downloadPath && !normalizedResult.error) {
-    const normalized = String(normalizedResult.downloadPath).replace(
-      /\\/g,
-      "/"
-    );
-    folderLine = "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A [\u6253\u5F00\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939](file:///" + encodeURI(normalized) + ")";
+    const safeUrl = toMarkdownSafeFileUrl(normalizedResult.downloadPath);
+    folderLine = "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A [\u6253\u5F00\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939](" + safeUrl + ")";
   } else {
     folderLine = "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A \u672A\u8BBE\u7F6E";
   }
@@ -2031,14 +2764,24 @@ function inspectAndUpgradeAnimeNoteContent(content, options = {}) {
     const fmDlRaw = cleanValue(parsedNow.fields["下载路径"]);
     const fmHasRealPath = Boolean(fmDlRaw && fmDlRaw !== "无" && fmDlRaw !== "未设置");
     const bodyFileUrlMatch = updated.match(
-      /^\*\*本地文件夹\s*[：:]?\s*\*\*\s*[：:]?\s*\[[^\]]*\]\(file:\/\/\/([^)\r\n]+)\)/m
+      /^\*\*本地文件夹\s*[：:]?\s*\*\*\s*[：:]?\s*\[[^\]]*\]\(file:\/\/(\/?[^)\r\n]+)\)/m
     );
     let bodyRecoveredPath = "";
     if (bodyFileUrlMatch && bodyFileUrlMatch[1]) {
+      let rawTail = bodyFileUrlMatch[1].trim();
       try {
-        bodyRecoveredPath = decodeURI(bodyFileUrlMatch[1]).trim();
+        rawTail = decodeURIComponent(rawTail).trim();
       } catch (_) {
-        bodyRecoveredPath = bodyFileUrlMatch[1].trim();
+        try {
+          rawTail = decodeURI(rawTail).trim();
+        } catch (__) {}
+      }
+      if (/^\/[A-Za-z]:\//.test(rawTail)) {
+        bodyRecoveredPath = rawTail.slice(1);
+      } else if (!rawTail.startsWith("/") && !/^[A-Za-z]:/.test(rawTail)) {
+        bodyRecoveredPath = "/" + rawTail;
+      } else {
+        bodyRecoveredPath = rawTail;
       }
     }
 
@@ -2269,6 +3012,7 @@ module.exports = {
   addNoteTag,
   removeNoteTag,
   extractEpisodeNumberFromFileName,
+  parseVideoEpisodeMeta,
   openLocalPathSafely,
   normalizeTimestampInput,
   parseTimestampToSeconds,

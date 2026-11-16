@@ -9,6 +9,7 @@ const {
   tryRequireNode,
   isMobileEnv,
   isDesktopNodeAvailable,
+  toExternalLocalMediaUrl,
   crossPlatformPath: path,
   crossPlatformFs: fs,
   normalizeVaultRelPath,
@@ -79,11 +80,13 @@ function resolveLocalOrVaultImageUrl(plugin, rawPath, cacheBustToken = "") {
   };
   if (/^(?:https?:|data:|app:|capacitor:|file:)/i.test(raw)) return appendBust(raw);
   const normalized = raw.replace(/\\/g, "/");
+  const isExternalAbs =
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.startsWith("//") ||
+    raw.startsWith("\\\\") ||
+    /^\/(?:Users|Volumes|home|mnt|media|var|opt|tmp|private)\//i.test(normalized);
   try {
     const adapter = plugin?.app?.vault?.adapter;
-    if (!/^[A-Za-z]:\//.test(normalized) && adapter && typeof adapter.getResourcePath === "function") {
-      return appendBust(adapter.getResourcePath(normalized.replace(/^\//, "")));
-    }
     const vaultBase = getVaultBasePath(plugin).replace(/\\/g, "/").replace(/\/$/, "");
     if (vaultBase && normalized.toLowerCase().startsWith(vaultBase.toLowerCase() + "/")) {
       const rel = normalized.slice(vaultBase.length + 1);
@@ -91,9 +94,12 @@ function resolveLocalOrVaultImageUrl(plugin, rawPath, cacheBustToken = "") {
         return appendBust(adapter.getResourcePath(rel));
       }
     }
+    if (!isExternalAbs && adapter && typeof adapter.getResourcePath === "function") {
+      return appendBust(adapter.getResourcePath(normalized.replace(/^\//, "")));
+    }
   } catch (e) {}
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return appendBust("file:///" + encodeURI(normalized));
+  if (isExternalAbs || path.isAbsolute(raw)) {
+    return toExternalLocalMediaUrl(raw, cacheBustToken);
   }
   return appendBust(raw);
 }
@@ -213,14 +219,22 @@ async function moveLocalFileToTrashSafely(plugin, rawPath) {
     markSelfMediaPathBusy(plugin, vaultRel, 2200);
   }
 
-  // 1. 优先通过 Obsidian Vault API 移入系统回收站（同步更新 Obsidian 内部文件索引）
+  // 1. 优先通过 Obsidian FileManager / Vault API 移入回收站（遵循用户 Obsidian 回收站偏好并兼容 NAS/Linux 挂载盘）
   try {
     if (vaultRel && plugin?.app?.vault) {
       const tfile = plugin.app.vault.getAbstractFileByPath(vaultRel);
-      if (tfile && typeof plugin.app.vault.trash === "function") {
-        await plugin.app.vault.trash(tfile, true);
-        if (!fs.existsSync(abs)) {
-          return { existed: true, deleted: true, absPath: abs, method: "vault-trash" };
+      if (tfile) {
+        if (typeof plugin.app.fileManager?.trashFile === "function") {
+          await plugin.app.fileManager.trashFile(tfile);
+          if (!fs.existsSync(abs)) {
+            return { existed: true, deleted: true, absPath: abs, method: "filemanager-trash" };
+          }
+        }
+        if (typeof plugin.app.vault.trash === "function") {
+          await plugin.app.vault.trash(tfile, true);
+          if (!fs.existsSync(abs)) {
+            return { existed: true, deleted: true, absPath: abs, method: "vault-trash" };
+          }
         }
       }
     }
@@ -3815,6 +3829,37 @@ async function probeVideoSubtitleTracks(plugin, videoFilePath) {
 }
 
 /**
+ * 自动识别 UTF-8 / UTF-16LE / UTF-16BE / GB18030 外挂字幕文件编码（兼容老番 BD 合集常见 UTF-16LE .ass 字幕）
+ */
+function readSubtitleFileAutoEncoding(fullSubPath) {
+  const buf = fs.readFileSync(fullSubPath);
+  if (!buf || buf.length === 0) return "";
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return typeof TextDecoder !== "undefined"
+      ? new TextDecoder("utf-16le").decode(buf.subarray(2))
+      : buf.subarray(2).toString("utf16le");
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    if (typeof TextDecoder !== "undefined") {
+      return new TextDecoder("utf-16be").decode(buf.subarray(2));
+    }
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.subarray(3).toString("utf8");
+  }
+  if (typeof TextDecoder !== "undefined") {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    } catch (_) {
+      try {
+        return new TextDecoder("gb18030").decode(buf);
+      } catch (__) {}
+    }
+  }
+  return buf.toString("utf8");
+}
+
+/**
  * 查找视频同目录下的外置字幕文件，若无外置字幕则调用 FFmpeg 提取指定（或自动优选简体中文）内嵌字幕轨
  */
 async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubIndex = null) {
@@ -3842,7 +3887,7 @@ async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubInde
   if (matchedExternalSubs.length > 0 && requestedSubIndex === null) {
     const chosenExtSub = matchedExternalSubs[0];
     const fullSubPath = path.join(dir, chosenExtSub);
-    const raw = fs.readFileSync(fullSubPath, "utf8");
+    const raw = readSubtitleFileAutoEncoding(fullSubPath);
     const cues = parseSubtitleContent(raw, path.extname(chosenExtSub));
     return {
       cues,
@@ -3861,7 +3906,7 @@ async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubInde
     const chosenExtSub = matchedExternalSubs[extIdx];
     if (chosenExtSub) {
       const fullSubPath = path.join(dir, chosenExtSub);
-      const raw = fs.readFileSync(fullSubPath, "utf8");
+      const raw = readSubtitleFileAutoEncoding(fullSubPath);
       const cues = parseSubtitleContent(raw, path.extname(chosenExtSub));
       return {
         cues,
@@ -4250,7 +4295,7 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
           });
           for (const vf of preferredVids.slice(0, 2)) {
             pushCandidateVideo(
-              path.join(folderItem.dirPath, vf.name),
+              vf.path || path.join(folderItem.dirPath, vf.name),
               folderItem.title,
               vf.episode !== null ? String(vf.episode) : "1"
             );
@@ -4611,8 +4656,14 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       .map((ani) => {
         let hasSoftSubHint = false;
         try {
-          const entries = fs.readdirSync(ani.downloadPath);
-          hasSoftSubHint = entries.some((f) => /\.(mkv|ass|ssa|srt|vtt)$/i.test(f));
+          const folderRes = inspectLocalFolder(ani.downloadPath);
+          if (folderRes && Array.isArray(folderRes.videoFiles)) {
+            hasSoftSubHint = folderRes.videoFiles.some((vf) => /\.mkv$/i.test(vf.name));
+          }
+          if (!hasSoftSubHint) {
+            const entries = fs.readdirSync(ani.downloadPath);
+            hasSoftSubHint = entries.some((f) => /\.(mkv|ass|ssa|srt|vtt)$/i.test(f));
+          }
         } catch (e) {}
         return Object.assign({}, ani, { _hasSoftSubHint: hasSoftSubHint });
       })
@@ -4671,10 +4722,11 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
       const res = inspectLocalFolder(folderPath);
       if (res && Array.isArray(res.videoFiles)) {
         res.videoFiles.forEach((vf) => {
-          const full = path.join(folderPath, vf.name);
+          const full = vf.path || path.join(folderPath, vf.name);
+          const subTag = vf.inSubfolder ? " [子目录]" : "";
           const o = epSelect.createEl("option", {
             value: full,
-            text: vf.episode !== null ? `第 ${vf.episode} 话 · ${vf.name}` : vf.name
+            text: vf.episode !== null ? `第 ${vf.episode} 话${subTag} · ${vf.name}` : `${vf.name}${subTag}`
           });
           o.dataset.epNum = vf.episode !== null ? String(vf.episode) : "";
           if (uiState.selectedVideoFile === full) o.selected = true;
@@ -5398,7 +5450,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     return;
   }
   const mode = game.launchMode || "exe";
-  const exePath = String(game.exePath || "").trim();
+  let exePath = String(game.exePath || "").trim();
   const romPath = String(game.romPath || "").trim();
   const customArgs = String(game.launchArgs || "")
     .trim()
@@ -5410,17 +5462,32 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     return;
   }
 
-  // 支持 steam:// 协议链接（同步启动游玩计时器，游玩结束后一键结算时长）
-  if (/^steam:\/\//i.test(exePath)) {
-    window.open(exePath);
+  const startManualProtocolTimer = (uriTarget, viaLabel = "启动器") => {
+    try {
+      const electron = tryRequireNode("electron");
+      if (electron?.shell && typeof electron.shell.openExternal === "function") {
+        electron.shell.openExternal(uriTarget);
+      } else {
+        window.open(uriTarget);
+      }
+    } catch (_) {
+      window.open(uriTarget);
+    }
     try {
       const gs = require("./game-stats-and-groups-service.js");
       if (!gs.getActiveGameTimer(plugin, game.id)) {
         gs.startActiveGameTimer(plugin, game);
       }
     } catch (_) {}
-    if (Notice) new Notice(`已通过 Steam 启动《${game.title}》，已开启游玩计时（结束后点「结束并记入」即可结算时长）`);
+    if (Notice) {
+      new Notice(`已通过 ${viaLabel} 启动《${game.title}》，已开启游玩计时（结束后点「结束并记入」即可结算时长）`);
+    }
     if (typeof onSessionEnd === "function") onSessionEnd();
+  };
+
+  // 支持 steam:// / com.epicgames.launcher:// / uplay:// 等协议链接
+  if (/^(?:steam|com\.epicgames\.launcher|uplay|goggalaxy|xbox):\/\//i.test(exePath)) {
+    startManualProtocolTimer(exePath, /^steam:/i.test(exePath) ? "Steam" : "平台启动器");
     return;
   }
 
@@ -5429,15 +5496,94 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     return;
   }
 
+  const extLower = path.extname(exePath).toLowerCase();
+
+  // 支持桌面常见的 .url 快捷方式（例如 Steam 在桌面生成的游戏图标均为 .url 文本文件）
+  if (extLower === ".url") {
+    try {
+      const rawUrlFile = fs.readFileSync(exePath, "utf8");
+      const urlMatch = rawUrlFile.match(/^\s*URL\s*=\s*(.+)$/im);
+      if (urlMatch && urlMatch[1]) {
+        startManualProtocolTimer(urlMatch[1].trim(), "桌面快捷方式");
+        return;
+      }
+    } catch (_) {}
+    openLocalPathSafely(exePath);
+    try {
+      const gs = require("./game-stats-and-groups-service.js");
+      if (!gs.getActiveGameTimer(plugin, game.id)) gs.startActiveGameTimer(plugin, game);
+    } catch (_) {}
+    if (typeof onSessionEnd === "function") onSessionEnd();
+    return;
+  }
+
+  // 支持 Windows .lnk 快捷方式解析为真实可执行目标与工作目录
+  let launchCwd = path.dirname(exePath);
+  let shortcutExtraArgs = [];
+  if (extLower === ".lnk") {
+    let resolvedTarget = "";
+    try {
+      const electron = tryRequireNode("electron");
+      if (electron?.shell && typeof electron.shell.readShortcutLink === "function") {
+        const linkInfo = electron.shell.readShortcutLink(exePath);
+        if (linkInfo && linkInfo.target && fs.existsSync(linkInfo.target)) {
+          resolvedTarget = path.normalize(linkInfo.target);
+          if (linkInfo.cwd && fs.existsSync(linkInfo.cwd)) {
+            launchCwd = path.normalize(linkInfo.cwd);
+          } else {
+            launchCwd = path.dirname(resolvedTarget);
+          }
+          if (linkInfo.args) {
+            shortcutExtraArgs = String(linkInfo.args).trim().split(/\s+/).filter(Boolean);
+          }
+        }
+      }
+    } catch (_) {}
+    if (!resolvedTarget && typeof reviewStudioService?.resolveExecutableOrShortcutPath === "function") {
+      resolvedTarget = reviewStudioService.resolveExecutableOrShortcutPath(exePath);
+      if (resolvedTarget) launchCwd = path.dirname(resolvedTarget);
+    }
+    if (resolvedTarget) {
+      exePath = resolvedTarget;
+    } else {
+      openLocalPathSafely(exePath);
+      try {
+        const gs = require("./game-stats-and-groups-service.js");
+        if (!gs.getActiveGameTimer(plugin, game.id)) gs.startActiveGameTimer(plugin, game);
+      } catch (_) {}
+      if (typeof onSessionEnd === "function") onSessionEnd();
+      return;
+    }
+  }
+
   const startTs = Date.now();
   const startIso = new Date(startTs).toISOString();
-  const args = mode === "emulator" && romPath ? [...customArgs, romPath] : customArgs;
+  const baseArgs = [...shortcutExtraArgs, ...customArgs];
+  const args = mode === "emulator" && romPath ? [...baseArgs, romPath] : baseArgs;
+  const plat = typeof process !== "undefined" ? process.platform : "";
+  const finalExt = path.extname(exePath).toLowerCase();
+
   try {
-    const child = spawn(exePath, args, {
-      cwd: path.dirname(exePath),
-      detached: true,
-      stdio: "ignore"
-    });
+    let child = null;
+    if (plat === "darwin" && (finalExt === ".app" || (fs.statSync(exePath).isDirectory() && /\.app$/i.test(exePath)))) {
+      const openArgs = ["-W", "-a", exePath];
+      if (args.length > 0) openArgs.push("--args", ...args);
+      child = spawn("open", openArgs, { detached: true, stdio: "ignore" });
+    } else if (plat === "win32" && (finalExt === ".bat" || finalExt === ".cmd")) {
+      // 兼容 Node 20+ / Electron 32+ 安全补丁（直接 spawn .bat/.cmd 会抛 EINVAL）
+      child = spawn("cmd.exe", ["/d", "/s", "/c", exePath, ...args], {
+        cwd: launchCwd,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false
+      });
+    } else {
+      child = spawn(exePath, args, {
+        cwd: launchCwd,
+        detached: true,
+        stdio: "ignore"
+      });
+    }
     child.unref();
     if (Notice) {
       new Notice(

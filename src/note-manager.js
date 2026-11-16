@@ -1,4 +1,5 @@
 const { requestUrl } = require("obsidian");
+const { toMarkdownSafeFileUrl, normalizeUnicodeNfc } = require("./platform-env.js");
 
 var IMAGE_EXTENSIONS = [
   "jpg",
@@ -177,7 +178,16 @@ function getSeasonInfo(dateText) {
   };
 }
 function getSafeFileName(name) {
-  return String(name || "").replace(/[\*"\\\/<>:\|?]/g, " ").trim() || "\u672A\u77E5\u4F5C\u54C1";
+  let cleaned = normalizeUnicodeNfc(String(name || ""))
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replace(/[\*"\\\/<>:\|?]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .replace(/[.\s]+$/, "");
+  if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(cleaned)) {
+    cleaned = `_${cleaned}`;
+  }
+  return cleaned || "\u672A\u77E5\u4F5C\u54C1";
 }
 function getSubjectIdFromUrl(url) {
   const match = String(url || "").match(
@@ -425,16 +435,11 @@ function buildNoteContent(info, options) {
   );
 
   if (downloadPath && downloadPath !== "\u65E0") {
-    const normalizedDownloadPath = String(
-      downloadPath
-    ).replace(
-      /\\/g,
-      "/"
-    );
+    const safeUrl = toMarkdownSafeFileUrl(downloadPath);
 
     yaml.push(
-      "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A [\u6253\u5F00\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939](file:///" +
-      encodeURI(normalizedDownloadPath) +
+      "**\u672C\u5730\u6587\u4EF6\u5939**\uFF1A [\u6253\u5F00\u672C\u5730\u52A8\u753B\u6587\u4EF6\u5939](" +
+      safeUrl +
       ")"
     );
   } else {

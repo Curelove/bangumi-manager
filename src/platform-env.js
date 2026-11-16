@@ -37,12 +37,283 @@ function isDesktopNodeAvailable() {
   return !isMobileEnv() && Boolean(tryRequireNode("fs"));
 }
 
-// ==================== 纯 JS 跨平台 POSIX 路径工具（不依赖 Node path） ====================
+// ==================== 纯 JS 跨平台 POSIX 路径与 URI 工具（不依赖 Node path） ====================
+
+function normalizeUnicodeNfc(str) {
+  const s = String(str ?? "");
+  if (!s) return "";
+  try {
+    return typeof s.normalize === "function" ? s.normalize("NFC") : s;
+  } catch (_) {
+    return s;
+  }
+}
 
 function toPosixPath(rawPath) {
   const s = String(rawPath || "").trim();
   if (!s) return "";
+  if (s.startsWith("\\\\")) {
+    return "//" + s.slice(2).replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  }
   return s.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+}
+
+/**
+ * 将任意本地绝对路径（Windows 盘符、Windows UNC 网络盘、macOS /Users|/Volumes、Linux /home|/mnt）
+ * 安全转换为标准 RFC 8089 file:// URL（自动编码 #、?、空格、百分号与 CJK 字符）
+ */
+function toSafeFileUrl(rawPath) {
+  const raw = String(rawPath || "").trim();
+  if (!raw) return "";
+  if (/^file:\/\//i.test(raw)) return raw;
+
+  const urlMod = tryRequireNode("url");
+  const pathMod = tryRequireNode("path");
+  if (urlMod && typeof urlMod.pathToFileURL === "function" && pathMod) {
+    try {
+      return urlMod.pathToFileURL(pathMod.normalize(raw)).href;
+    } catch (_) {}
+  }
+
+  const encodeSeg = (seg) =>
+    encodeURIComponent(seg)
+      .replace(/%3A/gi, ":")
+      .replace(/!/g, "%21");
+
+  const backslashUnc = raw.startsWith("\\\\");
+  const slashNorm = raw.replace(/\\/g, "/");
+  if (backslashUnc || slashNorm.startsWith("//")) {
+    const body = slashNorm.replace(/^\/+/, "");
+    const parts = body.split("/").filter(Boolean);
+    if (parts.length === 0) return "";
+    const host = parts[0];
+    const rest = parts.slice(1).map(encodeSeg).join("/");
+    return `file://${host}/${rest}`;
+  }
+  if (/^[A-Za-z]:\//.test(slashNorm)) {
+    const drive = slashNorm.slice(0, 2);
+    const rest = slashNorm
+      .slice(3)
+      .split("/")
+      .map((seg) => (seg ? encodeSeg(seg) : ""))
+      .join("/");
+    return `file:///${drive}/${rest}`;
+  }
+  if (slashNorm.startsWith("/")) {
+    const rest = slashNorm
+      .slice(1)
+      .split("/")
+      .map((seg) => (seg ? encodeSeg(seg) : ""))
+      .join("/");
+    return `file:///${rest}`;
+  }
+  return "file:///" + encodeURI(slashNorm).replace(/#/g, "%23").replace(/\?/g, "%3F");
+}
+
+/**
+ * 用于写入 Markdown 链接 `[打开本地动画文件夹](file:///...)` 的安全 URL：
+ * 额外转义圆括号与方括号，防止文件夹名含 `(01-12Fin...)` 或 `[SubGroup]` 截断 Markdown 链接语法
+ */
+function toMarkdownSafeFileUrl(rawPath) {
+  const href = toSafeFileUrl(rawPath);
+  if (!href) return "";
+  return href
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29")
+    .replace(/\[/g, "%5B")
+    .replace(/\]/g, "%5D");
+}
+
+/**
+ * 将仓库外本地绝对媒体路径转换为 Obsidian 渲染层可加载的 URL（兼容 Windows 盘符、UNC、macOS 与 Linux）
+ */
+function toExternalLocalMediaUrl(rawPath, cacheBustToken = "") {
+  const raw = String(rawPath || "").trim();
+  if (!raw) return "";
+  const appendBust = (u) => {
+    if (!u || !cacheBustToken) return u;
+    return `${u}${u.includes("?") ? "&" : "?"}_v=${encodeURIComponent(String(cacheBustToken))}`;
+  };
+  if (/^(?:https?:|data:|app:|capacitor:|blob:|file:)/i.test(raw)) {
+    return appendBust(raw);
+  }
+  const prefix = typeof Platform?.resourcePathPrefix === "string" ? Platform.resourcePathPrefix : "";
+  if (prefix && isDesktopNodeAvailable()) {
+    const pathMod = tryRequireNode("path");
+    const norm = pathMod ? pathMod.normalize(raw) : raw;
+    const slash = norm.replace(/\\/g, "/");
+    const encoded = encodeURI(slash)
+      .replace(/#/g, "%23")
+      .replace(/\?/g, "%3F");
+    if (/^[A-Za-z]:\//.test(slash)) {
+      return appendBust(prefix.replace(/\/+$/, "/") + encoded);
+    }
+    if (slash.startsWith("/") && !slash.startsWith("//")) {
+      return appendBust(prefix.replace(/\/+$/, "") + encoded);
+    }
+  }
+  const fileHref = toSafeFileUrl(raw);
+  return fileHref ? appendBust(fileHref) : appendBust(raw);
+}
+
+/**
+ * 兼容 Electron 32+ / Obsidian 1.7+ 获取 `<input type="file">` 选中文件的真实本地路径
+ */
+function getNativeFilePathCrossPlatform(file) {
+  if (!file || !isDesktopNodeAvailable()) return "";
+  try {
+    if (typeof file.path === "string" && file.path.trim()) {
+      return file.path.trim();
+    }
+    const electron = tryRequireNode("electron");
+    if (electron?.webUtils && typeof electron.webUtils.getPathForFile === "function") {
+      const resolved = electron.webUtils.getPathForFile(file);
+      if (typeof resolved === "string" && resolved.trim()) {
+        return resolved.trim();
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
+/**
+ * 跨平台桌面原生文件夹选择器（支持空文件夹、Win11 现代资源管理器对话框、macOS Finder 与 Linux，无需手敲路径）
+ */
+async function pickNativeFolderOnDesktop(options = {}) {
+  if (!isDesktopNodeAvailable()) return "";
+  const title = String(options.title || "选择文件夹").replace(/["'\r\n]/g, " ");
+  const initialDir = String(options.initialDir || "").trim();
+
+  // 1. 尝试旧版 Electron remote.dialog（如可用）
+  try {
+    const electron = tryRequireNode("electron");
+    const remote = electron?.remote || tryRequireNode("@electron/remote");
+    if (remote?.dialog && typeof remote.dialog.showOpenDialog === "function") {
+      const res = await remote.dialog.showOpenDialog({
+        title,
+        defaultPath: initialDir || undefined,
+        properties: ["openDirectory", "createDirectory"]
+      });
+      if (res && !res.canceled && Array.isArray(res.filePaths) && res.filePaths[0]) {
+        return res.filePaths[0];
+      }
+      if (res && res.canceled) return "";
+    }
+  } catch (_) {}
+
+  const cp = tryRequireNode("child_process");
+  const fsMod = tryRequireNode("fs");
+  const pathMod = tryRequireNode("path");
+  const plat = typeof process !== "undefined" ? process.platform : "";
+
+  const execFileAsync = (cmd, args, timeoutMs = 120000) =>
+    new Promise((resolve) => {
+      if (!cp || typeof cp.execFile !== "function") {
+        resolve({ ok: false, stdout: "" });
+        return;
+      }
+      try {
+        cp.execFile(
+          cmd,
+          args,
+          { encoding: "utf8", windowsHide: true, timeout: timeoutMs },
+          (err, stdout) => {
+            if (err) {
+              resolve({ ok: false, stdout: String(stdout || "") });
+              return;
+            }
+            resolve({ ok: true, stdout: String(stdout || "") });
+          }
+        );
+      } catch (_) {
+        resolve({ ok: false, stdout: "" });
+      }
+    });
+
+  // 2. Windows 现代原生文件夹选择框（支持选择空目录，强制 UTF-8 杜绝中文乱码）
+  if (plat === "win32" && cp) {
+    const safeInit =
+      initialDir && fsMod && fsMod.existsSync(initialDir)
+        ? pathMod.normalize(initialDir).replace(/'/g, "''")
+        : "";
+    const psScript = [
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;",
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog;",
+      `$dlg.Description = '${title.replace(/'/g, "''")}';`,
+      "$dlg.ShowNewFolderButton = $true;",
+      "try { $dlg.AutoUpgradeEnabled = $true } catch {};",
+      safeInit ? `$dlg.SelectedPath = '${safeInit}';` : "",
+      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dlg.SelectedPath }"
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const winRes = await execFileAsync("powershell.exe", ["-NoProfile", "-STA", "-Command", psScript]);
+    if (winRes.ok) {
+      const picked = winRes.stdout.trim().split(/\r?\n/).pop()?.trim() || "";
+      return picked;
+    }
+  }
+
+  // 3. macOS Finder 原生文件夹选择框
+  if (plat === "darwin" && cp) {
+    const safeInit = initialDir && fsMod && fsMod.existsSync(initialDir) ? initialDir.replace(/"/g, '\\"') : "";
+    const osa = safeInit
+      ? `POSIX path of (choose folder with prompt "${title}" default location (POSIX file "${safeInit}"))`
+      : `POSIX path of (choose folder with prompt "${title}")`;
+    const macRes = await execFileAsync("osascript", ["-e", osa]);
+    if (macRes.ok) {
+      return macRes.stdout.trim().replace(/\/+$/, "");
+    }
+    return "";
+  }
+
+  // 4. Linux Zenity / KDialog 原生文件夹选择框
+  if (plat === "linux" && cp) {
+    const zenRes = await execFileAsync("zenity", ["--file-selection", "--directory", `--title=${title}`]);
+    if (zenRes.ok && zenRes.stdout.trim()) {
+      return zenRes.stdout.trim();
+    }
+    const kdRes = await execFileAsync("kdialog", ["--getexistingdirectory", initialDir || "."]);
+    if (kdRes.ok && kdRes.stdout.trim()) {
+      return kdRes.stdout.trim();
+    }
+  }
+
+  // 5. 兜底：HTML5 webkitdirectory（当目录内有文件时提取根目录）
+  if (typeof document !== "undefined") {
+    return await new Promise((resolve) => {
+      const inp = document.createElement("input");
+      inp.type = "file";
+      inp.setAttribute("webkitdirectory", "");
+      inp.setAttribute("directory", "");
+      let settled = false;
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        resolve(val || "");
+      };
+      inp.onchange = () => {
+        const first = inp.files && inp.files[0];
+        const full = getNativeFilePathCrossPlatform(first);
+        if (!full || !pathMod) {
+          done("");
+          return;
+        }
+        const rel = String(first.webkitRelativePath || "").replace(/\\/g, "/");
+        const segs = rel.split("/").filter(Boolean);
+        let dir = pathMod.dirname(full);
+        for (let i = 0; i < Math.max(0, segs.length - 2); i++) {
+          dir = pathMod.dirname(dir);
+        }
+        done(dir);
+      };
+      inp.oncancel = () => done("");
+      inp.click();
+    });
+  }
+
+  return "";
 }
 
 function normalizeVaultRelPath(rawPath) {
@@ -491,7 +762,13 @@ module.exports = {
   tryRequireNode,
   isMobileEnv,
   isDesktopNodeAvailable,
+  normalizeUnicodeNfc,
   toPosixPath,
+  toSafeFileUrl,
+  toMarkdownSafeFileUrl,
+  toExternalLocalMediaUrl,
+  getNativeFilePathCrossPlatform,
+  pickNativeFolderOnDesktop,
   normalizeVaultRelPath,
   posixJoin,
   joinPosixPath,

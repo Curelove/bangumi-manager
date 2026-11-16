@@ -1468,11 +1468,41 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
           ? `本地 +${localResult.newCount}集`
           : `本地 ${localResult.fileCount}集`
     });
-    localPill.title = `本地文件夹共 ${localResult.fileCount} 集视频，未看新集 ${localResult.newCount} 集（点击打开本地文件夹）`;
+    const subHint =
+      localResult.anomalies?.subfolderStats?.totalInSubfolders > 0
+        ? `（含子文件夹 ${localResult.anomalies.subfolderStats.totalInSubfolders} 集）`
+        : "";
+    localPill.title = `本地文件夹共 ${localResult.fileCount} 集视频${subHint}，未看新集 ${localResult.newCount} 集（点击打开本地文件夹）`;
     localPill.onclick = async (e) => {
       e.preventDefault();
       e.stopPropagation();
       await openLocalPathSafely(item.downloadPath);
+    };
+  }
+  if (
+    localResult &&
+    !localResult.error &&
+    localResult.hasAttentionNeeded &&
+    typeof animeDownloadService?.openLocalFolderDiagnosticsModal === "function"
+  ) {
+    const dupCnt = Number(localResult.anomalies?.duplicateEpisodes?.length) || 0;
+    const warnPill = topMeta.createSpan({
+      cls: "curator-local-ep-pill is-warn",
+      text: localResult.anomalies?.suspectedParentContainer?.detected
+        ? "目录待核对"
+        : dupCnt > 0
+        ? `重集 ×${dupCnt}`
+        : "目录待核对"
+    });
+    warnPill.title = "本地目录存在重复版本或路径层级待核对，点击打开详情处理";
+    warnPill.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      animeDownloadService.openLocalFolderDiagnosticsModal(plugin, item, () => {
+        if (helpers.deskMount) {
+          renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
+        }
+      });
     };
   }
 
@@ -6574,8 +6604,10 @@ function getCuratorDeskStyles() {
     ".curator-desk-grid.is-horizontal-scroll::-webkit-scrollbar-thumb{background:rgba(143,104,61,0.34);border-radius:999px;}",
     ".curator-desk-grid.is-horizontal-scroll .curator-desk-card{flex:0 0 356px;max-width:356px;scroll-snap-align:start;}",
     ".curator-desk-grid.is-horizontal-scroll .curator-desk-card.is-standby-card{flex:0 0 300px;max-width:300px;}",
-    ".curator-local-ep-pill{display:inline-flex;align-items:center;padding:1px 6px;font-size:10.5px;font-weight:600;border-radius:4px;cursor:pointer;background:rgba(58,125,92,0.12);color:#3a7d5c;border:1px solid rgba(58,125,92,0.3);}",
+    ".curator-local-ep-pill{display:inline-flex;align-items:center;padding:2px 7px;font-size:12px;font-weight:600;border-radius:5px;cursor:pointer;background:rgba(58,125,92,0.12);color:#3a7d5c;border:1px solid rgba(58,125,92,0.3);}",
     ".curator-local-ep-pill.has-new{background:rgba(198,116,32,0.16);color:#b35c0e;border-color:rgba(198,116,32,0.42);}",
+    ".curator-local-ep-pill.is-warn{background:rgba(217,130,43,0.16);color:#c56b14;border-color:rgba(217,130,43,0.46);}",
+    ".theme-dark .curator-local-ep-pill.is-warn{color:#f0a756;border-color:rgba(240,167,86,0.42);}",
     ".curator-standby-right-actions{display:inline-flex;align-items:center;gap:6px;}",
     ".curator-standby-note-btn.is-dl{color:#8f683d;font-weight:600;}",
     ".curator-action-link.is-download{border-color:rgba(143,104,61,0.42);color:#8f683d;font-weight:600;}",

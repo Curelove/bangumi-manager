@@ -104,8 +104,14 @@ function resolveCustomPortraitOverride(plugin, stateKey) {
   if (!raw) return "";
   if (/^(?:https?:|data:|app:|capacitor:|file:)/i.test(raw)) return raw;
   const cleanPath = raw.replace(/\\/g, "/");
-  if (/^[A-Za-z]:\//.test(cleanPath)) {
-    return "file:///" + encodeURI(cleanPath);
+  const isExternalAbs =
+    /^[A-Za-z]:\//.test(cleanPath) ||
+    cleanPath.startsWith("//") ||
+    raw.startsWith("\\\\") ||
+    /^\/(?:Users|Volumes|home|mnt|media|var|opt|tmp|private)\//i.test(cleanPath);
+  if (isExternalAbs) {
+    const { toExternalLocalMediaUrl } = require("./platform-env.js");
+    return toExternalLocalMediaUrl(raw);
   }
   try {
     if (plugin?.app?.vault?.adapter?.getResourcePath) {
@@ -859,10 +865,11 @@ function resolveRoxyAssetUrl(plugin, relativeFile) {
     if (String(relativeFile || "").startsWith("chibi_")) {
       return resolveRoxyChibiAssetUrl(plugin, relativeFile);
     }
+    const cfgDir = String(plugin?.app?.vault?.configDir || ".obsidian").replace(/\\/g, "/").replace(/\/+$/, "");
     const baseDir =
       plugin && plugin.manifest && plugin.manifest.dir
         ? plugin.manifest.dir
-        : ".obsidian/plugins/bangumi-manager";
+        : `${cfgDir}/plugins/bangumi-manager`;
     const cleanRel = `${baseDir.replace(/\/$/, "")}/assets/roxy/${relativeFile.replace(/^\//, "")}`;
     if (
       plugin &&
@@ -890,10 +897,11 @@ function resolveRoxyAssetUrl(plugin, relativeFile) {
 function resolveRoxyChibiAssetUrl(plugin, fileName) {
   try {
     const cleanName = String(fileName || "chibi_guide.png").replace(/^\//, "");
+    const cfgDir = String(plugin?.app?.vault?.configDir || ".obsidian").replace(/\\/g, "/").replace(/\/+$/, "");
     const baseDir =
       plugin && plugin.manifest && plugin.manifest.dir
         ? plugin.manifest.dir.replace(/\\/g, "/").replace(/\/$/, "")
-        : ".obsidian/plugins/bangumi-manager";
+        : `${cfgDir}/plugins/bangumi-manager`;
     const cleanRel = `${baseDir}/assets/roxy-chibi-sprites/${cleanName}`;
 
     // 检测本地插件目录是否存在该文件（移动端无 Node fs 时安全回退至内置像素形象或已存在 adapter 资源）

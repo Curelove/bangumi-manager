@@ -39,7 +39,8 @@ function getDiskCachePath(app, subjectId) {
       basePath = app.vault.adapter.getBasePath();
     }
     if (!basePath) return null;
-    const cacheDir = path.join(basePath, ".obsidian", "plugins", "bangumi-manager", ".cache", "netaba");
+    const configDir = String(app?.vault?.configDir || ".obsidian").replace(/[\\/]+$/, "");
+    const cacheDir = path.join(basePath, configDir, "plugins", "bangumi-manager", ".cache", "netaba");
     ensureDirSync(cacheDir);
     return path.join(cacheDir, `${subjectId}.json`);
   } catch (e) {
@@ -91,7 +92,7 @@ async function requestNetabaApi(url) {
         url,
         method: "GET",
         headers: {
-          "User-Agent": "ObsidianBangumiManager/0.8.0 (https://github.com/Curelove/bangumi-manager)"
+          "User-Agent": "ObsidianBangumiManager/0.8.1 (https://github.com/Curelove/bangumi-manager)"
         }
       });
       if (resp.status === 200) {

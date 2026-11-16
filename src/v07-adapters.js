@@ -272,13 +272,21 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
     const now = Date.now();
     if (!entry || now - entry.ts > 30000) {
       let videoFiles = null;
+      let meta = null;
       try {
         const r = inspectLocalFolder(folderPath, 0);
         if (r && !r.error && Array.isArray(r.videoFiles)) {
           videoFiles = r.videoFiles;
+          meta = {
+            hasAttentionNeeded: Boolean(r.hasAttentionNeeded),
+            duplicateCount: Number(r.anomalies?.duplicateEpisodes?.length) || 0,
+            suspectedParent: Boolean(r.anomalies?.suspectedParentContainer?.detected),
+            subfolderCount: Number(r.anomalies?.subfolderStats?.totalInSubfolders) || 0,
+            extraCount: Array.isArray(r.extraFiles) ? r.extraFiles.length : 0
+          };
         }
       } catch (_) {}
-      entry = { ts: now, videoFiles };
+      entry = { ts: now, videoFiles, meta };
       folderCache.set(folderPath, entry);
     }
     if (!entry.videoFiles) return null;
@@ -292,11 +300,17 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
     }
     unseen.sort((a, b) => (Number(a.episode) || 0) - (Number(b.episode) || 0));
     const exactNext = unseen.find((v) => Number(v.episode) === watched + 1) || unseen[0] || null;
+    const m = entry.meta || {};
     return {
       nextEpisodeFile: exactNext,
       nextEpisodeNumber: exactNext ? Number(exactNext.episode) || null : null,
       maxLocalEpisode: maxEp,
-      newCount: unseen.length
+      newCount: unseen.length,
+      hasAttentionNeeded: Boolean(m.hasAttentionNeeded),
+      duplicateCount: Number(m.duplicateCount) || 0,
+      suspectedParent: Boolean(m.suspectedParent),
+      subfolderCount: Number(m.subfolderCount) || 0,
+      extraCount: Number(m.extraCount) || 0
     };
   };
 
@@ -351,7 +365,11 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       scheduleSaveSettings();
     },
     addNew: () => {
-      if (typeof plugin.openSearchModal === "function") plugin.openSearchModal();
+      if (typeof plugin.openSingleAnimeImportModal === "function") {
+        plugin.openSingleAnimeImportModal("");
+      } else if (typeof plugin.openSearchModal === "function") {
+        plugin.openSearchModal();
+      }
     },
     actions: {
       play: async (it, local, ep) => {
@@ -458,6 +476,15 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       openDownload: (it, onDone) => {
         if (animeDownloadService && typeof animeDownloadService.openAnimeDownloadModal === "function") {
           animeDownloadService.openAnimeDownloadModal(plugin, it, () => {
+            if (it && it.downloadPath) folderCache.delete(String(it.downloadPath).trim());
+            if (typeof onDone === "function") onDone();
+            if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();
+          });
+        }
+      },
+      openLocalDiagnostics: (it, onDone) => {
+        if (animeDownloadService && typeof animeDownloadService.openLocalFolderDiagnosticsModal === "function") {
+          animeDownloadService.openLocalFolderDiagnosticsModal(plugin, it, () => {
             if (it && it.downloadPath) folderCache.delete(String(it.downloadPath).trim());
             if (typeof onDone === "function") onDone();
             if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();

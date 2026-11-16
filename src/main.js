@@ -119,6 +119,7 @@ var DEFAULT_SETTINGS = {
   baseFolderPathManuallySet: false,
   enableBaseFileGeneration: false,
   localAnimeRoot: "",
+  preferredEpisodeFiles: {},
   checkIntervalSeconds: 60,
   checkOnStartup: true,
   checkOnSave: true,
@@ -721,6 +722,10 @@ var BangumiManagerPlugin = class extends Plugin {
       logs: []
     };
 
+    globalThis.__BangumiPreferredEpisodeFiles =
+      this.settings.preferredEpisodeFiles && typeof this.settings.preferredEpisodeFiles === "object"
+        ? this.settings.preferredEpisodeFiles
+        : {};
     await this.saveData(this.settings);
     this.ratingSync = new RatingSyncManager(this);
 
@@ -1364,6 +1369,10 @@ var BangumiManagerPlugin = class extends Plugin {
       return;
     }
 
+    globalThis.__BangumiPreferredEpisodeFiles =
+      this.settings.preferredEpisodeFiles && typeof this.settings.preferredEpisodeFiles === "object"
+        ? this.settings.preferredEpisodeFiles
+        : {};
     await this.saveData(this.settings);
     const nextSeconds = Math.max(10, Number(this.settings.checkIntervalSeconds) || 60);
     if (!this.statusTimer || this._activeStatusIntervalSec !== nextSeconds) {
@@ -1466,6 +1475,17 @@ var BangumiManagerPlugin = class extends Plugin {
         await this.openScoreDashboardView();
       }
     );
+  }
+
+  getAnimeMarkdownFiles() {
+    if (!this.app?.vault || typeof this.app.vault.getMarkdownFiles !== "function") {
+      return [];
+    }
+    return this.app.vault.getMarkdownFiles().filter((f) => this.isTargetNote(f));
+  }
+
+  async openSearchModal(initialQuery = "") {
+    return await this.openSingleAnimeImportModal(initialQuery);
   }
 
   isTargetNote(file) {
@@ -2725,20 +2745,29 @@ views:
       }
       return;
     }
+    if (showNotice && this._v07LocalFolderCache && typeof this._v07LocalFolderCache.clear === "function") {
+      this._v07LocalFolderCache.clear();
+    }
     const files = this.app.vault.getMarkdownFiles();
     let checked = 0;
     let updated = 0;
     let skipped = 0;
     let failed = 0;
+    const attentionNames = [];
     for (const file of files) {
       if (!this.isTargetNote(file)) {
         continue;
       }
       checked += 1;
       try {
+        const metaOut = {};
         const result = await this.checkOneLocalStatus(
-          file
+          file,
+          metaOut
         );
+        if (metaOut.hasAttentionNeeded) {
+          attentionNames.push(file.basename);
+        }
         if (result === "updated") {
           updated += 1;
         } else {
@@ -2754,13 +2783,19 @@ views:
       }
     }
     if (showNotice) {
+      const attnSuffix =
+        attentionNames.length > 0
+          ? `\n提示：《${attentionNames.slice(0, 3).join("》《")}》${
+              attentionNames.length > 3 ? ` 等 ${attentionNames.length} 部` : ""
+            }检测到同集多版本或目录层级待核对，可在对应作品卡片点击提示标签处理。`
+          : "";
       new Notice(
-        "\u672C\u5730\u72B6\u6001\u68C0\u67E5\u5B8C\u6210\uFF1A\u68C0\u67E5 " + checked + " \u7BC7\uFF0C\u66F4\u65B0 " + updated + " \u7BC7\uFF0C\u8DF3\u8FC7 " + skipped + " \u7BC7\uFF0C\u5931\u8D25 " + failed + " \u7BC7",
+        "\u672C\u5730\u72B6\u6001\u68C0\u67E5\u5B8C\u6210\uFF1A\u68C0\u67E5 " + checked + " \u7BC7\uFF0C\u66F4\u65B0 " + updated + " \u7BC7\uFF0C\u8DF3\u8FC7 " + skipped + " \u7BC7\uFF0C\u5931\u8D25 " + failed + " \u7BC7" + attnSuffix,
         8e3
       );
     }
   }
-  async checkOneLocalStatus(file) {
+  async checkOneLocalStatus(file, metaOut = null) {
     if (!isDesktopNodeAvailable()) {
       return "skipped";
     }
@@ -2797,6 +2832,9 @@ views:
       downloadPath,
       watchedEpisodes
     );
+    if (metaOut && typeof metaOut === "object") {
+      metaOut.hasAttentionNeeded = Boolean(result?.hasAttentionNeeded);
+    }
     const newContent = updateFolderLine(
       updateFrontmatterField(
         content,
