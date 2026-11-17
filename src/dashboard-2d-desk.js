@@ -15,7 +15,8 @@ const v07Styles = require("./v07-styles.js");
 const {
   animateWorkspaceGlide,
   paperSlipSwap,
-  scrollUnrollMorph
+  scrollUnrollMorph,
+  withPreservedScroll
 } = require("./v08-motion-and-lens.js");
 
 /**
@@ -2195,9 +2196,13 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
   };
 
   if (pendingCatalogAnim && bodyMount.childNodes.length > 0) {
-    paperSlipSwap(bodyMount, paintCatalogBody, pendingCatalogAnim);
+    paperSlipSwap(
+      bodyMount,
+      paintCatalogBody,
+      Object.assign({ frameless: true }, pendingCatalogAnim)
+    );
   } else {
-    paintCatalogBody();
+    withPreservedScroll(bodyMount, paintCatalogBody);
   }
 
   if (scrollParent && savedScrollTop > 0) {
@@ -7412,35 +7417,35 @@ function getCuratorDeskStyles() {
     ".curator-char-card-avatar.is-clickable-portrait:hover .curator-char-avatar-hover-pill,.curator-char-draft-poster.is-clickable-portrait:hover .curator-char-avatar-hover-pill{opacity:1;transform:translateY(0);}",
     ".curator-char-attr-chip.is-height{cursor:pointer;background:rgba(143,104,61,0.14);color:#8f683d;font-weight:700;border:1px solid rgba(143,104,61,0.28);transition:all .14s ease;}",
     ".curator-char-attr-chip.is-height:hover{background:#8f683d;color:#fffdf9;}",
-    /* 等身标尺陈列架 (.curator-char-height-lineup-wrap) */
-    ".curator-char-height-lineup-wrap{display:flex;flex-direction:column;gap:10px;animation:curatorFadeSlideIn .26s cubic-bezier(0.22,1,0.36,1);}",
+    /* 等身标尺陈列架 (.curator-char-height-lineup-wrap) — 不设内层二次动画，避免与面板切换动效解除时叠加重播闪烁 */
+    ".curator-char-height-lineup-wrap{display:flex;flex-direction:column;gap:10px;}",
     "@keyframes curatorFadeSlideIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}",
     ".curator-height-calibrator-bar{display:flex;flex-direction:column;gap:8px;padding:10px 14px;border-radius:10px;border:1px solid color-mix(in srgb, #8f683d 32%, var(--background-modifier-border));background:linear-gradient(180deg, color-mix(in srgb, var(--background-secondary) 72%, #f7efe2 28%), var(--background-primary));box-shadow:0 3px 12px rgba(42,32,22,0.05);}",
     ".curator-height-summary-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}",
     ".curator-height-stats-pills{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}",
-    ".curator-height-stat-pill{font-size:11px;font-weight:600;padding:2.5px 9px;border-radius:999px;background:var(--background-secondary);color:var(--text-muted);border:1px solid var(--background-modifier-border);}",
+    ".curator-height-stat-pill{font-size:12px;font-weight:600;padding:2.5px 9px;border-radius:999px;background:var(--background-secondary);color:var(--text-muted);border:1px solid var(--background-modifier-border);}",
     ".curator-height-stat-pill.is-gold{background:rgba(143,104,61,0.14);color:#8f683d;border-color:rgba(143,104,61,0.35);font-weight:700;}",
     ".curator-height-tools-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}",
-    ".curator-height-ref-ctrl{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:6px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);font-size:11px;}",
+    ".curator-height-ref-ctrl{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:6px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);font-size:12px;}",
     ".curator-height-ref-label{font-weight:700;color:#3b6998;}",
-    ".curator-height-ref-val{font-weight:800;color:var(--text-normal);min-width:44px;}",
+    ".curator-height-ref-val{font-weight:800;color:var(--text-normal);min-width:46px;}",
     ".curator-height-ref-slider{width:95px !important;cursor:pointer;}",
     ".curator-height-active-strip{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding-top:8px;border-top:1px dashed color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));}",
     ".curator-height-sel-title{display:inline-flex;align-items:center;gap:7px;}",
-    ".curator-height-sel-tag{font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:4px;background:#8f683d;color:#fffdf9;}",
+    ".curator-height-sel-tag{font-size:12px;font-weight:800;padding:2px 8px;border-radius:4px;background:#8f683d;color:#fffdf9;}",
     ".curator-height-sel-name{font-size:13px;font-weight:800;color:var(--text-normal);}",
     ".curator-height-sel-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}",
-    ".curator-height-ctrl-group{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-muted);}",
+    ".curator-height-ctrl-group{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-muted);}",
     ".curator-height-ctrl-k{font-weight:700;color:var(--text-normal);}",
-    ".curator-height-ctrl-v{min-width:42px;text-align:right;font-weight:700;color:#8f683d;}",
+    ".curator-height-ctrl-v{min-width:44px;text-align:right;font-weight:700;color:#8f683d;}",
     ".curator-height-cm-input{width:64px !important;padding:2px 6px !important;font-size:12px !important;text-align:center;}",
     ".curator-height-mini-slider{width:88px !important;cursor:pointer;}",
     ".curator-height-sel-actions{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;}",
     /* 等身标尺主舞台（致敬编年魔导书脊陈列架） */
-    ".curator-char-height-stage{display:grid;grid-template-columns:46px 1fr;gap:6px;padding:18px 14px 12px 8px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));background:linear-gradient(180deg, color-mix(in srgb, var(--background-secondary) 52%, #f8f2e7 48%) 0%, color-mix(in srgb, var(--background-primary) 88%, #efe4d2 12%) 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.45), 0 4px 16px rgba(42,32,22,0.06);}",
+    ".curator-char-height-stage{display:grid;grid-template-columns:50px 1fr;gap:6px;padding:18px 14px 12px 8px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));background:linear-gradient(180deg, color-mix(in srgb, var(--background-secondary) 52%, #f8f2e7 48%) 0%, color-mix(in srgb, var(--background-primary) 88%, #efe4d2 12%) 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.45), 0 4px 16px rgba(42,32,22,0.06);}",
     ".curator-height-y-axis{position:relative;height:380px;margin-bottom:50px;user-select:none;}",
     ".curator-height-y-axis.is-studio-axis{height:380px;margin-bottom:0;}",
-    ".curator-height-y-tick{position:absolute;right:4px;transform:translateY(50%);font-size:10px;font-weight:700;color:var(--text-muted);line-height:1;}",
+    ".curator-height-y-tick{position:absolute;right:4px;transform:translateY(50%);font-size:12px;font-weight:700;color:var(--text-muted);line-height:1;}",
     ".curator-height-y-tick-minor{position:absolute;right:0;width:6px;height:1px;background:color-mix(in srgb, #8f683d 35%, transparent);}",
     ".curator-height-plot-viewport{position:relative;min-height:430px;overflow-x:auto;overflow-y:hidden;padding-bottom:4px;}",
     ".curator-height-grid-overlay{position:absolute;left:0;right:0;top:0;height:380px;pointer-events:none;z-index:1;}",
@@ -7450,27 +7455,27 @@ function getCuratorDeskStyles() {
     ".curator-height-grid-line.is-baseline{border-top:3px solid color-mix(in srgb, #8f683d 68%, var(--background-modifier-border));box-shadow:0 2px 8px rgba(143,104,61,0.22);}",
     ".curator-height-ref-line{position:absolute;left:0;right:0;height:0;border-top:2px dashed #3b6998;z-index:6;cursor:ns-resize;margin-bottom:50px;transition:border-color .15s ease;}",
     ".curator-height-ref-line:hover,.curator-height-ref-line.is-dragging{border-top-color:#d49b3b;}",
-    ".curator-height-ref-line-tag{position:absolute;right:10px;top:-19px;padding:1.5px 8px;font-size:10px;font-weight:700;border-radius:999px;background:rgba(59,105,152,0.92);color:#fffdf9;box-shadow:0 2px 6px rgba(0,0,0,0.16);user-select:none;}",
+    ".curator-height-ref-line-tag{position:absolute;right:10px;top:-21px;padding:1.5px 8px;font-size:12px;font-weight:700;border-radius:999px;background:rgba(59,105,152,0.92);color:#fffdf9;box-shadow:0 2px 6px rgba(0,0,0,0.16);user-select:none;}",
     ".curator-height-figures-track{position:relative;z-index:3;display:inline-flex;align-items:flex-end;gap:14px;min-width:100%;padding:0 14px;}",
-    ".curator-height-figure-col{display:flex;flex-direction:column;align-items:center;width:140px;flex:0 0 140px;user-select:none;transition:transform .22s cubic-bezier(0.22,1,0.36,1), width .18s ease;}",
+    ".curator-height-figure-col{display:flex;flex-direction:column;align-items:center;width:140px;flex:0 0 140px;user-select:none;transition:transform .22s cubic-bezier(0.22,1,0.36,1);}",
     ".curator-height-figure-stagebox{position:relative;width:100%;height:380px;display:flex;align-items:flex-end;justify-content:center;cursor:grab;overflow:visible;}",
     ".curator-height-figure-col.is-calibrating .curator-height-figure-stagebox{cursor:grabbing;}",
     ".curator-height-head-marker{position:absolute;left:4px;right:4px;height:0;border-top:1.5px dashed rgba(143,104,61,0.55);z-index:5;pointer-events:none;transition:bottom .22s cubic-bezier(0.22,1,0.36,1), border-color .18s ease;}",
     ".curator-height-figure-col:hover .curator-height-head-marker,.curator-height-figure-col.is-selected .curator-height-head-marker{border-top:2px solid #8f683d;}",
-    ".curator-height-head-badge{position:absolute;left:50%;top:-20px;transform:translateX(-50%);padding:1px 7px;font-size:10px;font-weight:800;border-radius:999px;background:rgba(36,27,18,0.86);color:#f7df9c;border:1px solid rgba(217,167,74,0.55);white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.15);}",
+    ".curator-height-head-badge{position:absolute;left:50%;top:-22px;transform:translateX(-50%);padding:1px 7px;font-size:12px;font-weight:800;border-radius:999px;background:rgba(36,27,18,0.86);color:#f7df9c;border:1px solid rgba(217,167,74,0.55);white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.15);}",
     ".curator-height-head-badge.is-estimated{background:rgba(59,105,152,0.85);color:#eef6ff;border-color:rgba(130,178,228,0.55);}",
-    ".curator-height-stand-box{position:relative;width:100%;display:flex;align-items:flex-end;justify-content:center;overflow:hidden;border-radius:8px 8px 2px 2px;border:1px solid transparent;transition:height .24s cubic-bezier(0.22,1,0.36,1), border-color .18s ease, background .18s ease, box-shadow .18s ease;}",
+    ".curator-height-stand-box{position:relative;width:100%;display:flex;align-items:flex-end;justify-content:center;overflow:hidden;border-radius:8px 8px 2px 2px;border:1px solid transparent;transition:border-color .18s ease, background .18s ease, box-shadow .18s ease;}",
     ".curator-height-figure-col:hover .curator-height-stand-box{border-color:rgba(143,104,61,0.42);background:rgba(143,104,61,0.06);}",
     ".curator-height-figure-col.is-selected .curator-height-stand-box{border-color:#8f683d;background:linear-gradient(180deg, rgba(247,223,156,0.16), rgba(143,104,61,0.12));box-shadow:0 4px 14px rgba(143,104,61,0.18);}",
     /* 关键：立绘图片在等身标尺架中以 height: 100%; width: auto; max-width: none 驱动，绝不因列宽限制产生顶部透明假留白 */
     ".curator-height-stand-img{height:100% !important;width:auto !important;max-width:none !important;flex-shrink:0 !important;display:block;pointer-events:none;filter:drop-shadow(0 4px 8px rgba(28,20,12,0.18));transition:transform .08s linear;}",
     ".curator-height-pedestal{cursor:pointer;margin-top:6px;width:100%;padding:5px 6px;border-radius:6px;border:1px solid color-mix(in srgb, #8f683d 26%, var(--background-modifier-border));background:var(--background-primary);text-align:center;display:flex;flex-direction:column;gap:1px;transition:all .16s ease;}",
     ".curator-height-figure-col.is-selected .curator-height-pedestal,.curator-height-pedestal:hover{border-color:#8f683d;background:color-mix(in srgb, #8f683d 12%, var(--background-primary));}",
-    ".curator-height-pedestal-name{font-size:11.5px;font-weight:800;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
-    ".curator-height-pedestal-meta{font-size:10px;color:var(--text-muted);}",
-    ".curator-height-stage-footnote{font-size:11px;color:var(--text-muted);padding:2px 4px;}",
+    ".curator-height-pedestal-name{font-size:12px;font-weight:800;color:var(--text-normal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+    ".curator-height-pedestal-meta{font-size:12px;color:var(--text-muted);}",
+    ".curator-height-stage-footnote{font-size:12px;color:var(--text-muted);padding:2px 4px;}",
     /* 画报照片墙（Aves 相册风格 · 等高自适应完整无裁切拼图墙） */
-    ".curator-char-photowall-wrap{display:flex;flex-direction:column;gap:8px;animation:curatorFadeSlideIn .26s cubic-bezier(0.22,1,0.36,1);}",
+    ".curator-char-photowall-wrap{display:flex;flex-direction:column;gap:8px;}",
     ".curator-photowall-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:7px 12px;border-radius:8px;border:1px solid color-mix(in srgb, #8f683d 24%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 65%, #f7f0e4 35%);}",
     ".curator-photowall-hint{font-size:11.5px;color:var(--text-muted);font-weight:600;}",
     ".curator-photowall-ctrls{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;}",

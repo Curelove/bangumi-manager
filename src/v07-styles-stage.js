@@ -185,19 +185,23 @@ module.exports = String.raw`
 }
 
 /* ====================== 随机抽选 ====================== */
-.bm7-pick{display:flex;flex-direction:column;gap:14px;position:relative;flex:1;min-width:0;}
+.bm7-pick{display:flex;flex-direction:column;gap:14px;position:relative;flex:1;min-width:0;overflow:visible;}
+.bm7-area-pick,.bm7-area-pick .bm7-panel-body{overflow:visible;}
 .bm7-area-pick .bm7-panel-body{flex:1;display:flex;flex-direction:column;}
 .bm7-pick-scopes{min-width:0;}
-.bm7-pick-stage{display:grid;grid-template-columns:118px minmax(0,1fr);gap:20px;align-items:center;min-height:168px;flex:0 0 auto;padding:8px 0 4px;}
-.bm7-pick-deck{position:relative;width:104px;aspect-ratio:2/3;margin-left:10px;}
+.bm7-pick-stage{display:grid;grid-template-columns:126px minmax(0,1fr);gap:18px;align-items:center;min-height:172px;flex:0 0 auto;padding:10px 2px 8px 6px;overflow:visible;}
+.bm7-pick-deck{position:relative;width:104px;aspect-ratio:2/3;margin-left:16px;overflow:visible;}
 .bm7-pick-card{position:absolute;inset:0;border-radius:9px;overflow:hidden;background:var(--bm7-surface);border:1px solid var(--bm7-line);
-  box-shadow:0 10px 22px -12px rgb(0 0 0 / .5);transition:transform .45s cubic-bezier(.2,.8,.2,1);}
+  box-shadow:0 10px 22px -12px rgb(0 0 0 / .5);transition:transform .38s cubic-bezier(.22,1.15,.36,1),filter .28s ease;}
 .bm7-pick-card .bm7-cover{width:100%;height:100%;}
 .bm7-pick-card.is-back2{transform:translateX(-12px) rotate(-9deg);filter:saturate(.6) brightness(.92);}
 .bm7-pick-card.is-back1{transform:translateX(-5px) rotate(-4deg);filter:saturate(.8);}
 .bm7-pick-card.is-front{transform:rotate(2.5deg);}
-.bm7-pick:hover .bm7-pick-card.is-back2{transform:translateX(-18px) rotate(-12deg);}
-.bm7-pick:hover .bm7-pick-card.is-back1{transform:translateX(-8px) rotate(-5.5deg);}
+.bm7-pick:hover .bm7-pick-card.is-back2{transform:translateX(-16px) rotate(-11.5deg);}
+.bm7-pick:hover .bm7-pick-card.is-back1{transform:translateX(-7px) rotate(-5.2deg);}
+.bm7-pick-deck.is-scope-shift .bm7-pick-card.is-back2{transform:translateX(-3px) rotate(-2deg) scale(.985) !important;transition-duration:.11s;}
+.bm7-pick-deck.is-scope-shift .bm7-pick-card.is-back1{transform:translateX(-1px) rotate(-0.8deg) scale(.99) !important;transition-duration:.11s;}
+.bm7-pick-deck.is-scope-shift .bm7-pick-card.is-front{transform:rotate(0.6deg) scale(.992) !important;transition-duration:.11s;}
 .bm7-pick-blank{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--bm7-ink-3);
   background:repeating-linear-gradient(135deg,transparent 0 7px,color-mix(in srgb,var(--bm7-ink) 4%,transparent) 7px 8px),var(--bm7-surface-2);}
 .bm7-pick-card.is-flip{animation:bm7-flip .14s ease-out;}

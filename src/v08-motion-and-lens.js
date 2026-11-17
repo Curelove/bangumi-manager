@@ -258,6 +258,136 @@ function spawnInkFlourish(hostEl, opts = {}) {
   }, 560);
 }
 
+/**
+ * 捕获元素所有可滚动祖先容器的滚动偏移，并在同步 DOM 清空/重建期间锁住最小高度，
+ * 彻底防止 `empty()` / `clear()` 瞬间高度坍缩触发浏览器自动将滚动条钳制回页首（scrollTop = 0）。
+ */
+function captureScrollAncestors(el) {
+  const list = [];
+  if (!el || typeof window === "undefined") return list;
+  let cur = el.parentElement;
+  while (cur) {
+    try {
+      const cs = getComputedStyle(cur);
+      const oy = cs ? cs.overflowY : "";
+      if (
+        cur.scrollTop > 0 ||
+        cur.scrollLeft > 0 ||
+        oy === "auto" ||
+        oy === "scroll" ||
+        oy === "overlay" ||
+        cur.classList?.contains("view-content") ||
+        cur.classList?.contains("curator-desk-root")
+      ) {
+        list.push({ el: cur, top: cur.scrollTop, left: cur.scrollLeft });
+      }
+    } catch (_) {}
+    cur = cur.parentElement;
+  }
+  const docScroll = typeof document !== "undefined" ? document.scrollingElement : null;
+  if (docScroll && !list.some((x) => x.el === docScroll) && (docScroll.scrollTop > 0 || docScroll.scrollLeft > 0)) {
+    list.push({ el: docScroll, top: docScroll.scrollTop, left: docScroll.scrollLeft });
+  }
+  return list;
+}
+
+function restoreScrollAncestors(saved) {
+  if (!Array.isArray(saved) || !saved.length) return;
+  for (const item of saved) {
+    if (!item || !item.el || !item.el.isConnected) continue;
+    if (item.top > 0 && item.el.scrollTop !== item.top) {
+      item.el.scrollTop = item.top;
+    }
+    if (item.left > 0 && item.el.scrollLeft !== item.left) {
+      item.el.scrollLeft = item.left;
+    }
+  }
+}
+
+function clearViewportScrollCushion(hostEl) {
+  if (!hostEl) return;
+  if (typeof hostEl._bm8CleanupScrollCushion === "function") {
+    try {
+      hostEl._bm8CleanupScrollCushion();
+    } catch (_) {}
+    hostEl._bm8CleanupScrollCushion = null;
+  }
+  if (hostEl.style) {
+    hostEl.style.removeProperty("--bm8-anchor-min-h");
+  }
+}
+
+function applyViewportScrollCushion(hostEl, savedScroll, naturalHostH) {
+  if (!hostEl || !Array.isArray(savedScroll) || !savedScroll.length) return;
+  const primary = savedScroll.find(
+    (s) => s && s.el && s.el.isConnected && s.top > 16 && s.el.clientHeight > 80
+  );
+  if (!primary) return;
+  const scroller = primary.el;
+  const targetTop = primary.top;
+  const maxScrollNow = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  if (targetTop <= maxScrollNow + 1) return;
+
+  const shortfall = Math.ceil(targetTop - maxScrollNow);
+  const cushionedMinH = Math.max(0, Math.round(naturalHostH + shortfall));
+  hostEl.classList.add("bm8-anchor-stage");
+  hostEl.style.setProperty("--bm8-anchor-min-h", `${cushionedMinH}px`);
+
+  let activeShortfall = shortfall;
+  let baselineTop = targetTop;
+  const onUserScrollUp = () => {
+    if (!hostEl.isConnected || !scroller.isConnected) {
+      cleanup();
+      return;
+    }
+    const curTop = scroller.scrollTop;
+    if (curTop < baselineTop - 6) {
+      const deltaUp = baselineTop - curTop;
+      baselineTop = curTop;
+      activeShortfall = Math.max(0, activeShortfall - deltaUp);
+      if (activeShortfall <= 2) {
+        cleanup();
+      } else {
+        hostEl.style.setProperty("--bm8-anchor-min-h", `${Math.round(naturalHostH + activeShortfall)}px`);
+      }
+    }
+  };
+  const cleanup = () => {
+    scroller.removeEventListener("scroll", onUserScrollUp);
+    if (hostEl.style) hostEl.style.removeProperty("--bm8-anchor-min-h");
+    if (hostEl._bm8CleanupScrollCushion === cleanup) {
+      hostEl._bm8CleanupScrollCushion = null;
+    }
+  };
+  scroller.addEventListener("scroll", onUserScrollUp, { passive: true });
+  hostEl._bm8CleanupScrollCushion = cleanup;
+}
+
+function withPreservedScroll(hostEl, mutateFn, opts = {}) {
+  if (!hostEl) {
+    return mutateFn && mutateFn();
+  }
+  const savedScroll = captureScrollAncestors(hostEl);
+  const prevMinH = hostEl.style.minHeight;
+  const prevH = hostEl.offsetHeight;
+  clearViewportScrollCushion(hostEl);
+  if (prevH > 24) {
+    hostEl.style.minHeight = `${prevH}px`;
+  }
+  let res;
+  try {
+    res = mutateFn && mutateFn();
+  } finally {
+    hostEl.style.minHeight = prevMinH;
+    if (opts.anchorScroll !== false) {
+      const naturalH = hostEl.offsetHeight;
+      applyViewportScrollCushion(hostEl, savedScroll, naturalH);
+    }
+    restoreScrollAncestors(savedScroll);
+  }
+  return res;
+}
+
 function inkPageSwap(hostEl, renderNext, opts = {}) {
   if (!hostEl) {
     renderNext && renderNext();
@@ -265,18 +395,18 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
   }
   const tier = getTier(hostEl);
   if (tier === "off") {
-    renderNext();
+    withPreservedScroll(hostEl, renderNext);
     return;
   }
   const rootEl = hostEl.closest ? hostEl.closest(".bm7-root") : null;
   if (!rootEl) {
-    renderNext();
+    withPreservedScroll(hostEl, renderNext);
     return;
   }
 
   // 轻巧档（lite）：复用低显存轻量淡入微滑，不克隆整页图层
   if (tier === "lite") {
-    renderNext();
+    withPreservedScroll(hostEl, renderNext);
     const nextChild = hostEl.firstElementChild;
     if (nextChild) {
       nextChild.classList.remove("bm8-soft-swap");
@@ -309,7 +439,7 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
     }
   }
 
-  renderNext();
+  withPreservedScroll(hostEl, renderNext);
 
   const nextChild = hostEl.firstElementChild;
   if (!nextChild) return;
@@ -389,7 +519,7 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   }
   const tier = getTier(hostEl);
   if (tier === "off") {
-    renderNext();
+    withPreservedScroll(hostEl, renderNext);
     return;
   }
 
@@ -399,86 +529,148 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     hostEl._bm8SlipTid = 0;
   }
   hostEl.querySelectorAll(":scope > .bm8-memo-slip-sheet").forEach((n) => n.remove());
+  hostEl.style.height = "";
+  hostEl.style.overflow = "";
+  hostEl.style.transition = "";
 
+  const savedScroll = captureScrollAncestors(hostEl);
   const prevH = hostEl.offsetHeight;
 
-  // 轻巧档（lite）：轻量淡入微滑 + 柔和高度插值（低显存零克隆）
+  // 轻巧档（lite）：轻量淡入微滑 + 柔和高度插值 + 滚动位置锁定（低显存零克隆）
   if (tier === "lite") {
-    renderNext();
+    clearViewportScrollCushion(hostEl);
+    if (prevH > 24) hostEl.style.minHeight = `${prevH}px`;
+    try {
+      renderNext();
+    } finally {
+      hostEl.style.minHeight = "";
+    }
+    const naturalH = hostEl.offsetHeight;
+    if (opts.anchorScroll !== false) {
+      applyViewportScrollCushion(hostEl, savedScroll, naturalH);
+    }
     const nextH = hostEl.offsetHeight;
     hostEl.classList.remove("bm8-paper-lite-in");
     void hostEl.offsetWidth;
     hostEl.classList.add("bm8-paper-lite-in");
-    if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 3 && !opts.skipHeight) {
+    if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 4 && !opts.skipHeight) {
       hostEl.style.height = `${prevH}px`;
-      hostEl.style.overflow = "hidden";
+      if (!opts.allowOverflow) hostEl.style.overflow = "hidden";
       void hostEl.offsetWidth;
-      hostEl.style.transition = "height 220ms cubic-bezier(0.22, 1, 0.36, 1)";
+      restoreScrollAncestors(savedScroll);
+      hostEl.style.transition = "height 210ms cubic-bezier(0.22, 1, 0.36, 1)";
       hostEl.style.height = `${nextH}px`;
+    } else {
+      restoreScrollAncestors(savedScroll);
     }
     hostEl._bm8SlipTid = setTimeout(() => {
       hostEl.classList.remove("bm8-paper-lite-in");
       hostEl.style.height = "";
       hostEl.style.overflow = "";
       hostEl.style.transition = "";
-    }, 235);
+      restoreScrollAncestors(savedScroll);
+      hostEl._bm8SlipTid = 0;
+    }, 230);
     return;
   }
 
-  // 丰富档（full）：旧便签稿纸带轻微纸张折影向侧下方滑落，后方新面板从纸页下自然清透显影
+  // 丰富档（full）：克隆宿主自身以 100% 保留 Grid / Flex / Gap / Padding 布局，杜绝子元素错排与边缘截断
   let memoSheet = null;
-  if (hostEl.childElementCount > 0 && prevH > 24) {
+  if (hostEl.childElementCount > 0 && prevH > 24 && !opts.noGhost) {
     try {
+      const clsList = [dir < 0 ? "is-reverse" : "", opts.frameless ? "is-frameless" : ""]
+        .filter(Boolean)
+        .join(" ");
       memoSheet = h("div.bm8-memo-slip-sheet", {
-        cls: dir < 0 ? "is-reverse" : "",
+        cls: clsList,
         attr: { "aria-hidden": "true" }
       });
-      Array.from(hostEl.children).forEach((ch) => {
-        if (ch.classList && ch.classList.contains("bm8-memo-slip-sheet")) return;
-        const cloned = ch.cloneNode(true);
-        cloned.querySelectorAll && cloned.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
-        memoSheet.appendChild(cloned);
+      const hostClone = hostEl.cloneNode(true);
+      hostClone.removeAttribute("id");
+      hostClone.classList.remove("bm8-paper-lite-in", "bm8-paper-under-reveal", "bm8-anchor-stage");
+      hostClone.style.removeProperty("--bm8-anchor-min-h");
+      hostClone.style.height = "auto";
+      hostClone.style.minHeight = "0";
+      hostClone.style.maxHeight = "none";
+      hostClone.style.overflow = "visible";
+      hostClone.style.transition = "none";
+      hostClone.style.animation = "none";
+      hostClone.style.position = "static";
+      hostClone.style.margin = "0";
+      hostClone.style.width = "100%";
+      hostClone.style.boxSizing = "border-box";
+      hostClone.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
+      hostClone.querySelectorAll(".bm8-memo-slip-sheet").forEach((n) => n.remove());
+      hostClone.querySelectorAll(".bm8-paper-under-reveal, .is-frameless-in, .is-frameless-in-rev").forEach((n) => {
+        n.classList.remove("bm8-paper-under-reveal", "is-frameless-in", "is-frameless-in-rev");
       });
+      memoSheet.appendChild(hostClone);
     } catch (_) {
       memoSheet = null;
     }
   }
 
-  renderNext();
+  clearViewportScrollCushion(hostEl);
+  if (prevH > 24) hostEl.style.minHeight = `${prevH}px`;
+  try {
+    renderNext();
+  } finally {
+    hostEl.style.minHeight = "";
+  }
+  const naturalH = hostEl.offsetHeight;
+  if (opts.anchorScroll !== false) {
+    applyViewportScrollCushion(hostEl, savedScroll, naturalH);
+  }
   const nextH = hostEl.offsetHeight;
 
   const pos = getComputedStyle(hostEl).position;
   if (pos === "static") hostEl.style.position = "relative";
 
+  const revealedChildren = [];
   Array.from(hostEl.children).forEach((ch) => {
     if (ch === memoSheet) return;
     ch.classList.remove("bm8-paper-under-reveal");
+    let hadBaseAnim = false;
+    try {
+      const baseAnim = getComputedStyle(ch).animationName;
+      hadBaseAnim = Boolean(baseAnim && baseAnim !== "none");
+    } catch (_) {}
     void ch.offsetWidth;
     ch.classList.add("bm8-paper-under-reveal");
+    if (opts.frameless) {
+      ch.classList.add(dir < 0 ? "is-frameless-in-rev" : "is-frameless-in");
+    }
+    revealedChildren.push({ el: ch, hadBaseAnim });
   });
 
   if (memoSheet) {
     hostEl.appendChild(memoSheet);
   }
 
-  if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 3 && !opts.skipHeight) {
+  if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 4 && !opts.skipHeight) {
     hostEl.style.height = `${prevH}px`;
-    hostEl.style.overflow = "clip";
+    if (!opts.allowOverflow) hostEl.style.overflow = "clip";
     void hostEl.offsetWidth;
-    hostEl.style.transition = "height 320ms cubic-bezier(0.22, 1, 0.36, 1)";
+    restoreScrollAncestors(savedScroll);
+    hostEl.style.transition = "height 300ms cubic-bezier(0.22, 1, 0.36, 1)";
     hostEl.style.height = `${nextH}px`;
-  } else if (memoSheet) {
-    hostEl.style.overflow = "clip";
+  } else {
+    // 高度基本不变时绝不强加 overflow: clip，保护扇形叠卡、阴影与悬浮徽章完整无损
+    restoreScrollAncestors(savedScroll);
   }
 
   hostEl._bm8SlipTid = setTimeout(() => {
     if (memoSheet && memoSheet.parentNode) memoSheet.remove();
-    Array.from(hostEl.children).forEach((ch) => ch.classList.remove("bm8-paper-under-reveal"));
+    revealedChildren.forEach(({ el, hadBaseAnim }) => {
+      if (hadBaseAnim && el.style) el.style.animation = "none";
+      el.classList.remove("bm8-paper-under-reveal", "is-frameless-in", "is-frameless-in-rev");
+    });
     hostEl.style.height = "";
     hostEl.style.overflow = "";
     hostEl.style.transition = "";
+    restoreScrollAncestors(savedScroll);
     hostEl._bm8SlipTid = 0;
-  }, 350);
+  }, 330);
 }
 
 function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
@@ -488,7 +680,7 @@ function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
   }
   const tier = getTier(hostEl);
   if (tier === "off") {
-    renderNext();
+    withPreservedScroll(hostEl, renderNext);
     return;
   }
 
@@ -497,12 +689,22 @@ function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
     hostEl._bm8ScrollTid = 0;
   }
   hostEl.querySelectorAll(":scope > .bm8-scroll-roller").forEach((n) => n.remove());
+  hostEl.style.height = "";
+  hostEl.style.overflow = "";
+  hostEl.style.transition = "";
 
+  const savedScroll = captureScrollAncestors(hostEl);
   const fromH = Math.max(0, hostEl.offsetHeight);
-  renderNext();
+  if (fromH > 24) hostEl.style.minHeight = `${fromH}px`;
+  try {
+    renderNext();
+  } finally {
+    hostEl.style.minHeight = "";
+  }
   const toH = Math.max(0, hostEl.offsetHeight);
 
   if (Math.abs(toH - fromH) < 4) {
+    restoreScrollAncestors(savedScroll);
     hostEl.classList.remove("bm8-paper-lite-in");
     void hostEl.offsetWidth;
     hostEl.classList.add("bm8-paper-lite-in");
@@ -511,7 +713,7 @@ function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
   }
 
   const expanding = typeof opts.expanding === "boolean" ? opts.expanding : toH > fromH;
-  const dur = tier === "lite" ? 280 : 420;
+  const dur = tier === "lite" ? 260 : 380;
   const pos = getComputedStyle(hostEl).position;
   if (pos === "static") hostEl.style.position = "relative";
 
@@ -532,6 +734,7 @@ function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
   hostEl.style.height = `${fromH}px`;
   hostEl.style.overflow = "hidden";
   void hostEl.offsetWidth;
+  restoreScrollAncestors(savedScroll);
   hostEl.style.transition = `height ${dur}ms cubic-bezier(0.22, 1, 0.36, 1)`;
   hostEl.style.height = `${toH}px`;
 
@@ -1957,34 +2160,68 @@ const MOTION_AND_LENS_CSS = String.raw`
   overflow: hidden !important;
   border-radius: 10px;
   background: var(--bm7-panel-bg, var(--bm7-surface)) !important;
-  border-top: 1px solid color-mix(in srgb, var(--bm7-accent) 26%, var(--bm7-line));
-  box-shadow: 0 16px 32px -14px rgb(20 18 14 / .28), 0 1px 0 rgb(255 255 255 / .22) inset !important;
+  border-top: 1px solid color-mix(in srgb, var(--bm7-accent) 22%, var(--bm7-line));
+  box-shadow: 0 12px 26px -14px rgb(20 18 14 / .22), 0 1px 0 rgb(255 255 255 / .18) inset !important;
   transform-origin: 18% 0%;
-  will-change: transform, opacity;
-  animation: bm8-memo-slip-out .33s cubic-bezier(.32, .06, .24, 1) forwards;
+  animation: bm8-memo-slip-out .29s cubic-bezier(.32, .06, .24, 1) forwards;
 }
-.bm8-memo-slip-sheet.is-reverse {
+.bm8-memo-slip-sheet.is-frameless {
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0;
+  background: transparent !important;
+  overflow: visible !important;
+  transform-origin: 50% 50%;
+  animation: bm8-frameless-out .10s cubic-bezier(.4, 0, 1, 1) forwards;
+}
+.bm8-memo-slip-sheet.is-frameless.is-reverse {
+  transform-origin: 50% 50%;
+  animation-name: bm8-frameless-out-rev;
+}
+.bm8-memo-slip-sheet:not(.is-frameless).is-reverse {
   transform-origin: 82% 0%;
   animation-name: bm8-memo-slip-out-rev;
 }
 .bm8-paper-under-reveal {
-  animation: bm8-paper-under-in .32s cubic-bezier(.22, 1, .36, 1) both;
+  animation: bm8-paper-under-in .28s cubic-bezier(.22, 1, .36, 1) both;
+}
+.bm8-paper-under-reveal.is-frameless-in {
+  animation: bm8-frameless-in .21s cubic-bezier(.22, 1, .36, 1) .07s both;
+}
+.bm8-paper-under-reveal.is-frameless-in-rev {
+  animation: bm8-frameless-in-rev .21s cubic-bezier(.22, 1, .36, 1) .07s both;
 }
 .bm8-paper-lite-in {
   animation: bm8-soft-fade .20s cubic-bezier(.22, 1, .36, 1) both;
 }
+@keyframes bm8-frameless-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(-8px, 0, 0); }
+}
+@keyframes bm8-frameless-out-rev {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(8px, 0, 0); }
+}
+@keyframes bm8-frameless-in {
+  from { opacity: 0; transform: translate3d(8px, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes bm8-frameless-in-rev {
+  from { opacity: 0; transform: translate3d(-8px, 0, 0); }
+  to { opacity: 1; transform: none; }
+}
 @keyframes bm8-memo-slip-out {
   0% { opacity: 1; transform: translate3d(0, 0, 0) rotateZ(0deg); }
-  28% { opacity: .94; transform: translate3d(-6px, 8px, 0) rotateZ(-1.1deg); }
-  100% { opacity: 0; transform: translate3d(-24px, 34px, 0) rotateZ(-2.8deg) scale(.985); }
+  32% { opacity: .88; transform: translate3d(-5px, 6px, 0) rotateZ(-0.8deg); }
+  100% { opacity: 0; transform: translate3d(-16px, 22px, 0) rotateZ(-1.8deg); }
 }
 @keyframes bm8-memo-slip-out-rev {
   0% { opacity: 1; transform: translate3d(0, 0, 0) rotateZ(0deg); }
-  28% { opacity: .94; transform: translate3d(6px, 8px, 0) rotateZ(1.1deg); }
-  100% { opacity: 0; transform: translate3d(24px, 34px, 0) rotateZ(2.8deg) scale(.985); }
+  32% { opacity: .88; transform: translate3d(5px, 6px, 0) rotateZ(0.8deg); }
+  100% { opacity: 0; transform: translate3d(16px, 22px, 0) rotateZ(1.8deg); }
 }
 @keyframes bm8-paper-under-in {
-  from { opacity: .62; transform: translate3d(0, 5px, 0) scale(.99); }
+  from { opacity: .72; transform: translate3d(0, 4px, 0); }
   to { opacity: 1; transform: none; }
 }
 
@@ -3197,6 +3434,11 @@ const MOTION_AND_LENS_CSS = String.raw`
   background: var(--bm7-accent-soft) !important;
 }
 
+/* 面板切换视口锚点呼吸垫：防止高列表切往紧凑视图时滚动条被强制钳制跳回页首 */
+.bm8-anchor-stage {
+  min-height: var(--bm8-anchor-min-h, 0px);
+}
+
 /* 修复关联提示圆圈内 tag 图标光学居中 */
 .bm7-notice-icon svg {
   margin: 0 !important;
@@ -3206,6 +3448,9 @@ const MOTION_AND_LENS_CSS = String.raw`
 
 module.exports = {
   attachCoverGlowMotion,
+  captureScrollAncestors,
+  restoreScrollAncestors,
+  withPreservedScroll,
   inkPageSwap,
   paperSlipSwap,
   scrollUnrollMorph,

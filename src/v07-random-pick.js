@@ -82,11 +82,33 @@ function renderRandomPicker(host, cfg) {
       state.scope = v;
       state.result = null;
       cfg.onScopeChange && cfg.onScopeChange(v);
+      const list = candidates();
+      root.classList.remove("has-result");
+      // 左侧三张扇形叠卡保持原位零裁切：先轻拢再舒展换牌，右侧文案独立便签滑页，彻底杜绝牌堆边缘被面板截断或闪白
+      const animateDeck = motionEnabled(root);
+      if (animateDeck) {
+        if (deck._shuffleTid) clearTimeout(deck._shuffleTid);
+        deck.classList.add("is-scope-shift");
+        deck._shuffleTid = setTimeout(() => {
+          updateIdleDeckCovers(list);
+          requestAnimationFrame(() => {
+            deck.classList.remove("is-scope-shift");
+          });
+          deck._shuffleTid = 0;
+        }, 90);
+      } else {
+        updateIdleDeckCovers(list);
+      }
       try {
         const { paperSlipSwap } = require("./v08-motion-and-lens.js");
-        paperSlipSwap(stage, () => paintIdle(), { dir });
+        paperSlipSwap(info, () => paintIdleInfo(list), {
+          dir,
+          frameless: true,
+          skipHeight: true,
+          allowOverflow: true
+        });
       } catch (_) {
-        paintIdle();
+        paintIdleInfo(list);
       }
     },
     "is-small is-scroll"
@@ -100,22 +122,49 @@ function renderRandomPicker(host, cfg) {
   const halo = h("div.bm7-pick-halo");
   deck.append(halo, back2, back1, front);
 
-  const setCardCover = (card, item) => {
-    clear(card);
+  const setCardCover = (card, item, smoothSwap = false) => {
     if (!item) {
+      card._coverUrl = "";
+      clear(card);
       card.appendChild(h("div.bm7-pick-blank", [icon(cfg.kind === "game" ? "gamepad" : "dice", 26)]));
       return;
     }
-    card.appendChild(coverEl(cfg.getCover ? cfg.getCover(item) : item.cover, getTitle(item)));
+    const nextUrl = String((cfg.getCover ? cfg.getCover(item) : item.cover) || "");
+    const title = getTitle(item);
+    if (smoothSwap && nextUrl && card._coverUrl === nextUrl && card.firstElementChild) {
+      return;
+    }
+    if (smoothSwap && nextUrl && card.firstElementChild) {
+      const pre = new Image();
+      let swapped = false;
+      const commit = () => {
+        if (swapped || card._pendingUrl !== nextUrl) return;
+        swapped = true;
+        card._coverUrl = nextUrl;
+        clear(card);
+        card.appendChild(coverEl(nextUrl, title));
+      };
+      card._pendingUrl = nextUrl;
+      pre.onload = commit;
+      pre.onerror = commit;
+      pre.src = nextUrl;
+      if (pre.complete) commit();
+      return;
+    }
+    card._pendingUrl = nextUrl;
+    card._coverUrl = nextUrl;
+    clear(card);
+    card.appendChild(coverEl(nextUrl, title));
   };
 
-  function paintIdle() {
-    const list = candidates();
-    root.classList.remove("has-result");
+  function updateIdleDeckCovers(list) {
     const preview = shuffled(list, 3);
-    setCardCover(back2, preview[2] || null);
-    setCardCover(back1, preview[1] || null);
-    setCardCover(front, null);
+    setCardCover(back2, preview[2] || preview[0] || null, true);
+    setCardCover(back1, preview[1] || preview[0] || null, true);
+    setCardCover(front, null, false);
+  }
+
+  function paintIdleInfo(list) {
     clear(info);
     const sc = currentScope();
     if (!list.length) {
@@ -129,6 +178,13 @@ function renderRandomPicker(host, cfg) {
         button(cfg.kind === "game" ? "抽一部" : "抽一集", { icon: "shuffle", variant: "primary", cls: "bm7-pick-go", onClick: draw })
       ])
     );
+  }
+
+  function paintIdle() {
+    const list = candidates();
+    root.classList.remove("has-result");
+    updateIdleDeckCovers(list);
+    paintIdleInfo(list);
   }
 
   async function draw() {

@@ -1,9 +1,9 @@
 const { requestUrl, Notice, Modal, Menu } = require("obsidian");
-const { openLocalPathSafely, inspectLocalFolder } = require("./note-utils.js");
+const { openLocalPathSafely, inspectLocalFolder, parseVideoEpisodeMeta } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const v07Core = require("./v07-core.js");
-const { paperSlipSwap } = require("./v08-motion-and-lens.js");
+const { paperSlipSwap, withPreservedScroll } = require("./v08-motion-and-lens.js");
 const { renderGallerySanctuary } = require("./v08-gallery-sanctuary.js");
 const {
   tryRequireNode,
@@ -2636,6 +2636,12 @@ function openIllustrationLightboxModal(plugin, illust, onRefresh, navContext = n
 }
 
 function renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems = [], options = {}) {
+  return withPreservedScroll(container, () =>
+    _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeItems, options)
+  );
+}
+
+function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeItems = [], options = {}) {
   if (container._illustDirWatcher) {
     try {
       container._illustDirWatcher.close();
@@ -3597,12 +3603,12 @@ function formatSecondsToTimecode(sec) {
  * 判断一条字幕是否为非角色对白（免责声明、屏幕字/招牌/注释、OP/ED歌词制作人员、纯符号音效等）
  */
 function isNonDialogueSubtitleCue({ style = "", speaker = "", text = "" }) {
-  const st = String(style || "").trim();
+  const st = String(style || "").trim().replace(/^\*+/, "");
   const sp = String(speaker || "").trim();
   const tx = String(text || "").trim();
   if (!tx) return true;
 
-  // 1. ASS 样式名与说话人标记过滤（屏幕字、注释、标题、制作名单、免责声明等）
+  // 1. ASS 样式名与说话人标记过滤（屏幕字、注释、标题、制作名单、免责声明等；注意 NTP/Text 为老牌字幕软件默认对白占位名，绝不可误杀）
   if (
     /^(OP|ED|特效|注释|staff|title|sign|signs|os|cart|caption|credit|logo|note|tip|warning|disclaimer|screen|top|bottom)/i.test(
       st
@@ -3612,7 +3618,7 @@ function isNonDialogueSubtitleCue({ style = "", speaker = "", text = "" }) {
     return true;
   }
   if (
-    /^(sign|signs|cartel|ntp|text|fx|title|staff|comment|注释|提示|屏幕字|字幕|免责|disclaimer|warning|board|label)/i.test(
+    /^(sign|signs|cartel|fx|title|staff|comment|注释|提示|屏幕字|字幕|免责|disclaimer|warning|board|label)/i.test(
       sp
     )
   ) {
@@ -3670,8 +3676,9 @@ function parseSubtitleContent(content, ext = ".srt") {
       if (parts.length < 10) continue;
       const startSec = parseTimecodeToSeconds(parts[1]);
       const endSec = parseTimecodeToSeconds(parts[2]);
-      const style = String(parts[3] || "").trim();
-      const speaker = String(parts[4] || "").trim();
+      const style = String(parts[3] || "").trim().replace(/^\*+/, "");
+      const rawSpeaker = String(parts[4] || "").trim();
+      const speaker = /^(?:ntp|text|default|main|dialogue)$/i.test(rawSpeaker) ? "" : rawSpeaker;
       const rawLine = parts.slice(9).join(",");
       // 若包含 ASS 绝对坐标定位/矢量绘图指令 (\pos, \move, \org, \p1)，高概率是屏幕招牌贴字
       if (/\\(?:pos|move|org)\s*\(/i.test(rawLine) && !speaker) {
@@ -3859,8 +3866,92 @@ function readSubtitleFileAutoEncoding(fullSubPath) {
   return buf.toString("utf8");
 }
 
+function detectSubtitleLogicalExt(fileName) {
+  const lower = String(fileName || "").toLowerCase();
+  const m = lower.match(/\.(ass|ssa|srt|vtt)(?:\(\d+\))?(?:\.txt)?$/i);
+  return m ? `.${m[1].toLowerCase()}` : "";
+}
+
+function collectExternalSubtitleCandidates(videoDir, videoBaseName) {
+  const results = [];
+  if (!videoDir || !fs.existsSync(videoDir)) return results;
+  const baseLower = String(videoBaseName || "").toLowerCase();
+  const prefixProbe = baseLower.slice(0, Math.min(20, baseLower.length));
+  const videoMeta =
+    typeof parseVideoEpisodeMeta === "function"
+      ? parseVideoEpisodeMeta(`${videoBaseName}.mkv`)
+      : null;
+
+  const stripSubSuffixToStem = (subFileName) =>
+    String(subFileName || "")
+      .replace(/\.(?:ass|ssa|srt|vtt)(?:\(\d+\))?(?:\.txt)?$/i, "")
+      .replace(/\.(?:scjp|tcjp|chs|cht|sc|tc|jpn|jap|jpsc|jptc|gb|big5|zh|cn|ja|en)$/i, "");
+
+  const scanDir = (absDir, relPrefix, depth) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch (_) {
+      return;
+    }
+    for (const ent of entries) {
+      if (!ent || !ent.name) continue;
+      const name = String(ent.name);
+      try {
+        if (typeof ent.isFile === "function" ? ent.isFile() : false) {
+          const logicalExt = detectSubtitleLogicalExt(name);
+          if (!logicalExt) continue;
+          const lowerName = name.toLowerCase();
+          const isExactStem =
+            lowerName === `${baseLower}${logicalExt}` ||
+            lowerName.startsWith(`${baseLower}.`);
+          let isEpisodeSiblingMatch = false;
+          if (!isExactStem && videoMeta && Number.isFinite(videoMeta.episode) && !videoMeta.isExtra) {
+            if (lowerName.startsWith(prefixProbe)) {
+              const subStem = stripSubSuffixToStem(name);
+              const subMeta = parseVideoEpisodeMeta(`${subStem}.mkv`);
+              if (
+                subMeta &&
+                !subMeta.isExtra &&
+                subMeta.episode === videoMeta.episode
+              ) {
+                isEpisodeSiblingMatch = true;
+              }
+            }
+          }
+          if (isExactStem || isEpisodeSiblingMatch) {
+            results.push({
+              name,
+              relLabel: relPrefix ? `${relPrefix}/${name}` : name,
+              fullPath: path.join(absDir, name),
+              logicalExt,
+              exactStemBonus: isExactStem ? 1000 : 0
+            });
+          }
+        } else if (depth < 2 && typeof ent.isDirectory === "function" && ent.isDirectory()) {
+          if (/(?:sub|subs|subtitle|subtitles|ass|srt|字幕|外挂)/i.test(name)) {
+            scanDir(
+              path.join(absDir, name),
+              relPrefix ? `${relPrefix}/${name}` : name,
+              depth + 1
+            );
+          }
+        }
+      } catch (_) {}
+    }
+  };
+
+  scanDir(videoDir, "", 0);
+  results.sort((a, b) => {
+    const scoreA = (a.exactStemBonus || 0) + scoreSubtitleTrackPreference({ lang: "", title: a.name });
+    const scoreB = (b.exactStemBonus || 0) + scoreSubtitleTrackPreference({ lang: "", title: b.name });
+    return scoreB - scoreA;
+  });
+  return results;
+}
+
 /**
- * 查找视频同目录下的外置字幕文件，若无外置字幕则调用 FFmpeg 提取指定（或自动优选简体中文）内嵌字幕轨
+ * 查找视频同目录及外挂字幕子目录下的外置字幕文件，若无外置字幕则调用 FFmpeg 提取指定（或自动优选简体中文）内嵌字幕轨
  */
 async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubIndex = null) {
   if (!videoFilePath || !fs.existsSync(videoFilePath)) {
@@ -3868,34 +3959,21 @@ async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubInde
   }
   const dir = path.dirname(videoFilePath);
   const base = path.basename(videoFilePath, path.extname(videoFilePath));
-  const files = fs.readdirSync(dir);
 
-  // 1. 优先匹配同名前缀的外置 .ass / .srt / .vtt 字幕（当用户未手动切换内嵌轨道时）
-  const subExts = [".ass", ".ssa", ".srt", ".vtt"];
-  const matchedExternalSubs = files
-    .filter((f) => {
-      const ext = path.extname(f).toLowerCase();
-      if (!subExts.includes(ext)) return false;
-      return f.toLowerCase().startsWith(base.toLowerCase().slice(0, Math.min(16, base.length)));
-    })
-    .sort((a, b) => {
-      const scoreA = scoreSubtitleTrackPreference({ lang: "", title: a });
-      const scoreB = scoreSubtitleTrackPreference({ lang: "", title: b });
-      return scoreB - scoreA;
-    });
+  // 1. 优先匹配同名前缀的外置 .ass / .srt / .vtt（含 Subtitles 子目录及网盘 .ass.txt）字幕
+  const matchedExternalSubs = collectExternalSubtitleCandidates(dir, base);
 
   if (matchedExternalSubs.length > 0 && requestedSubIndex === null) {
     const chosenExtSub = matchedExternalSubs[0];
-    const fullSubPath = path.join(dir, chosenExtSub);
-    const raw = readSubtitleFileAutoEncoding(fullSubPath);
-    const cues = parseSubtitleContent(raw, path.extname(chosenExtSub));
+    const raw = readSubtitleFileAutoEncoding(chosenExtSub.fullPath);
+    const cues = parseSubtitleContent(raw, chosenExtSub.logicalExt);
     return {
       cues,
-      sourceLabel: `外置字幕：${chosenExtSub}`,
-      tracks: matchedExternalSubs.map((name, idx) => ({
+      sourceLabel: `外置字幕：${chosenExtSub.relLabel}`,
+      tracks: matchedExternalSubs.map((sub, idx) => ({
         subIndex: `ext:${idx}`,
-        displayLabel: `外置 · ${name}`,
-        externalFile: path.join(dir, name)
+        displayLabel: `外置 · ${sub.relLabel}`,
+        externalFile: sub.fullPath
       })),
       selectedSubIndex: "ext:0"
     };
@@ -3905,16 +3983,15 @@ async function loadSubtitlesForVideoFile(plugin, videoFilePath, requestedSubInde
     const extIdx = Number(requestedSubIndex.split(":")[1]) || 0;
     const chosenExtSub = matchedExternalSubs[extIdx];
     if (chosenExtSub) {
-      const fullSubPath = path.join(dir, chosenExtSub);
-      const raw = readSubtitleFileAutoEncoding(fullSubPath);
-      const cues = parseSubtitleContent(raw, path.extname(chosenExtSub));
+      const raw = readSubtitleFileAutoEncoding(chosenExtSub.fullPath);
+      const cues = parseSubtitleContent(raw, chosenExtSub.logicalExt);
       return {
         cues,
-        sourceLabel: `外置字幕：${chosenExtSub}`,
-        tracks: matchedExternalSubs.map((name, idx) => ({
+        sourceLabel: `外置字幕：${chosenExtSub.relLabel}`,
+        tracks: matchedExternalSubs.map((sub, idx) => ({
           subIndex: `ext:${idx}`,
-          displayLabel: `外置 · ${name}`,
-          externalFile: path.join(dir, name)
+          displayLabel: `外置 · ${sub.relLabel}`,
+          externalFile: sub.fullPath
         })),
         selectedSubIndex: requestedSubIndex
       };
@@ -4487,6 +4564,12 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
 }
 
 function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = [], options = {}) {
+  return withPreservedScroll(container, () =>
+    _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItems, options)
+  );
+}
+
+function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItems = [], options = {}) {
   container.empty();
   container.addClass("curator-voice-workspace");
 
@@ -5016,7 +5099,8 @@ function renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems = []
         uiState.activeFilter = p.key;
         paperSlipSwap(cardsHost, () => renderVoiceCards(), {
           dir: idx >= prevIdx ? 1 : -1,
-          small: true
+          small: true,
+          frameless: true
         });
       };
     });

@@ -63,7 +63,7 @@ function renderLists(host, provider, opts = {}) {
             paintHead();
             try {
               const { paperSlipSwap } = require("./v08-motion-and-lens.js");
-              paperSlipSwap(body, () => paintBody(), { dir });
+              paperSlipSwap(body, () => paintBody(), { dir, frameless: true, allowOverflow: true });
             } catch (_) {
               paintBody();
             }

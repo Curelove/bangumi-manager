@@ -42,6 +42,7 @@ const { applyTheme } = require("./v07-themes.js");
 const { renderFeed, deriveGameEvents } = require("./v07-history.js");
 const { renderRandomPicker } = require("./v07-random-pick.js");
 const { menuItem } = require("./v07-lists.js");
+const { paperSlipSwap, withPreservedScroll } = require("./v08-motion-and-lens.js");
 
 const ASPECT_PRESETS = [
   { id: "2:3", label: "2:3", hint: "竖版盒封" },
@@ -547,7 +548,10 @@ function renderGameStage(host, ctx) {
   const stage = h("div.bm7-stage.bm7-game-stage");
   host.appendChild(stage);
 
-  const repaintAll = () => renderGameStage(host, Object.assign({}, ctx, { settings: Object.assign({}, settings, { gameUi: ui, gameGroups: groups }) }));
+  const repaintAll = () =>
+    withPreservedScroll(host, () =>
+      renderGameStage(host, Object.assign({}, ctx, { settings: Object.assign({}, settings, { gameUi: ui, gameGroups: groups }) }))
+    );
 
   /* —— 首屏 —— */
   const top = h("div.bm7-stage-grid.bm7-game-grid");
@@ -683,7 +687,7 @@ function renderGameStage(host, ctx) {
   search.addEventListener("input", () => { local.q = search.value; paintGrid(); });
   const sortSel = h("select.bm7-input.bm7-select", { attr: { "aria-label": "排序" } }, SORTS.map((s) => h("option", { attr: { value: s.value }, text: `按${s.label}` })));
   sortSel.value = ui.sort;
-  sortSel.addEventListener("change", () => { saveUi({ sort: sortSel.value }); paintGrid(); });
+  sortSel.addEventListener("change", () => { saveUi({ sort: sortSel.value }); paintGrid({ animate: true }); });
 
   lib.append(
     h("header.bm7-glib-head", [
@@ -700,12 +704,12 @@ function renderGameStage(host, ctx) {
     h("div.bm7-glib-row", [
       search,
       sortSel,
-      segmented([{ value: "none", label: "不分组" }, { value: "developer", label: "按开发商" }, { value: "custom", label: "我的分组" }], ui.groupMode, (v) => { saveUi({ groupMode: v }); local.reorderGroup = null; paintGrid(); }, "is-small")
+      segmented([{ value: "none", label: "不分组" }, { value: "developer", label: "按开发商" }, { value: "custom", label: "我的分组" }], ui.groupMode, (v) => { saveUi({ groupMode: v }); local.reorderGroup = null; paintGrid({ animate: true }); }, "is-small")
     ]),
     segmented(
       [{ value: "all", label: "全部", count: games.length }].concat(STATUS_ORDER.map((s) => ({ value: s, label: s, count: counts[s] }))),
       ui.status,
-      (v) => { saveUi({ status: v }); paintGrid(); },
+      (v) => { saveUi({ status: v }); paintGrid({ animate: true }); },
       "is-small is-scroll"
     )
   );
@@ -727,37 +731,44 @@ function renderGameStage(host, ctx) {
     return row;
   };
 
-  function paintGrid() {
-    clear(gridHost);
-    const list = filtered();
-    if (!list.length) {
-      gridHost.appendChild(emptyState(games.length ? "没有符合条件的游戏。" : "还没有收录游戏。", games.length ? null : button("添加游戏", { icon: "plus", variant: "primary", onClick: () => ctx.actions.addGame && ctx.actions.addGame() })));
-      return;
+  function paintGrid(opts) {
+    const runPaint = () => {
+      clear(gridHost);
+      const list = filtered();
+      if (!list.length) {
+        gridHost.appendChild(emptyState(games.length ? "没有符合条件的游戏。" : "还没有收录游戏。", games.length ? null : button("添加游戏", { icon: "plus", variant: "primary", onClick: () => ctx.actions.addGame && ctx.actions.addGame() })));
+        return;
+      }
+      if (ui.groupMode === "none") {
+        gridHost.appendChild(justified(list));
+        return;
+      }
+      if (ui.groupMode === "developer") {
+        const map = new Map();
+        list.forEach((g) => { const k = devGroupName(g); if (!map.has(k)) map.set(k, []); map.get(k).push(g); });
+        const keys = Array.from(map.keys()).sort((a, b) => (a === "未填写开发商") - (b === "未填写开发商") || map.get(b).length - map.get(a).length || a.localeCompare(b, "zh-CN"));
+        keys.forEach((k) => gridHost.appendChild(groupSection(k, map.get(k), { auto: true })));
+        return;
+      }
+      // 我的分组
+      const inList = new Set(list.map((g) => g.id));
+      const used = new Set();
+      groups.forEach((gr) => {
+        const members = gr.gameIds.map((id) => games.find((g) => g.id === id)).filter((g) => g && inList.has(g.id));
+        members.forEach((g) => used.add(g.id));
+        gridHost.appendChild(groupSection(gr.name, members, { group: gr }));
+      });
+      const rest = list.filter((g) => !used.has(g.id));
+      if (rest.length) gridHost.appendChild(groupSection("未分组", rest, { auto: true, muted: true }));
+      gridHost.appendChild(
+        h("button.bm7-gnewgroup", { attr: { type: "button" }, on: { click: () => newGroup() } }, [icon("plus", 15), h("span", { text: "新建分组" })])
+      );
+    };
+    if (opts && opts.animate && gridHost.childElementCount > 0) {
+      paperSlipSwap(gridHost, runPaint, { small: true, frameless: true });
+    } else {
+      withPreservedScroll(gridHost, runPaint);
     }
-    if (ui.groupMode === "none") {
-      gridHost.appendChild(justified(list));
-      return;
-    }
-    if (ui.groupMode === "developer") {
-      const map = new Map();
-      list.forEach((g) => { const k = devGroupName(g); if (!map.has(k)) map.set(k, []); map.get(k).push(g); });
-      const keys = Array.from(map.keys()).sort((a, b) => (a === "未填写开发商") - (b === "未填写开发商") || map.get(b).length - map.get(a).length || a.localeCompare(b, "zh-CN"));
-      keys.forEach((k) => gridHost.appendChild(groupSection(k, map.get(k), { auto: true })));
-      return;
-    }
-    // 我的分组
-    const inList = new Set(list.map((g) => g.id));
-    const used = new Set();
-    groups.forEach((gr) => {
-      const members = gr.gameIds.map((id) => games.find((g) => g.id === id)).filter((g) => g && inList.has(g.id));
-      members.forEach((g) => used.add(g.id));
-      gridHost.appendChild(groupSection(gr.name, members, { group: gr }));
-    });
-    const rest = list.filter((g) => !used.has(g.id));
-    if (rest.length) gridHost.appendChild(groupSection("未分组", rest, { auto: true, muted: true }));
-    gridHost.appendChild(
-      h("button.bm7-gnewgroup", { attr: { type: "button" }, on: { click: () => newGroup() } }, [icon("plus", 15), h("span", { text: "新建分组" })])
-    );
   }
 
   function groupSection(name, members, o) {

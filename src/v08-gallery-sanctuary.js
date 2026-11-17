@@ -1,4 +1,5 @@
 'use strict';
+const { paperSlipSwap, withPreservedScroll } = require('./v08-motion-and-lens.js');
 /*
  * v08 画册典藏 · 三态空间化视图
  *   salon : 展厅转角（美术馆一隅 · 轨道射灯 · 装裱卡纸 · 视平线居中挂画 · 逐面展墙漫步）
@@ -388,6 +389,13 @@ function loadImg(holder, ill, ctx, onAspectShift) {
   let src = '';
   try { src = ctx.resolveImgSrc ? ctx.resolveImgSrc(ill) : (ill.imageUrl || ''); } catch (_) { src = ill.imageUrl || ''; }
   img.src = src || ill.imageUrl || '';
+  if (img.complete && img.naturalWidth > 0) {
+    img.style.transition = 'none';
+    img.classList.add('is-ready');
+    const real = img.naturalWidth / img.naturalHeight;
+    ill._naturalAspect = real;
+    if (ctx.onNaturalAspect) { try { ctx.onNaturalAspect(ill, real); } catch (_) { /* noop */ } }
+  }
   holder.appendChild(img);
   return img;
 }
@@ -809,11 +817,46 @@ function renderGallerySanctuary(hostEl, ctx) {
   const env = { ctx, state, folios, list: [], dir: null, flip: null, anchorId: null, step: null, anchorProbe: null };
   let relayoutTimer = 0;
 
+  const foyer = mk('div', 'bmgs-foyer');
+  const sw = mk('div', 'bmgs-switch');
+  sw.setAttribute('role', 'group');
+  sw.setAttribute('aria-label', '观看方式');
+  const knob = mk('div', 'bmgs-switch-knob');
+  sw.appendChild(knob);
+  const modeBtns = MODES.map((m) => {
+    const b = btn('', { icon: m.icon, text: m.label });
+    b.title = m.tip;
+    b.onclick = () => { if (m.key !== state.viewMode) env.setState({ viewMode: m.key }); };
+    sw.appendChild(b);
+    return { key: m.key, el: b };
+  });
+  foyer.appendChild(sw);
+  const foyerMeta = mk('div', 'bmgs-foyer-meta');
+  foyer.appendChild(foyerMeta);
+  root.appendChild(foyer);
+
+  const stage = mk('div', 'bmgs-stage');
+  stage.style.display = 'flex';
+  stage.style.flexDirection = 'column';
+  stage.style.gap = '12px';
+  stage.style.minWidth = '0';
+  root.appendChild(stage);
+
   env.setState = (patch) => {
+    const prevMode = state.viewMode;
+    const prevFolio = state.activeFolio;
     if (patch.activeFolio && patch.activeFolio !== state.activeFolio) env.dir = null;
     Object.assign(state, patch);
     if (ctx.onStateChange) ctx.onStateChange(patch);
-    draw();
+    if (patch.viewMode && patch.viewMode !== prevMode) {
+      const i0 = MODES.findIndex((m) => m.key === prevMode);
+      const i1 = MODES.findIndex((m) => m.key === patch.viewMode);
+      draw(false, { modeSwapDir: i1 >= i0 ? 1 : -1 });
+    } else if (patch.activeFolio && patch.activeFolio !== prevFolio) {
+      draw(false, { folioSwap: true });
+    } else {
+      draw(false);
+    }
   };
   env.onAspectShift = () => {
     window.clearTimeout(relayoutTimer);
@@ -824,32 +867,18 @@ function renderGallerySanctuary(hostEl, ctx) {
     }, 360);
   };
 
-  function draw(quiet) {
+  function draw(quiet, animHint) {
     root.dataset.mode = state.viewMode;
     root.dataset.caption = state.captionMode;
     const curW = root.clientWidth || hostEl.clientWidth || 800;
     root.classList.toggle('is-narrow', curW <= 660);
-    root.textContent = '';
     env.list = source.filter((ill) => match(ill, state.activeFolio));
     env.step = null;
     env.anchorProbe = null;
 
-    const foyer = mk('div', 'bmgs-foyer');
-    const sw = mk('div', 'bmgs-switch');
-    sw.setAttribute('role', 'group');
-    sw.setAttribute('aria-label', '观看方式');
-    const knob = mk('div', 'bmgs-switch-knob');
     knob.style.setProperty('--i', String(MODES.findIndex((m) => m.key === state.viewMode)));
-    sw.appendChild(knob);
-    MODES.forEach((m) => {
-      const b = btn('', { icon: m.icon, text: m.label });
-      b.title = m.tip;
-      b.setAttribute('aria-pressed', String(m.key === state.viewMode));
-      b.onclick = () => { if (m.key !== state.viewMode) env.setState({ viewMode: m.key }); };
-      sw.appendChild(b);
-    });
-    foyer.appendChild(sw);
-    const foyerMeta = mk('div', 'bmgs-foyer-meta');
+    modeBtns.forEach((mb) => mb.el.setAttribute('aria-pressed', String(mb.key === state.viewMode)));
+    foyerMeta.textContent = '';
     foyerMeta.appendChild(mk('span', 'bmgs-count', '本册 ' + env.list.length + ' 幅 · 馆藏 ' + source.length + ' 幅'));
     if (state.viewMode !== 'wall') {
       const capPin = btn('bmgs-foyer-pin', { icon: 'label', text: '铭牌常显' });
@@ -858,18 +887,23 @@ function renderGallerySanctuary(hostEl, ctx) {
       capPin.onclick = () => env.setState({ captionMode: state.captionMode === 'always' ? 'hover' : 'always' });
       foyerMeta.appendChild(capPin);
     }
-    foyer.appendChild(foyerMeta);
-    root.appendChild(foyer);
 
-    const stage = mk('div', 'bmgs-stage');
-    root.appendChild(stage);
-    stage.style.display = 'flex';
-    stage.style.flexDirection = 'column';
-    stage.style.gap = '12px';
-    stage.style.minWidth = '0';
-    if (state.viewMode === 'book') renderBook(stage, env);
-    else if (state.viewMode === 'wall') renderWall(stage, env);
-    else renderSalon(stage, env);
+    const paintStage = () => {
+      stage.textContent = '';
+      if (state.viewMode === 'book') renderBook(stage, env);
+      else if (state.viewMode === 'wall') renderWall(stage, env);
+      else renderSalon(stage, env);
+    };
+
+    if (!quiet && animHint && (animHint.modeSwapDir || animHint.folioSwap)) {
+      paperSlipSwap(stage, paintStage, {
+        dir: animHint.modeSwapDir || 1,
+        small: true,
+        frameless: true
+      });
+    } else {
+      withPreservedScroll(stage, paintStage);
+    }
 
     if (!quiet && env.dir) { root.dataset.dir = env.dir; }
     if (!quiet && env.flip) { root.dataset.flip = env.flip; }

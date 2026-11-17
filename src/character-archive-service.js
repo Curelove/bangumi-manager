@@ -3,7 +3,7 @@ const noteManager = require("./note-manager.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const multiHallArchiveService = require("./multi-hall-archive-service.js");
 const v07Core = require("./v07-core.js");
-const { paperSlipSwap } = require("./v08-motion-and-lens.js");
+const { paperSlipSwap, withPreservedScroll } = require("./v08-motion-and-lens.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -3556,6 +3556,63 @@ function getCharacterPortraitFrame(charItem) {
 // 内存级纯色背景抠图结果缓存（key: `${src}::${mode}::${tol}` -> dataUrl | "SKIP"）
 const _characterBgRemovedDataUrlCache = new Map();
 
+function peekCachedCharacterCutout(rawSrc, mode = "auto", tolerance = 0) {
+  if (!rawSrc || mode === "off") return { hit: true, cutoutUrl: null };
+  const tol = Number(tolerance) || (mode === "on" ? 42 : 34);
+  const cacheKey = `${rawSrc}::${mode}::${tol}`;
+  if (!_characterBgRemovedDataUrlCache.has(cacheKey)) {
+    return { hit: false, cutoutUrl: null };
+  }
+  const cached = _characterBgRemovedDataUrlCache.get(cacheKey);
+  return { hit: true, cutoutUrl: cached === "SKIP" ? null : cached };
+}
+
+let _cutoutPrewarmQueue = [];
+let _cutoutPrewarmScheduled = false;
+function prewarmCharacterCutoutIdle(imgEl, charItem, isAutoRemoveBgOn = true) {
+  if (!imgEl || !charItem || typeof window === "undefined") return;
+  const frame = getCharacterPortraitFrame(charItem);
+  const effMode =
+    frame.removeSolidBg === "on"
+      ? "on"
+      : frame.removeSolidBg === "off"
+      ? "off"
+      : isAutoRemoveBgOn
+      ? "auto"
+      : "off";
+  if (effMode === "off") return;
+  const rawSrc = String(imgEl.dataset?.origSrc || imgEl.getAttribute("src") || imgEl.src || "");
+  if (!rawSrc || peekCachedCharacterCutout(rawSrc, effMode).hit) return;
+
+  _cutoutPrewarmQueue.push({ imgEl, effMode });
+  if (_cutoutPrewarmScheduled) return;
+  _cutoutPrewarmScheduled = true;
+
+  const drainOne = () => {
+    const next = _cutoutPrewarmQueue.shift();
+    if (next && next.imgEl && next.imgEl.naturalWidth > 0 && next.imgEl.naturalHeight > 0) {
+      try {
+        removeCharacterSolidBackgroundViaCanvas(next.imgEl, { mode: next.effMode });
+      } catch (_) {}
+    }
+    if (_cutoutPrewarmQueue.length > 0) {
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(drainOne, { timeout: 300 });
+      } else {
+        setTimeout(drainOne, 24);
+      }
+    } else {
+      _cutoutPrewarmScheduled = false;
+    }
+  };
+
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(drainOne, { timeout: 240 });
+  } else {
+    setTimeout(drainOne, 32);
+  }
+}
+
 /**
  * 零外部依赖 · 边缘种子漫水填充抠图（Edge-Seeded BFS Flood-Fill Chroma-Key）
  * 专门针对人设图常见的纯白 (#ffffff)、浅灰 (#d5d6d8，如槻木汐人设图)、米白等纯色背景：
@@ -5691,6 +5748,12 @@ async function mergeAllDuplicateCharactersInGallery(plugin, onRefresh) {
  * 渲染「角色典藏与萌点偏好排行」工作台视图（或年鉴内嵌模块）
  */
 function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = [], options = {}) {
+  return withPreservedScroll(container, () =>
+    _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItems, options)
+  );
+}
+
+function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItems = [], options = {}) {
   container.empty();
   container.addClass("curator-character-archive-root");
 
@@ -5844,22 +5907,16 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
   const galleryHost = container.createDiv("curator-char-gallery-host");
 
   const renderGalleryOnly = (animOpts = null) => {
-    const doRender = () => {
-      renderCharacterGallerySection(
-        plugin,
-        galleryHost,
-        characters,
-        vaultAnimeByTitle,
-        uiState,
-        options,
-        () => renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options)
-      );
-    };
-    if (animOpts) {
-      paperSlipSwap(galleryHost, doRender, animOpts);
-    } else {
-      doRender();
-    }
+    renderCharacterGallerySection(
+      plugin,
+      galleryHost,
+      characters,
+      vaultAnimeByTitle,
+      uiState,
+      options,
+      () => renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options),
+      animOpts
+    );
   };
 
   const renderRankAndSync = (animMode = "none") => {
@@ -5874,7 +5931,7 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
         (triggerKind = "tab") => {
           if (triggerKind === "trait") {
             renderRankAndSync("none");
-            renderGalleryOnly({ small: true });
+            renderGalleryOnly({ small: true, frameless: true });
           } else {
             renderRankAndSync("rank");
           }
@@ -5882,9 +5939,9 @@ function renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems = []
       );
     };
     if (animMode === "rank") {
-      paperSlipSwap(rankHost, paintRank, { small: true });
+      paperSlipSwap(rankHost, paintRank, { small: true, frameless: true });
     } else {
-      paintRank();
+      withPreservedScroll(rankHost, paintRank, { anchorScroll: false });
     }
   };
 
@@ -6669,11 +6726,20 @@ function renderCharacterGallerySection(
   vaultAnimeByTitle,
   uiState,
   options,
-  onFullRefresh
+  onFullRefresh,
+  animOpts = null
 ) {
-  galleryHost.empty();
+  let toolbarSlot = galleryHost.querySelector(":scope > .curator-char-gallery-toolbar-slot");
+  let stageSlot = galleryHost.querySelector(":scope > .curator-char-gallery-stage-slot");
+  if (!toolbarSlot || !stageSlot) {
+    galleryHost.empty();
+    toolbarSlot = galleryHost.createDiv("curator-char-gallery-toolbar-slot");
+    stageSlot = galleryHost.createDiv("curator-char-gallery-stage-slot");
+  }
+  galleryHost._stageSlot = stageSlot;
 
-  const bar = galleryHost.createDiv("curator-char-gallery-toolbar");
+  toolbarSlot.empty();
+  const bar = toolbarSlot.createDiv("curator-char-gallery-toolbar");
   const filtered = characters.filter((ch) => {
     if (uiState.activeTraitFilter) {
       const tf = uiState.activeTraitFilter;
@@ -6755,19 +6821,15 @@ function renderCharacterGallerySection(
       if (vm.id === "height-lineup" && !uiState.selectedHeightCharId && filtered.length > 0) {
         uiState.selectedHeightCharId = filtered[0].id;
       }
-      paperSlipSwap(
+      renderCharacterGallerySection(
+        plugin,
         galleryHost,
-        () =>
-          renderCharacterGallerySection(
-            plugin,
-            galleryHost,
-            characters,
-            vaultAnimeByTitle,
-            uiState,
-            options,
-            onFullRefresh
-          ),
-        { dir, small: true }
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        onFullRefresh,
+        { dir, small: true, frameless: true }
       );
     };
   });
@@ -6827,90 +6889,127 @@ function renderCharacterGallerySection(
       e.preventDefault();
       if (uiState.gallerySortMode === mode.id) return;
       uiState.gallerySortMode = mode.id;
-      paperSlipSwap(
+      renderCharacterGallerySection(
+        plugin,
         galleryHost,
-        () =>
-          renderCharacterGallerySection(
-            plugin,
-            galleryHost,
-            characters,
-            vaultAnimeByTitle,
-            uiState,
-            options,
-            onFullRefresh
-          ),
-        { small: true }
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        onFullRefresh,
+        { small: true, frameless: true }
       );
     };
   });
 
   const displayList = options.compactAlmanacMode ? filtered.slice(0, 8) : filtered;
+  const isAutoRemoveBgEnabled = plugin.settings?.characterLineupAutoRemoveBg !== false;
 
-  // 分流渲染：等身标尺陈列架 vs 画报照片墙 vs 经典档案卡片
-  if (uiState.galleryViewMode === "height-lineup") {
-    renderCharacterHeightLineupStage(
-      plugin,
-      galleryHost,
-      displayList,
-      characters,
-      vaultAnimeByTitle,
-      uiState,
-      options,
-      onFullRefresh
-    );
-    return;
-  }
+  const paintStageContent = () => {
+    stageSlot.empty();
 
-  if (uiState.galleryViewMode === "photo-wall") {
-    renderCharacterPhotoWallStage(
-      plugin,
-      galleryHost,
-      displayList,
-      characters,
-      vaultAnimeByTitle,
-      uiState,
-      options,
-      onFullRefresh
-    );
-    return;
-  }
+    // 分流渲染：等身标尺陈列架 vs 画报照片墙 vs 经典档案卡片
+    if (uiState.galleryViewMode === "height-lineup") {
+      renderCharacterHeightLineupStage(
+        plugin,
+        galleryHost,
+        displayList,
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        onFullRefresh
+      );
+      return;
+    }
 
-  const grid = galleryHost.createDiv("curator-char-cards-grid");
+    if (uiState.galleryViewMode === "photo-wall") {
+      renderCharacterPhotoWallStage(
+        plugin,
+        galleryHost,
+        displayList,
+        characters,
+        vaultAnimeByTitle,
+        uiState,
+        options,
+        onFullRefresh
+      );
+      return;
+    }
 
-  displayList.forEach((ch) => {
-    const card = grid.createDiv("curator-char-card");
-    card.dataset.charId = ch.id;
-    const topFlex = card.createDiv("curator-char-card-top");
+    const grid = stageSlot.createDiv("curator-char-cards-grid");
 
-    const avatarBox = topFlex.createDiv("curator-char-card-avatar is-clickable-portrait");
-    avatarBox.title = "点击调整立绘选定位置、缩放模式或更换自定义角色图片";
-    const avaSrc = resolveCharacterAvatarSrc(plugin, ch, (newLocalResourceUrl) => {
-      const existingImg = avatarBox.querySelector("img");
-      if (existingImg && existingImg.isConnected) {
-        existingImg.src = newLocalResourceUrl;
-      }
-    });
-    if (avaSrc) {
-      const img = avatarBox.createEl("img", {
-        attr: { src: avaSrc, alt: ch.name }
+    // 后台空闲预热前 28 位角色的等身标尺透明抠图（即使卡片尚在折叠区 lazy 未滚到，切换到「等身标尺」时也能零等待直出抠图）
+    if (typeof window !== "undefined") {
+      displayList.slice(0, 28).forEach((ch) => {
+        const preSrc = resolveCharacterAvatarSrc(plugin, ch);
+        if (!preSrc) return;
+        const frame = getCharacterPortraitFrame(ch);
+        const effMode =
+          frame.removeSolidBg === "on"
+            ? "on"
+            : frame.removeSolidBg === "off"
+            ? "off"
+            : isAutoRemoveBgEnabled
+            ? "auto"
+            : "off";
+        if (effMode === "off" || peekCachedCharacterCutout(preSrc, effMode).hit) return;
+        const warmImg = new Image();
+        warmImg.decoding = "async";
+        warmImg.dataset.origSrc = preSrc;
+        warmImg.onload = () => {
+          if (warmImg.naturalWidth > 0 && warmImg.naturalHeight > 0) {
+            ch._naturalAspect = warmImg.naturalWidth / warmImg.naturalHeight;
+            prewarmCharacterCutoutIdle(warmImg, ch, isAutoRemoveBgEnabled);
+          }
+        };
+        warmImg.src = preSrc;
       });
-      img.src = avaSrc;
-      img.alt = ch.name;
-      img.loading = "lazy";
-      applyCharacterPortraitFrameToImg(img, avatarBox, ch);
-      img.onerror = () => {
-        img.remove();
+    }
+
+    displayList.forEach((ch) => {
+      const card = grid.createDiv("curator-char-card");
+      card.dataset.charId = ch.id;
+      const topFlex = card.createDiv("curator-char-card-top");
+
+      const avatarBox = topFlex.createDiv("curator-char-card-avatar is-clickable-portrait");
+      avatarBox.title = "点击调整立绘选定位置、缩放模式或更换自定义角色图片";
+      const avaSrc = resolveCharacterAvatarSrc(plugin, ch, (newLocalResourceUrl) => {
+        const existingImg = avatarBox.querySelector("img");
+        if (existingImg && existingImg.isConnected) {
+          existingImg.dataset.origSrc = newLocalResourceUrl;
+          existingImg.src = newLocalResourceUrl;
+        }
+      });
+      if (avaSrc) {
+        const img = avatarBox.createEl("img", {
+          attr: { src: avaSrc, alt: ch.name }
+        });
+        img.src = avaSrc;
+        img.dataset.origSrc = avaSrc;
+        img.alt = ch.name;
+        img.loading = "lazy";
+        applyCharacterPortraitFrameToImg(img, avatarBox, ch);
+        if (img.complete && img.naturalWidth > 0) {
+          prewarmCharacterCutoutIdle(img, ch, isAutoRemoveBgEnabled);
+        } else {
+          img.addEventListener("load", () => {
+            prewarmCharacterCutoutIdle(img, ch, isAutoRemoveBgEnabled);
+          });
+        }
+        img.onerror = () => {
+          img.remove();
+          avatarBox.createSpan({
+            cls: "curator-char-avatar-fallback",
+            text: (ch.name || "角").slice(0, 1)
+          });
+        };
+      } else {
         avatarBox.createSpan({
           cls: "curator-char-avatar-fallback",
           text: (ch.name || "角").slice(0, 1)
         });
-      };
-    } else {
-      avatarBox.createSpan({
-        cls: "curator-char-avatar-fallback",
-        text: (ch.name || "角").slice(0, 1)
-      });
-    }
+      }
 
     const lensHint = avatarBox.createDiv({
       cls: "curator-char-avatar-hover-pill",
@@ -7434,7 +7533,14 @@ function renderCharacterGallerySection(
         { width: 220, alignRight: true }
       );
     };
-  });
+    });
+  };
+
+  if (animOpts) {
+    paperSlipSwap(stageSlot, paintStageContent, animOpts);
+  } else {
+    withPreservedScroll(stageSlot, paintStageContent);
+  }
 }
 
 /**
@@ -7452,7 +7558,8 @@ function renderCharacterHeightLineupStage(
   options,
   onFullRefresh
 ) {
-  const wrap = galleryHost.createDiv("curator-char-height-lineup-wrap");
+  const mountTarget = (galleryHost && galleryHost._stageSlot) || galleryHost;
+  const wrap = mountTarget.createDiv("curator-char-height-lineup-wrap");
 
   if (displayList.length === 0) {
     wrap.createDiv({
@@ -7847,29 +7954,31 @@ function renderCharacterHeightLineupStage(
 
     // 等身立绘容盒（高度严格等于 cm * pxPerCm，图片以 height: 100%; width: auto 驱动，绝不因宽度挤压而产生顶部透明假留白）
     const standBox = figureStageBox.createDiv("curator-height-stand-box");
+    const initFrameCfg = getCharacterPortraitFrame(ch);
+    const effBgMode =
+      initFrameCfg.removeSolidBg === "on"
+        ? "on"
+        : initFrameCfg.removeSolidBg === "off"
+        ? "off"
+        : isAutoRemoveBgOn
+        ? "auto"
+        : "off";
+
     const avaSrc = resolveCharacterAvatarSrc(plugin, ch, (newUrl) => {
       const existingImg = standBox.querySelector("img");
       if (existingImg && existingImg.isConnected) {
         existingImg.dataset.origSrc = newUrl;
-        existingImg.src = newUrl;
+        const nextCut = peekCachedCharacterCutout(newUrl, effBgMode);
+        if (nextCut.hit) {
+          existingImg.src = nextCut.cutoutUrl || newUrl;
+          standBox.toggleClass("is-bg-removed", Boolean(nextCut.cutoutUrl));
+        } else {
+          existingImg.src = newUrl;
+        }
       }
     });
 
     let figImg = null;
-    if (avaSrc) {
-      figImg = standBox.createEl("img", {
-        cls: "curator-height-stand-img",
-        attr: { src: avaSrc, alt: ch.name }
-      });
-      figImg.dataset.origSrc = avaSrc;
-      figImg.loading = "lazy";
-    } else {
-      standBox.createSpan({
-        cls: "curator-char-avatar-fallback",
-        text: (ch.name || "角").slice(0, 1)
-      });
-    }
-
     const applyColVisuals = () => {
       const currH = parseCharacterHeightCm(ch);
       const currFrame = getCharacterPortraitFrame(ch);
@@ -7897,35 +8006,77 @@ function renderCharacterHeightLineupStage(
         figImg.style.transform = `translate(${panX}px, ${-currFrame.footOffsetPx}px) scale(${currFrame.heightScale})`;
       }
     };
-    if (figImg) {
-      figImg.onload = () => {
+
+    if (avaSrc) {
+      figImg = standBox.createEl("img", {
+        cls: "curator-height-stand-img",
+        attr: { alt: ch.name }
+      });
+      figImg.dataset.origSrc = avaSrc;
+      figImg.loading = "eager";
+      figImg.decoding = "sync";
+
+      const bindFinalImageMetrics = () => {
         if (figImg.naturalWidth && figImg.naturalHeight) {
           ch._naturalAspect = figImg.naturalWidth / figImg.naturalHeight;
         }
-        if (figImg.dataset.isCutoutApplied !== "1") {
-          const currFrame = getCharacterPortraitFrame(ch);
-          const effBgMode =
-            currFrame.removeSolidBg === "on"
-              ? "on"
-              : currFrame.removeSolidBg === "off"
-              ? "off"
-              : isAutoRemoveBgOn
-              ? "auto"
-              : "off";
-          if (effBgMode !== "off") {
-            const cutoutUrl = removeCharacterSolidBackgroundViaCanvas(figImg, { mode: effBgMode });
-            if (cutoutUrl && figImg.src !== cutoutUrl) {
-              figImg.dataset.isCutoutApplied = "1";
-              figImg.src = cutoutUrl;
-              standBox.addClass("is-bg-removed");
-              return;
-            }
-          }
-          standBox.removeClass("is-bg-removed");
-        }
-        delete figImg.dataset.isCutoutApplied;
         applyColVisuals();
       };
+
+      const cachedCut = peekCachedCharacterCutout(avaSrc, effBgMode);
+      if (effBgMode === "off" || cachedCut.hit) {
+        const finalUrl = effBgMode === "off" ? avaSrc : cachedCut.cutoutUrl || avaSrc;
+        standBox.toggleClass("is-bg-removed", effBgMode !== "off" && Boolean(cachedCut.cutoutUrl));
+        figImg.onload = bindFinalImageMetrics;
+        figImg.src = finalUrl;
+        if (figImg.complete && figImg.naturalWidth > 0) {
+          bindFinalImageMetrics();
+        }
+      } else {
+        // 冷启动首次解码：先在离屏 Image 完成解码与抠图再单次写入 src，杜绝先画白底再跳变透明底的二次闪烁
+        const probe = new Image();
+        probe.decoding = "sync";
+        probe.src = avaSrc;
+        if (probe.complete && probe.naturalWidth > 0) {
+          ch._naturalAspect = probe.naturalWidth / probe.naturalHeight;
+          probe.dataset.origSrc = avaSrc;
+          const cutoutUrl = removeCharacterSolidBackgroundViaCanvas(probe, { mode: effBgMode });
+          standBox.toggleClass("is-bg-removed", Boolean(cutoutUrl));
+          figImg.onload = bindFinalImageMetrics;
+          figImg.src = cutoutUrl || avaSrc;
+        } else {
+          figImg.style.opacity = "0";
+          figImg.style.transition = "opacity .14s ease";
+          probe.onload = () => {
+            if (!figImg.isConnected) return;
+            if (probe.naturalWidth && probe.naturalHeight) {
+              ch._naturalAspect = probe.naturalWidth / probe.naturalHeight;
+            }
+            probe.dataset.origSrc = avaSrc;
+            const cutoutUrl = removeCharacterSolidBackgroundViaCanvas(probe, { mode: effBgMode });
+            standBox.toggleClass("is-bg-removed", Boolean(cutoutUrl));
+            figImg.onload = () => {
+              figImg.style.opacity = "";
+              bindFinalImageMetrics();
+            };
+            figImg.src = cutoutUrl || avaSrc;
+            if (figImg.complete && figImg.naturalWidth > 0) {
+              figImg.style.opacity = "";
+              bindFinalImageMetrics();
+            }
+          };
+          probe.onerror = () => {
+            if (!figImg.isConnected) return;
+            figImg.style.opacity = "";
+            figImg.src = avaSrc;
+          };
+        }
+      }
+    } else {
+      standBox.createSpan({
+        cls: "curator-char-avatar-fallback",
+        text: (ch.name || "角").slice(0, 1)
+      });
     }
     applyColVisuals();
 
@@ -8183,6 +8334,17 @@ function renderCharacterHeightLineupStage(
     };
   }
 
+  if (uiState.heightLineupScrollLeft > 0) {
+    plotViewport.scrollLeft = uiState.heightLineupScrollLeft;
+  }
+  plotViewport.addEventListener(
+    "scroll",
+    () => {
+      uiState.heightLineupScrollLeft = plotViewport.scrollLeft;
+    },
+    { passive: true }
+  );
+
   wrap.createDiv({
     cls: "curator-height-stage-footnote",
     text: "提示：单击任意角色即可选中并在上方快速调整其「真实身高 / 图片比例 / 基准点偏移」或点击「智能消除留白」；直接在立绘上按住上下拖拽也可实时对齐 0cm 地面基准线，再次点击已选中角色或底部铭牌可打开完整角色典藏档案。"
@@ -8204,7 +8366,8 @@ function renderCharacterPhotoWallStage(
   options,
   onFullRefresh
 ) {
-  const wallWrap = galleryHost.createDiv("curator-char-photowall-wrap");
+  const mountTarget = (galleryHost && galleryHost._stageSlot) || galleryHost;
+  const wallWrap = mountTarget.createDiv("curator-char-photowall-wrap");
   if (displayList.length === 0) {
     wallWrap.createDiv({
       cls: "curator-rs-empty",
