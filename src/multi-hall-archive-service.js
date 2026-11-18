@@ -5546,6 +5546,16 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
     return;
   }
 
+  const activateCapsuleForProtocolLaunch = () => {
+    try {
+      const capSvc = require("./game-floating-capsule-service.js");
+      capSvc.activateGameSideCapsule(plugin, game, { source: "internal" });
+      if (typeof capSvc.notifyProtocolOrShortcutLaunch === "function") {
+        capSvc.notifyProtocolOrShortcutLaunch(plugin, game);
+      }
+    } catch (_) {}
+  };
+
   const startManualProtocolTimer = (uriTarget, viaLabel = "启动器") => {
     try {
       const electron = tryRequireNode("electron");
@@ -5563,6 +5573,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
         gs.startActiveGameTimer(plugin, game);
       }
     } catch (_) {}
+    activateCapsuleForProtocolLaunch();
     if (Notice) {
       new Notice(`已通过 ${viaLabel} 启动《${game.title}》，已开启游玩计时（结束后点「结束并记入」即可结算时长）`);
     }
@@ -5597,6 +5608,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
       const gs = require("./game-stats-and-groups-service.js");
       if (!gs.getActiveGameTimer(plugin, game.id)) gs.startActiveGameTimer(plugin, game);
     } catch (_) {}
+    activateCapsuleForProtocolLaunch();
     if (typeof onSessionEnd === "function") onSessionEnd();
     return;
   }
@@ -5635,6 +5647,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
         const gs = require("./game-stats-and-groups-service.js");
         if (!gs.getActiveGameTimer(plugin, game.id)) gs.startActiveGameTimer(plugin, game);
       } catch (_) {}
+      activateCapsuleForProtocolLaunch();
       if (typeof onSessionEnd === "function") onSessionEnd();
       return;
     }
@@ -5669,6 +5682,10 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
       });
     }
     child.unref();
+    try {
+      const capSvc = require("./game-floating-capsule-service.js");
+      capSvc.activateGameSideCapsule(plugin, game, { source: "internal" });
+    } catch (_) {}
     if (Notice) {
       new Notice(
         mode === "emulator"
@@ -5676,7 +5693,7 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
           : `已启动《${game.title}》，正在自动记录游玩时长...`
       );
     }
-    child.on("close", async () => {
+    const finalizeAutoSession = async () => {
       const endIso = new Date().toISOString();
       const elapsedMin = Math.max(1, Math.round((Date.now() - startTs) / 60000));
       const elapsedHours = Number((elapsedMin / 60).toFixed(2));
@@ -5698,6 +5715,25 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
       await syncGameMarkdownNote(plugin, game);
       await plugin.saveSettings();
       if (typeof onSessionEnd === "function") onSessionEnd();
+    };
+    child.on("close", async () => {
+      try {
+        const capSvc = require("./game-floating-capsule-service.js");
+        if (typeof capSvc.handleSpawnedProcessClosed === "function") {
+          const handoff = await capSvc.handleSpawnedProcessClosed(plugin, game, {
+            spawnedExePath: exePath,
+            startTs,
+            startIso,
+            mode,
+            finalizeSession: finalizeAutoSession
+          });
+          if (handoff && handoff.adopted) {
+            return;
+          }
+        }
+        capSvc.deactivateGameSideCapsule(plugin, game.id);
+      } catch (_) {}
+      await finalizeAutoSession();
     });
   } catch (err) {
     if (Notice) new Notice(`启动失败：${err.message}`);
@@ -6167,6 +6203,20 @@ function normalizeGuideUrl(raw) {
  */
 function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) {
   if (!game) return;
+  try {
+    const v07Core = require("./v07-core.js");
+    if (v07Core && typeof v07Core.closeAllPopovers === "function") {
+      v07Core.closeAllPopovers();
+    }
+  } catch (_) {}
+  let capSvc = null;
+  try {
+    capSvc = require("./game-floating-capsule-service.js");
+    if (!openOptions.forceInAppModal && capSvc.isCapsuleActiveForGame(plugin, game.id)) {
+      capSvc.expandActiveCapsuleForGame(plugin, game);
+      return;
+    }
+  } catch (_) {}
   if (!Array.isArray(game.todos)) game.todos = [];
   if (!Array.isArray(game.playNotes)) game.playNotes = [];
   if (!Array.isArray(game.strategyUrls)) game.strategyUrls = [];
@@ -6210,11 +6260,13 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
 
   const persist = (hint = "已保存") => {
     dirty = true;
+    if (capSvc) capSvc.notifyObsidianViewsUpdated(plugin, game.id, "obsidian");
     saveChain = saveChain.then(async () => {
       try {
         await plugin.saveSettings();
         await syncGameMarkdownNote(plugin, game);
         flashSaved(hint);
+        if (capSvc) capSvc.notifyObsidianViewsUpdated(plugin, game.id, "obsidian");
       } catch (err) {
         console.error("[bangumi-manager] 游戏手札保存失败", err);
         flashSaved("保存失败，请稍后重试", true);
@@ -6407,12 +6459,65 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
     };
 
     const headActions = head.createDiv("curator-gj-head-actions");
-    if (String(game.exePath || "").trim() && isDesktopNodeAvailable()) {
-      const playBtn = headActions.createEl("button", {
-        cls: "curator-gj-btn is-primary curator-gj-play",
-        text: game.launchMode === "emulator" ? "▶ 用模拟器启动" : "▶ 继续游戏"
+    let playBtn = null;
+    const syncPlayBtnHint = () => {
+      if (!playBtn) return;
+      const capOn = capSvc && capSvc.isDesktopCapsuleSupported() && capSvc.ensureGameCapsuleSettings(plugin).enabled;
+      playBtn.title = capOn
+        ? "启动游戏并自动将本面板收拢为屏幕侧边手札胶囊；退出游戏后自动累加本次时长"
+        : "结束游戏后会自动累加本次时长";
+    };
+    if (capSvc && typeof capSvc.isDesktopCapsuleSupported === "function" && capSvc.isDesktopCapsuleSupported()) {
+      const capToggleBtn = headActions.createEl("button", {
+        cls: "curator-gj-btn curator-gj-cap-toggle",
+        attr: { type: "button" }
       });
-      playBtn.title = "结束游戏后会自动累加本次时长";
+      const capIco = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      capIco.setAttribute("viewBox", "0 0 24 24");
+      capIco.setAttribute("class", "curator-gj-btn-ico");
+      capIco.innerHTML = `<rect x="3" y="4" width="18" height="16" rx="3"/><line x1="16" y1="4" x2="16" y2="20"/>`;
+      const capDot = document.createElement("span");
+      capDot.className = "curator-gj-cap-dot";
+      const capLbl = document.createElement("span");
+      capToggleBtn.append(capIco, capLbl, capDot);
+
+      const paintCapToggle = () => {
+        const cfg = capSvc.ensureGameCapsuleSettings(plugin);
+        const on = Boolean(cfg.enabled);
+        capToggleBtn.classList.toggle("is-on", on);
+        capToggleBtn.setAttribute("aria-pressed", on ? "true" : "false");
+        capLbl.textContent = on ? "侧边胶囊 · 已开" : "侧边胶囊 · 已关";
+        capToggleBtn.title = on
+          ? "已开启：启动游戏或计时时，本手札会自动飞向屏幕侧边化作悬浮胶囊（点击可关闭）"
+          : "已关闭：点击开启游戏运行时的屏幕侧边手札胶囊";
+        syncPlayBtnHint();
+      };
+      paintCapToggle();
+
+      capToggleBtn.onclick = async () => {
+        const cfg = capSvc.ensureGameCapsuleSettings(plugin);
+        cfg.enabled = !cfg.enabled;
+        await plugin.saveSettings();
+        capSvc.refreshGameCapsuleLifecycle(plugin);
+        capSvc.broadcastToCapsuleWindow(plugin);
+        capSvc.notifyObsidianViewsUpdated(plugin, game.id, "capsule");
+        paintCapToggle();
+        flashSaved(cfg.enabled ? "已开启游戏侧边手札胶囊" : "已关闭游戏侧边手札胶囊");
+      };
+    }
+    if (String(game.exePath || "").trim() && isDesktopNodeAvailable()) {
+      playBtn = headActions.createEl("button", {
+        cls: "curator-gj-btn is-primary curator-gj-play",
+        attr: { type: "button" }
+      });
+      const playIco = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      playIco.setAttribute("viewBox", "0 0 24 24");
+      playIco.setAttribute("class", "curator-gj-btn-ico is-fill");
+      playIco.innerHTML = `<polygon points="6 4 20 12 6 20 6 4"/>`;
+      const playTxt = document.createElement("span");
+      playTxt.textContent = game.launchMode === "emulator" ? "用模拟器启动" : "继续游戏";
+      playBtn.append(playIco, playTxt);
+      syncPlayBtnHint();
       playBtn.onclick = () =>
         launchLocalGameProcess(plugin, game, () => {
           if (hoursInput.isConnected) {
@@ -6582,6 +6687,7 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
       ui.drafts[game.id] = noteInput.value;
       autoGrow(noteInput);
       syncSubmitState();
+      if (capSvc) capSvc.notifyObsidianViewsUpdated(plugin, game.id, "obsidian");
     });
     noteInput.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey) && !isImeEnter(ev)) {
@@ -6873,9 +6979,64 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
     renderGuides();
     refreshCounts();
     window.requestAnimationFrame(() => autoGrow(noteInput));
+
+    if (capSvc && typeof capSvc.registerOpenJournalModalHook === "function") {
+      modal._unregisterCapHook = capSvc.registerOpenJournalModalHook(plugin, game.id, {
+        syncFromExternal: () => {
+          if (!contentEl.isConnected) return;
+          if (document.activeElement !== statusSel) {
+            statusSel.value = game.status || "在玩";
+            statusWrap.dataset.status = statusSel.value;
+          }
+          if (document.activeElement !== progInput) {
+            progInput.value = game.currentProgress || "";
+          }
+          if (document.activeElement !== hoursInput) {
+            hoursInput.value = String(Math.round((Number(game.playHours) || 0) * 100) / 100);
+          }
+          if (document.activeElement !== scoreInput) {
+            scoreInput.value =
+              game.score !== undefined && game.score !== null && game.score !== "" ? String(game.score) : "";
+          }
+          if (document.activeElement !== noteInput) {
+            noteInput.value = ui.drafts[game.id] || "";
+            autoGrow(noteInput);
+            syncSubmitState();
+          }
+          updateComposerStamp();
+          renderNotes();
+          renderTodos();
+          renderGuides();
+          refreshCounts();
+          dirty = true;
+        },
+        collapseToEdge: (side, ratioYOrCb, maybeCb) => {
+          const onCollapsed = typeof ratioYOrCb === "function" ? ratioYOrCb : maybeCb;
+          const ratioY = typeof ratioYOrCb === "number" ? ratioYOrCb : 0.42;
+          if (!modalEl || !modalEl.isConnected) {
+            if (typeof onCollapsed === "function") onCollapsed();
+            return;
+          }
+          const dyVh = Math.round((ratioY - 0.5) * 80);
+          modalEl.style.setProperty("--gj-collapse-dy", `${dyVh}vh`);
+          modalEl.setAttribute("data-collapse-side", side === "left" ? "left" : "right");
+          modalEl.addClass("is-collapsing-to-capsule");
+          const container = modalEl.closest(".modal-container");
+          if (container) container.classList.add("is-collapsing-to-capsule-bg");
+          window.setTimeout(() => {
+            modal.close();
+            if (typeof onCollapsed === "function") onCollapsed();
+          }, 330);
+        }
+      });
+    }
   };
 
   modal.onClose = () => {
+    if (typeof modal._unregisterCapHook === "function") {
+      modal._unregisterCapHook();
+      modal._unregisterCapHook = null;
+    }
     if (composerEl) ui.drafts[game.id] = composerEl.value;
     composerEl = null;
     if (savedTimer) window.clearTimeout(savedTimer);
@@ -8011,6 +8172,27 @@ function getMultiHallStyles() {
   display: flex;
   flex-direction: column;
 }
+.modal.curator-gj-shell.is-collapsing-to-capsule {
+  pointer-events: none !important;
+  animation: curator-gj-fly-right .33s cubic-bezier(.22, 1, .36, 1) forwards !important;
+}
+.modal.curator-gj-shell.is-collapsing-to-capsule[data-collapse-side="left"] {
+  animation-name: curator-gj-fly-left !important;
+}
+.modal-container.is-collapsing-to-capsule-bg .modal-bg {
+  transition: opacity .30s ease !important;
+  opacity: 0 !important;
+}
+@keyframes curator-gj-fly-right {
+  0% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); border-radius: 14px; }
+  54% { opacity: .90; transform: translate3d(29vw, calc(var(--gj-collapse-dy, 0vh) * 0.66), 0) scale(.34, .44); border-radius: 999px; }
+  100% { opacity: 0; transform: translate3d(48vw, var(--gj-collapse-dy, 0vh), 0) scale(.02, .14); border-radius: 999px; }
+}
+@keyframes curator-gj-fly-left {
+  0% { opacity: 1; transform: translate3d(0, 0, 0) scale(1); border-radius: 14px; }
+  54% { opacity: .90; transform: translate3d(-29vw, calc(var(--gj-collapse-dy, 0vh) * 0.66), 0) scale(.34, .44); border-radius: 999px; }
+  100% { opacity: 0; transform: translate3d(-48vw, var(--gj-collapse-dy, 0vh), 0) scale(.02, .14); border-radius: 999px; }
+}
 .theme-dark .modal.curator-gj-shell {
   --gj-brass: #cfa874;
   --gj-on-brass: #1f1a12;
@@ -8231,26 +8413,74 @@ function getMultiHallStyles() {
 .curator-gj-head-actions {
   align-self: end;
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
 /* 通用按钮 */
 .curator-gj-shell button.curator-gj-btn {
-  display: inline-flex;
+  display: inline-flex !important;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   height: 28px;
   padding: 0 12px;
   border-radius: 7px;
   border: 1px solid var(--gj-line);
   background: var(--background-primary);
-  box-shadow: none;
+  box-shadow: none !important;
   color: var(--text-normal);
   font-size: 12.5px;
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, opacity 0.15s ease, transform 0.12s ease;
+}
+.curator-gj-btn-ico {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.curator-gj-btn-ico.is-fill {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+  stroke: none;
+}
+.curator-gj-shell button.curator-gj-cap-toggle {
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--background-secondary) 60%, var(--background-primary));
+  border-color: var(--gj-line);
+}
+.curator-gj-shell button.curator-gj-cap-toggle.is-on {
+  color: var(--gj-brass);
+  background: var(--gj-brass-soft);
+  border-color: color-mix(in srgb, var(--gj-brass) 38%, transparent);
+}
+.curator-gj-cap-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-faint);
+  opacity: 0.65;
+  transition: background 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+}
+.curator-gj-cap-toggle.is-on .curator-gj-cap-dot {
+  background: var(--gj-brass);
+  opacity: 1;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gj-brass) 22%, transparent);
 }
 .curator-gj-shell button.curator-gj-btn:hover {
   border-color: var(--gj-brass);

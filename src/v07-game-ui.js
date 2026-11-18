@@ -34,7 +34,7 @@
  * }
  */
 const {
-  h, clear, icon, coverEl, segmented, button, iconButton, panel, popover, closeAllPopovers, emptyState, applyAmbient,
+  h, clear, icon, coverEl, segmented, toggleRow, button, iconButton, panel, popover, closeAllPopovers, emptyState, applyAmbient,
   platformInfo, toDate, startOfDay, startOfWeek, startOfMonth, dayKey, formatMinutes, formatShortDate, formatRelative,
   formatDayLabel, formatClock, WEEKDAY_CN, DAY_MS, clamp
 } = require("./v07-core.js");
@@ -689,10 +689,19 @@ function renderGameStage(host, ctx) {
   sortSel.value = ui.sort;
   sortSel.addEventListener("change", () => { saveUi({ sort: sortSel.value }); paintGrid({ animate: true }); });
 
+  const hasCapsule = Boolean(desktop && ctx.capsule && ctx.capsule.supported);
+  const capState = hasCapsule ? ctx.capsule.getSettings() : null;
   lib.append(
     h("header.bm7-glib-head", [
       h("div.bm7-lists-titles", [h("h3.bm7-section-title", { text: "全部游戏" }), h("span.bm7-section-sub", { text: `共 ${games.length} 部 · 卡片比例默认 ${ui.defaultAspect}` })]),
       h("div.bm7-lists-bar", [
+        hasCapsule
+          ? button(capState && capState.enabled ? "侧边手札 · 已开启" : "侧边手札", {
+              icon: "bookmark",
+              title: "配置游戏运行时的屏幕侧边半透明胶囊与全屏手札浮窗",
+              onClick: (e) => openCapsuleQuickSettings(e.currentTarget)
+            })
+          : null,
         button("封面比例", { icon: "crop", onClick: (e) => openGlobalAspect(e.currentTarget) }),
         button("添加游戏", { icon: "plus", variant: "primary", onClick: () => ctx.actions.addGame && ctx.actions.addGame() })
       ])
@@ -700,16 +709,29 @@ function renderGameStage(host, ctx) {
     toolbar,
     gridHost
   );
+  const grpOpts = [{ value: "none", label: "不分组" }, { value: "developer", label: "按开发商" }, { value: "custom", label: "我的分组" }];
+  const statusSegOpts = [{ value: "all", label: "全部", count: games.length }].concat(STATUS_ORDER.map((s) => ({ value: s, label: s, count: counts[s] })));
   toolbar.append(
     h("div.bm7-glib-row", [
       search,
       sortSel,
-      segmented([{ value: "none", label: "不分组" }, { value: "developer", label: "按开发商" }, { value: "custom", label: "我的分组" }], ui.groupMode, (v) => { saveUi({ groupMode: v }); local.reorderGroup = null; paintGrid({ animate: true }); }, "is-small")
+      segmented(grpOpts, ui.groupMode, (v) => {
+        const i0 = grpOpts.findIndex((o) => o.value === ui.groupMode);
+        const i1 = grpOpts.findIndex((o) => o.value === v);
+        saveUi({ groupMode: v });
+        local.reorderGroup = null;
+        paintGrid({ animate: true, dir: i1 >= i0 ? 1 : -1 });
+      }, "is-small")
     ]),
     segmented(
-      [{ value: "all", label: "全部", count: games.length }].concat(STATUS_ORDER.map((s) => ({ value: s, label: s, count: counts[s] }))),
+      statusSegOpts,
       ui.status,
-      (v) => { saveUi({ status: v }); paintGrid({ animate: true }); },
+      (v) => {
+        const i0 = statusSegOpts.findIndex((o) => o.value === ui.status);
+        const i1 = statusSegOpts.findIndex((o) => o.value === v);
+        saveUi({ status: v });
+        paintGrid({ animate: true, dir: i1 >= i0 ? 1 : -1 });
+      },
       "is-small is-scroll"
     )
   );
@@ -765,7 +787,7 @@ function renderGameStage(host, ctx) {
       );
     };
     if (opts && opts.animate && gridHost.childElementCount > 0) {
-      paperSlipSwap(gridHost, runPaint, { small: true, frameless: true });
+      paperSlipSwap(gridHost, runPaint, { dir: opts.dir === -1 ? -1 : 1, small: true, frameless: true });
     } else {
       withPreservedScroll(gridHost, runPaint);
     }
@@ -883,6 +905,166 @@ function renderGameStage(host, ctx) {
         box.appendChild(delBtn);
       }
     }, { width: 240, alignRight: true });
+  }
+
+  function openCapsuleQuickSettings(anchor) {
+    if (!hasCapsule) return;
+    popover(anchor, (box, close) => {
+      const cfg = Object.assign({}, ctx.capsule.getSettings());
+      const opVal = h("span.bm7-section-sub", {
+        style: { minWidth: "48px", textAlign: "right", fontWeight: "600" },
+        text: cfg.idleOpacity === 0 ? "全透明" : `${cfg.idleOpacity}%`
+      });
+      const opRange = h("input.bm7-range", {
+        attr: { type: "range", min: "0", max: "100", step: "1", value: String(cfg.idleOpacity) },
+        style: { flex: "1" },
+        on: {
+          input: () => {
+            cfg.idleOpacity = Number(opRange.value) || 0;
+            opVal.textContent = cfg.idleOpacity === 0 ? "全透明" : `${cfg.idleOpacity}%`;
+            ctx.capsule.updateSettings({ idleOpacity: cfg.idleOpacity }, { promptTaskbar: false });
+          }
+        }
+      });
+
+      const mgVal = h("span.bm7-section-sub", {
+        style: { minWidth: "48px", textAlign: "right", fontWeight: "600" },
+        text: `${cfg.edgeMargin}px`
+      });
+      const mgRange = h("input.bm7-range", {
+        attr: { type: "range", min: "0", max: "28", step: "1", value: String(cfg.edgeMargin) },
+        style: { flex: "1" },
+        on: {
+          input: () => {
+            cfg.edgeMargin = Number(mgRange.value) || 0;
+            mgVal.textContent = `${cfg.edgeMargin}px`;
+            ctx.capsule.updateSettings({ edgeMargin: cfg.edgeMargin }, { promptTaskbar: false });
+          }
+        }
+      });
+
+      const swVal = h("span.bm7-section-sub", {
+        style: { minWidth: "48px", textAlign: "right", fontWeight: "600" },
+        text: `${cfg.stripWidth ?? 6}px`
+      });
+      const swRange = h("input.bm7-range", {
+        attr: { type: "range", min: "4", max: "14", step: "1", value: String(cfg.stripWidth ?? 6) },
+        style: { flex: "1" },
+        on: {
+          input: () => {
+            cfg.stripWidth = Number(swRange.value) || 6;
+            swVal.textContent = `${cfg.stripWidth}px`;
+            ctx.capsule.updateSettings({ stripWidth: cfg.stripWidth }, { promptTaskbar: false });
+          }
+        }
+      });
+
+      const shVal = h("span.bm7-section-sub", {
+        style: { minWidth: "48px", textAlign: "right", fontWeight: "600" },
+        text: `${cfg.stripHeight ?? 84}px`
+      });
+      const shRange = h("input.bm7-range", {
+        attr: { type: "range", min: "52", max: "148", step: "4", value: String(cfg.stripHeight ?? 84) },
+        style: { flex: "1" },
+        on: {
+          input: () => {
+            cfg.stripHeight = Number(shRange.value) || 84;
+            shVal.textContent = `${cfg.stripHeight}px`;
+            ctx.capsule.updateSettings({ stripHeight: cfg.stripHeight }, { promptTaskbar: false });
+          }
+        }
+      });
+
+      const rowLabelStyle = { fontSize: "12.5px", whiteSpace: "nowrap", flexShrink: "0", minWidth: "78px" };
+
+      box.append(
+        h("div.bm7-pop-title", { text: "游戏侧边手札胶囊（桌面端）" }),
+        toggleRow({
+          label: "游戏运行时启用侧边手札",
+          hint: "启动收录游戏后自动在屏幕旁侧挂起窄条（平时未开游戏时不占用屏幕）",
+          checked: cfg.enabled,
+          onChange: async (v) => {
+            cfg.enabled = v;
+            await ctx.capsule.updateSettings({ enabled: v });
+            repaintAll();
+          }
+        }),
+        toggleRow({
+          label: "自动感知桌面快捷方式启动",
+          hint: "直接从桌面或 Steam 启动已收录游戏时，同样自动唤起侧边胶囊并记时长",
+          checked: cfg.autoDetectExternalProcess,
+          onChange: async (v) => {
+            cfg.autoDetectExternalProcess = v;
+            await ctx.capsule.updateSettings({ autoDetectExternalProcess: v }, { promptTaskbar: false });
+          }
+        }),
+        h("label.bm7-ce-row", { style: { marginTop: "6px", gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "窄条不透明度" }),
+          opRange,
+          opVal
+        ]),
+        h("label.bm7-ce-row", { style: { gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "距屏幕边缘" }),
+          mgRange,
+          mgVal
+        ]),
+        h("label.bm7-ce-row", { style: { gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "窄条粗细" }),
+          swRange,
+          swVal
+        ]),
+        h("label.bm7-ce-row", { style: { gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "窄条高度" }),
+          shRange,
+          shVal
+        ]),
+        h("div.bm7-ce-row", { style: { justifyContent: "space-between", marginTop: "4px", gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "默认附着侧" }),
+          segmented(
+            [
+              { value: "left", label: "左侧" },
+              { value: "right", label: "右侧" }
+            ],
+            cfg.dockSide,
+            (side) => {
+              cfg.dockSide = side;
+              ctx.capsule.updateSettings({ dockSide: side }, { promptTaskbar: false });
+            },
+            "is-small"
+          )
+        ]),
+        h("div.bm7-ce-row", { style: { justifyContent: "space-between", marginTop: "4px", gap: "10px" } }, [
+          h("span", { style: rowLabelStyle, text: "全屏任务栏" }),
+          segmented(
+            [
+              { value: "auto_hide", label: "打字时收起", title: "在全屏游戏内点击手札输入框打字时，临时自动收起底部任务栏，收起手札即还原" },
+              { value: "keep_system", label: "系统默认", title: "不修改任何系统任务栏设置" }
+            ],
+            cfg.taskbarPolicy === "auto_hide" ? "auto_hide" : "keep_system",
+            (pol) => {
+              cfg.taskbarPolicy = pol;
+              ctx.capsule.updateSettings({ taskbarPolicy: pol }, { promptTaskbar: false });
+            },
+            "is-small"
+          )
+        ]),
+        h("p.bm7-ce-hint", {
+          text: "窄条样式会自动跟随当前「番剧档案馆」外观主题，支持按住胶囊或浮窗顶栏跨多显示器拖拽磁吸。"
+        }),
+        h("div.bm7-ce-actions", [
+          button("预览侧边胶囊", {
+            icon: "eye",
+            variant: "primary",
+            onClick: () => {
+              close();
+              ctx.capsule.preview(current || games[0] || null);
+            }
+          }),
+          h("span.bm7-grow"),
+          button("完成", { onClick: () => close() })
+        ])
+      );
+    }, { width: 396, alignRight: true });
   }
 
   function openGlobalAspect(anchor) {

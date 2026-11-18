@@ -853,7 +853,9 @@ function renderGallerySanctuary(hostEl, ctx) {
       const i1 = MODES.findIndex((m) => m.key === patch.viewMode);
       draw(false, { modeSwapDir: i1 >= i0 ? 1 : -1 });
     } else if (patch.activeFolio && patch.activeFolio !== prevFolio) {
-      draw(false, { folioSwap: true });
+      const f0 = folios.findIndex((f) => f.key === prevFolio);
+      const f1 = folios.findIndex((f) => f.key === patch.activeFolio);
+      draw(false, { folioSwap: true, modeSwapDir: f1 >= f0 ? 1 : -1 });
     } else {
       draw(false);
     }

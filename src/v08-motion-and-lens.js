@@ -388,6 +388,132 @@ function withPreservedScroll(hostEl, mutateFn, opts = {}) {
   return res;
 }
 
+/* =========================================================================
+ * 外观专属面板内切换动效注册表（支持未来为任意外观独立挂载定制转场）
+ *   - glide : 干净顺滑的方向性横向滑移（类似「角色典藏画廊」，follow/paper/glow/cinema 默认采用）
+ *   - roxy  : 洛琪希手记专属（焦点区书页平实滑阅 + 书脊折影；子卡片便签轻滑 / 网格清爽横滑）
+ *   - cel   : 晴空画集专属（随左右切换方向自动翻转的光学棱镜虹彩折射 / 清玻镜面反光 / 多重折光切面）
+ * ========================================================================= */
+const THEME_PANEL_TRANSITIONS = {
+  default: "glide",
+  follow: "glide",
+  paper: "glide",
+  glow: "glide",
+  cinema: "glide",
+  roxy: "roxy",
+  cel: "cel"
+};
+
+function registerThemePanelTransition(themeId, modeOrHandler) {
+  if (!themeId || !modeOrHandler) return;
+  THEME_PANEL_TRANSITIONS[String(themeId)] = modeOrHandler;
+}
+
+function normalizeCelFxVariant(raw) {
+  if (raw === "veil" || raw === "sheen") return "veil";
+  if (raw === "ripple" || raw === "louvers") return "ripple";
+  return "prism";
+}
+
+function resolvePanelTransitionProfile(el) {
+  const rootEl = el && el.closest ? el.closest(".bm7-root") : null;
+  const themeId = (rootEl && rootEl.dataset && rootEl.dataset.bm7Theme) || "follow";
+  const mapped = THEME_PANEL_TRANSITIONS[themeId] || THEME_PANEL_TRANSITIONS.default || "glide";
+  const celFx = normalizeCelFxVariant(rootEl && rootEl.dataset && rootEl.dataset.bm8CelFx);
+  return { rootEl, themeId, mode: mapped, celFx };
+}
+
+/**
+ * 晴空画集（cel）专属：方向感知的三套差异化物理光学与柔白水纹转场
+ *   所有横向掠过元素统一承载于 100% 舞台宽度的 `.bm8-cel-track` 轨道内，
+ *   以 `translate3d(-126% <-> 126%, 0, 0)` 完整穿越舞台两侧边界，彻底根治窄光带在半途提前消失的问题。
+ *   - prism （晴空棱镜）：斜面光学棱镜虹彩色散折射 + 水色四芒微星
+ *   - veil  （白羽柔纱）：纯白半透薄纱漫透 + 柔焦微白光斑与白羽流线（零深色调、零硬描边）
+ *   - ripple（澄水涟漪）：点击侧波心荡开清透纯白与浅天水双层正圆水波纹，直达对侧边缘消散
+ */
+function scheduleAfterAnimations(el, fallbackMs, fn) {
+  const check = () => {
+    try {
+      if (el && el.isConnected && typeof el.getAnimations === "function") {
+        const paused = el.getAnimations({ subtree: true }).some((a) => a.playState === "paused");
+        if (paused) {
+          return setTimeout(check, 80);
+        }
+      }
+    } catch (_) {}
+    fn();
+    return 0;
+  };
+  return setTimeout(check, fallbackMs);
+}
+
+function spawnCelOpticalSweep(targetHost, dir = 1, opts = {}) {
+  if (!targetHost || typeof document === "undefined") return null;
+  targetHost.querySelectorAll(":scope > .bm8-cel-optics-stage").forEach((n) => n.remove());
+
+  const variant = normalizeCelFxVariant(opts.variant);
+  const dirCls = dir < 0 ? "is-dir-left" : "is-dir-right";
+  const stage = h("div.bm8-cel-optics-stage", {
+    cls: `is-${variant} ${dirCls} ${opts.hero ? "is-hero" : ""}`,
+    attr: { "aria-hidden": "true" }
+  });
+
+  if (variant === "veil") {
+    // 白羽柔纱：全宽轨道承载纯白羽化薄纱漫透 + 柔焦纯白微光斑 + 羽毛弧光（无任何深色调与硬描边）
+    const uid = `bm8vf${Math.random().toString(36).slice(2, 7)}`;
+    stage.append(
+      h("div.bm8-cel-track.is-veil-main", [
+        h("div.bm8-cel-veil-curtain", [
+          h("span.bm8-cel-veil-bokeh.is-b1"),
+          h("span.bm8-cel-veil-bokeh.is-b2"),
+          h("span.bm8-cel-veil-bokeh.is-b3")
+        ])
+      ]),
+      h("div.bm8-cel-track.is-veil-wisp", [
+        h("div.bm8-cel-veil-silk"),
+        svgEl(
+          `<svg class="bm8-cel-veil-plume" viewBox="0 0 220 72" preserveAspectRatio="none"><defs><linearGradient id="${uid}" x1="0%" y1="50%" x2="100%" y2="50%"><stop offset="0%" stop-color="#ffffff" stop-opacity="0"/><stop offset="35%" stop-color="#ffffff" stop-opacity="0.92"/><stop offset="68%" stop-color="#ffffff" stop-opacity="0.78"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/></linearGradient></defs><path d="M10,52 C68,18 142,20 210,36" fill="none" stroke="url(#${uid})" stroke-width="3.2" stroke-linecap="round"/><path d="M32,60 C88,34 152,32 204,46" fill="none" stroke="url(#${uid})" stroke-width="1.8" stroke-linecap="round" opacity="0.72"/></svg>`
+        )
+      ]),
+      h("div.bm8-cel-track.is-rim", [h("div.bm8-cel-rim-glint.is-veil")])
+    );
+  } else if (variant === "ripple") {
+    // 澄水涟漪：从点击方向一侧荡开双层清透水波圆环与波心柔白微闪，完整漫过整块面板后自然散开
+    stage.append(
+      h("div.bm8-cel-ripple-origin", [
+        h("span.bm8-cel-ripple-drop"),
+        h("span.bm8-cel-ripple-ring.is-r1"),
+        h("span.bm8-cel-ripple-ring.is-r2")
+      ]),
+      h("div.bm8-cel-track.is-rim", [h("div.bm8-cel-rim-glint.is-ripple")])
+    );
+  } else {
+    // 晴空棱镜：全宽轨道承载斜面三棱镜折射主带 + 虹彩光谱锋面 + 尾随流光 + 水色四芒微星
+    stage.append(
+      h("div.bm8-cel-track.is-prism-main", [
+        h("div.bm8-cel-prism-band", [
+          h("span.bm8-cel-prism-caustic"),
+          h("span.bm8-cel-prism-crest")
+        ])
+      ]),
+      h("div.bm8-cel-track.is-prism-sub", [h("div.bm8-cel-prism-trail")]),
+      h("div.bm8-cel-track.is-rim", [h("div.bm8-cel-rim-glint.is-prism")]),
+      svgEl(
+        `<svg class="bm8-cel-spark-burst" viewBox="0 0 120 48"><path class="is-sp1" d="M26 8 L28 16 L36 18 L28 20 L26 28 L24 20 L16 18 L24 16 Z"/><path class="is-sp2" d="M88 20 L89.5 25.5 L95 27 L89.5 28.5 L88 34 L86.5 28.5 L81 27 L86.5 25.5 Z"/></svg>`
+      )
+    );
+  }
+
+  const pos = getComputedStyle(targetHost).position;
+  if (pos === "static") targetHost.style.position = "relative";
+  targetHost.appendChild(stage);
+  const dur = variant === "ripple" ? 560 : 520;
+  scheduleAfterAnimations(stage, dur, () => {
+    if (stage.parentNode) stage.remove();
+  });
+  return stage;
+}
+
 function inkPageSwap(hostEl, renderNext, opts = {}) {
   if (!hostEl) {
     renderNext && renderNext();
@@ -398,42 +524,59 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
     withPreservedScroll(hostEl, renderNext);
     return;
   }
-  const rootEl = hostEl.closest ? hostEl.closest(".bm7-root") : null;
+  const { rootEl, mode, celFx } = resolvePanelTransitionProfile(hostEl);
   if (!rootEl) {
     withPreservedScroll(hostEl, renderNext);
     return;
   }
 
-  // 轻巧档（lite）：复用低显存轻量淡入微滑，不克隆整页图层
+  const dir = opts.dir === -1 ? -1 : 1;
+
+  // 轻巧档（lite）：复用低显存轻量方向微滑，不克隆整页图层
   if (tier === "lite") {
     withPreservedScroll(hostEl, renderNext);
     const nextChild = hostEl.firstElementChild;
     if (nextChild) {
-      nextChild.classList.remove("bm8-soft-swap");
+      nextChild.classList.remove("bm8-soft-swap", "bm8-glide-in-next", "bm8-glide-in-prev");
       void nextChild.offsetWidth;
-      nextChild.classList.add("bm8-soft-swap");
-      setTimeout(() => nextChild.classList.remove("bm8-soft-swap"), 240);
+      const liteCls = dir < 0 ? "bm8-glide-in-prev" : "bm8-glide-in-next";
+      nextChild.classList.add(liteCls);
+      setTimeout(() => nextChild.classList.remove(liteCls), 250);
     }
     return;
   }
 
-  const isRoxy = rootEl.dataset.bm7Theme === "roxy";
-  const dir = opts.dir === -1 ? -1 : 1;
+  if (typeof mode === "function") {
+    mode({ hostEl, renderNext, dir, opts, tier, isHero: true, rootEl });
+    return;
+  }
 
   // 捕获旧面板快照（剥离嵌套转场层并把破框封面收入裁切盒内，彻底杜绝 -20px 顶边残片与 20px 错位双影）
   let ghost = null;
   const prevChild = hostEl.firstElementChild;
-  if (prevChild && prevChild.offsetHeight > 24) {
+  if (prevChild && prevChild.offsetHeight > 24 && (mode === "roxy" || mode === "cel" || mode === "glide")) {
     try {
       ghost = prevChild.cloneNode(true);
       ghost.setAttribute("aria-hidden", "true");
-      ghost.classList.remove("is-entering", "bm8-ink-in", "bm8-soft-swap");
+      ghost.classList.remove(
+        "is-entering",
+        "bm8-ink-in",
+        "bm8-soft-swap",
+        "bm8-glide-in-next",
+        "bm8-glide-in-prev",
+        "bm8-cel-hero-in-next",
+        "bm8-cel-hero-in-prev"
+      );
       ghost.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
-      ghost.querySelectorAll(".bm8-swap-stage, .bm8-ink-flourish, .bm8-reader-crease").forEach((n) => n.remove());
-      ghost.querySelectorAll(".bm7-hero-plate").forEach((p) => {
-        p.style.marginTop = "12px";
-        p.style.transform = "none";
-      });
+      ghost
+        .querySelectorAll(".bm8-swap-stage, .bm8-ink-flourish, .bm8-reader-crease, .bm8-cel-optics-stage")
+        .forEach((n) => n.remove());
+      if (mode === "roxy") {
+        ghost.querySelectorAll(".bm7-hero-plate").forEach((p) => {
+          p.style.marginTop = "12px";
+          p.style.transform = "none";
+        });
+      }
     } catch (_) {
       ghost = null;
     }
@@ -444,11 +587,11 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
   const nextChild = hostEl.firstElementChild;
   if (!nextChild) return;
 
-  nextChild.querySelectorAll(":scope > .bm8-swap-stage").forEach((n) => n.remove());
+  nextChild.querySelectorAll(":scope > .bm8-swap-stage, :scope > .bm8-cel-optics-stage").forEach((n) => n.remove());
   const nextPos = getComputedStyle(nextChild).position;
   if (nextPos === "static") nextChild.style.position = "relative";
 
-  if (isRoxy) {
+  if (mode === "roxy") {
     // 洛琪希手记专属：现代阅读器/纸质手账不透明整页平移滑阅 + 柔和书脊折影
     const mainTarget = nextChild.querySelector(":scope > .bm7-hero-main") || nextChild;
     mainTarget.classList.remove("bm8-journal-under-in", "bm8-journal-under-back");
@@ -471,24 +614,47 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
     return;
   }
 
-  // 其他开启动态效果的外观：修复后的严格内裁切不透明轻掀卡片 + 右下留白星芒
+  if (mode === "cel") {
+    // 晴空画集专属：方向感知的通透内容横滑 + 棱镜虹彩折射 / 清玻反光掠过
+    const mainTarget = nextChild.querySelector(":scope > .bm7-hero-main") || nextChild;
+    const inCls = dir < 0 ? "bm8-cel-hero-in-prev" : "bm8-cel-hero-in-next";
+    mainTarget.classList.remove("bm8-cel-hero-in-next", "bm8-cel-hero-in-prev");
+    void mainTarget.offsetWidth;
+    mainTarget.classList.add(inCls);
+    scheduleAfterAnimations(mainTarget, 380, () => mainTarget.classList.remove(inCls));
+
+    if (ghost) {
+      const ghostMain = ghost.querySelector(":scope > .bm7-hero-main") || ghost;
+      const stageWrap = h("div.bm8-swap-stage.is-frameless-glide", { attr: { "aria-hidden": "true" } });
+      ghostMain.classList.add(dir < 0 ? "bm8-cel-ghost-out-prev" : "bm8-cel-ghost-out-next");
+      stageWrap.appendChild(ghostMain);
+      nextChild.appendChild(stageWrap);
+      scheduleAfterAnimations(stageWrap, 170, () => {
+        if (stageWrap.parentNode) stageWrap.remove();
+      });
+    }
+    spawnCelOpticalSweep(nextChild, dir, { variant: celFx, hero: true });
+    return;
+  }
+
+  // 其他外观（follow / paper / glow / cinema）：干净顺滑的「角色典藏画廊」同款方向性横向切换动效
   const mainTarget = nextChild.querySelector(":scope > .bm7-hero-main") || nextChild;
-  mainTarget.classList.remove("bm8-ink-in");
+  const inCls = dir < 0 ? "bm8-frameless-hero-in-prev" : "bm8-frameless-hero-in-next";
+  mainTarget.classList.remove("bm8-frameless-hero-in-next", "bm8-frameless-hero-in-prev");
   void mainTarget.offsetWidth;
-  mainTarget.classList.add("bm8-ink-in");
-  setTimeout(() => mainTarget.classList.remove("bm8-ink-in"), 420);
+  mainTarget.classList.add(inCls);
+  setTimeout(() => mainTarget.classList.remove(inCls), 320);
 
   if (ghost) {
-    const stageWrap = h("div.bm8-swap-stage.is-leaf", { attr: { "aria-hidden": "true" } });
-    ghost.classList.add("bm8-leaf");
-    if (dir < 0) ghost.classList.add("is-back");
-    stageWrap.appendChild(ghost);
+    const ghostMain = ghost.querySelector(":scope > .bm7-hero-main") || ghost;
+    const stageWrap = h("div.bm8-swap-stage.is-frameless-glide", { attr: { "aria-hidden": "true" } });
+    ghostMain.classList.add(dir < 0 ? "bm8-frameless-hero-out-prev" : "bm8-frameless-hero-out-next");
+    stageWrap.appendChild(ghostMain);
     nextChild.appendChild(stageWrap);
     setTimeout(() => {
       if (stageWrap.parentNode) stageWrap.remove();
-    }, 410);
+    }, 140);
   }
-  spawnInkFlourish(nextChild, { compact: opts.compact, dir });
 }
 
 /* =========================================================================
@@ -523,12 +689,19 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     return;
   }
 
+  const { rootEl, mode, celFx } = resolvePanelTransitionProfile(hostEl);
   const dir = opts.dir === -1 ? -1 : 1;
+
+  if (typeof mode === "function") {
+    mode({ hostEl, renderNext, dir, opts, tier, isHero: false, rootEl });
+    return;
+  }
+
   if (hostEl._bm8SlipTid) {
     clearTimeout(hostEl._bm8SlipTid);
     hostEl._bm8SlipTid = 0;
   }
-  hostEl.querySelectorAll(":scope > .bm8-memo-slip-sheet").forEach((n) => n.remove());
+  hostEl.querySelectorAll(":scope > .bm8-memo-slip-sheet, :scope > .bm8-cel-optics-stage").forEach((n) => n.remove());
   hostEl.style.height = "";
   hostEl.style.overflow = "";
   hostEl.style.transition = "";
@@ -536,7 +709,7 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   const savedScroll = captureScrollAncestors(hostEl);
   const prevH = hostEl.offsetHeight;
 
-  // 轻巧档（lite）：轻量淡入微滑 + 柔和高度插值 + 滚动位置锁定（低显存零克隆）
+  // 轻巧档（lite）：轻量方向微滑 + 柔和高度插值 + 滚动位置锁定（低显存零克隆）
   if (tier === "lite") {
     clearViewportScrollCushion(hostEl);
     if (prevH > 24) hostEl.style.minHeight = `${prevH}px`;
@@ -550,9 +723,10 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       applyViewportScrollCushion(hostEl, savedScroll, naturalH);
     }
     const nextH = hostEl.offsetHeight;
-    hostEl.classList.remove("bm8-paper-lite-in");
+    const liteCls = dir < 0 ? "bm8-glide-in-prev" : "bm8-glide-in-next";
+    hostEl.classList.remove("bm8-paper-lite-in", "bm8-glide-in-next", "bm8-glide-in-prev");
     void hostEl.offsetWidth;
-    hostEl.classList.add("bm8-paper-lite-in");
+    hostEl.classList.add(liteCls);
     if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 4 && !opts.skipHeight) {
       hostEl.style.height = `${prevH}px`;
       if (!opts.allowOverflow) hostEl.style.overflow = "hidden";
@@ -564,21 +738,30 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       restoreScrollAncestors(savedScroll);
     }
     hostEl._bm8SlipTid = setTimeout(() => {
-      hostEl.classList.remove("bm8-paper-lite-in");
+      hostEl.classList.remove("bm8-paper-lite-in", "bm8-glide-in-next", "bm8-glide-in-prev");
       hostEl.style.height = "";
       hostEl.style.overflow = "";
       hostEl.style.transition = "";
       restoreScrollAncestors(savedScroll);
       hostEl._bm8SlipTid = 0;
-    }, 230);
+    }, 240);
     return;
   }
 
-  // 丰富档（full）：克隆宿主自身以 100% 保留 Grid / Flex / Gap / Padding 布局，杜绝子元素错排与边缘截断
+  // 判定当前外观的面板内切换模式：
+  // - 仅「洛琪希手记」(roxy) 在封闭卡片内保留便签斜滑，其余外观（follow/paper/glow/cinema）统一走类似「角色典藏画廊」的清爽横向滑移
+  // - 「晴空画集」(cel) 走方向感知的横向清透滑移 + 光学棱镜折射 / 清玻镜面反光
+  const useRoxyMemoSlip = mode === "roxy" && !opts.frameless;
+  const isCelMode = mode === "cel";
+
   let memoSheet = null;
   if (hostEl.childElementCount > 0 && prevH > 24 && !opts.noGhost) {
     try {
-      const clsList = [dir < 0 ? "is-reverse" : "", opts.frameless ? "is-frameless" : ""]
+      const clsList = [
+        dir < 0 ? "is-reverse" : "",
+        useRoxyMemoSlip ? "" : "is-frameless",
+        isCelMode ? "is-cel-glide" : ""
+      ]
         .filter(Boolean)
         .join(" ");
       memoSheet = h("div.bm8-memo-slip-sheet", {
@@ -587,7 +770,13 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       });
       const hostClone = hostEl.cloneNode(true);
       hostClone.removeAttribute("id");
-      hostClone.classList.remove("bm8-paper-lite-in", "bm8-paper-under-reveal", "bm8-anchor-stage");
+      hostClone.classList.remove(
+        "bm8-paper-lite-in",
+        "bm8-glide-in-next",
+        "bm8-glide-in-prev",
+        "bm8-paper-under-reveal",
+        "bm8-anchor-stage"
+      );
       hostClone.style.removeProperty("--bm8-anchor-min-h");
       hostClone.style.height = "auto";
       hostClone.style.minHeight = "0";
@@ -600,10 +789,20 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       hostClone.style.width = "100%";
       hostClone.style.boxSizing = "border-box";
       hostClone.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
-      hostClone.querySelectorAll(".bm8-memo-slip-sheet").forEach((n) => n.remove());
-      hostClone.querySelectorAll(".bm8-paper-under-reveal, .is-frameless-in, .is-frameless-in-rev").forEach((n) => {
-        n.classList.remove("bm8-paper-under-reveal", "is-frameless-in", "is-frameless-in-rev");
-      });
+      hostClone.querySelectorAll(".bm8-memo-slip-sheet, .bm8-cel-optics-stage").forEach((n) => n.remove());
+      hostClone
+        .querySelectorAll(
+          ".bm8-paper-under-reveal, .is-frameless-in, .is-frameless-in-rev, .is-cel-in, .is-cel-in-rev"
+        )
+        .forEach((n) => {
+          n.classList.remove(
+            "bm8-paper-under-reveal",
+            "is-frameless-in",
+            "is-frameless-in-rev",
+            "is-cel-in",
+            "is-cel-in-rev"
+          );
+        });
       memoSheet.appendChild(hostClone);
     } catch (_) {
       memoSheet = null;
@@ -629,7 +828,13 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   const revealedChildren = [];
   Array.from(hostEl.children).forEach((ch) => {
     if (ch === memoSheet) return;
-    ch.classList.remove("bm8-paper-under-reveal");
+    ch.classList.remove(
+      "bm8-paper-under-reveal",
+      "is-frameless-in",
+      "is-frameless-in-rev",
+      "is-cel-in",
+      "is-cel-in-rev"
+    );
     let hadBaseAnim = false;
     try {
       const baseAnim = getComputedStyle(ch).animationName;
@@ -637,7 +842,9 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     } catch (_) {}
     void ch.offsetWidth;
     ch.classList.add("bm8-paper-under-reveal");
-    if (opts.frameless) {
+    if (isCelMode) {
+      ch.classList.add(dir < 0 ? "is-cel-in-rev" : "is-cel-in");
+    } else if (!useRoxyMemoSlip) {
       ch.classList.add(dir < 0 ? "is-frameless-in-rev" : "is-frameless-in");
     }
     revealedChildren.push({ el: ch, hadBaseAnim });
@@ -645,6 +852,11 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
 
   if (memoSheet) {
     hostEl.appendChild(memoSheet);
+  }
+
+  if (isCelMode) {
+    const opticsHost = opts.celStageHost || hostEl;
+    spawnCelOpticalSweep(opticsHost, dir, { variant: celFx });
   }
 
   if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 4 && !opts.skipHeight) {
@@ -655,22 +867,28 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     hostEl.style.transition = "height 300ms cubic-bezier(0.22, 1, 0.36, 1)";
     hostEl.style.height = `${nextH}px`;
   } else {
-    // 高度基本不变时绝不强加 overflow: clip，保护扇形叠卡、阴影与悬浮徽章完整无损
     restoreScrollAncestors(savedScroll);
   }
 
-  hostEl._bm8SlipTid = setTimeout(() => {
+  const settleMs = isCelMode ? 480 : 330;
+  hostEl._bm8SlipTid = scheduleAfterAnimations(hostEl, settleMs, () => {
     if (memoSheet && memoSheet.parentNode) memoSheet.remove();
     revealedChildren.forEach(({ el, hadBaseAnim }) => {
       if (hadBaseAnim && el.style) el.style.animation = "none";
-      el.classList.remove("bm8-paper-under-reveal", "is-frameless-in", "is-frameless-in-rev");
+      el.classList.remove(
+        "bm8-paper-under-reveal",
+        "is-frameless-in",
+        "is-frameless-in-rev",
+        "is-cel-in",
+        "is-cel-in-rev"
+      );
     });
     hostEl.style.height = "";
     hostEl.style.overflow = "";
     hostEl.style.transition = "";
     restoreScrollAncestors(savedScroll);
     hostEl._bm8SlipTid = 0;
-  }, 330);
+  }, settleMs);
 }
 
 function scrollUnrollMorph(hostEl, renderNext, opts = {}) {
@@ -2186,29 +2404,748 @@ const MOTION_AND_LENS_CSS = String.raw`
   animation: bm8-paper-under-in .28s cubic-bezier(.22, 1, .36, 1) both;
 }
 .bm8-paper-under-reveal.is-frameless-in {
-  animation: bm8-frameless-in .21s cubic-bezier(.22, 1, .36, 1) .07s both;
+  animation: bm8-frameless-in .23s cubic-bezier(.22, 1, .36, 1) .065s both;
 }
 .bm8-paper-under-reveal.is-frameless-in-rev {
-  animation: bm8-frameless-in-rev .21s cubic-bezier(.22, 1, .36, 1) .07s both;
+  animation: bm8-frameless-in-rev .23s cubic-bezier(.22, 1, .36, 1) .065s both;
+}
+.bm8-paper-under-reveal.is-cel-in {
+  animation: bm8-cel-panel-in .28s cubic-bezier(.20, 1, .32, 1) .055s both;
+}
+.bm8-paper-under-reveal.is-cel-in-rev {
+  animation: bm8-cel-panel-in-rev .28s cubic-bezier(.20, 1, .32, 1) .055s both;
+}
+.bm8-memo-slip-sheet.is-cel-glide {
+  animation: bm8-cel-panel-out .125s cubic-bezier(.4, 0, .85, 1) forwards !important;
+}
+.bm8-memo-slip-sheet.is-cel-glide.is-reverse {
+  animation: bm8-cel-panel-out-rev .125s cubic-bezier(.4, 0, .85, 1) forwards !important;
 }
 .bm8-paper-lite-in {
   animation: bm8-soft-fade .20s cubic-bezier(.22, 1, .36, 1) both;
 }
+.bm8-glide-in-next {
+  animation: bm8-frameless-in .22s cubic-bezier(.22, 1, .36, 1) both;
+}
+.bm8-glide-in-prev {
+  animation: bm8-frameless-in-rev .22s cubic-bezier(.22, 1, .36, 1) both;
+}
+.bm8-swap-stage.is-frameless-glide {
+  overflow: visible !important;
+  background: transparent !important;
+}
+.bm8-frameless-hero-in-next {
+  animation: bm8-frameless-in .25s cubic-bezier(.22, 1, .36, 1) .06s both;
+}
+.bm8-frameless-hero-in-prev {
+  animation: bm8-frameless-in-rev .25s cubic-bezier(.22, 1, .36, 1) .06s both;
+}
+.bm8-frameless-hero-out-next {
+  animation: bm8-frameless-out .11s cubic-bezier(.4, 0, 1, 1) forwards;
+}
+.bm8-frameless-hero-out-prev {
+  animation: bm8-frameless-out-rev .11s cubic-bezier(.4, 0, 1, 1) forwards;
+}
+.bm8-cel-hero-in-next {
+  animation: bm8-cel-panel-in .30s cubic-bezier(.20, 1, .32, 1) .055s both;
+}
+.bm8-cel-hero-in-prev {
+  animation: bm8-cel-panel-in-rev .30s cubic-bezier(.20, 1, .32, 1) .055s both;
+}
+.bm8-cel-ghost-out-next {
+  animation: bm8-cel-panel-out .13s cubic-bezier(.4, 0, .85, 1) forwards;
+}
+.bm8-cel-ghost-out-prev {
+  animation: bm8-cel-panel-out-rev .13s cubic-bezier(.4, 0, .85, 1) forwards;
+}
 @keyframes bm8-frameless-out {
   from { opacity: 1; transform: translate3d(0, 0, 0); }
-  to { opacity: 0; transform: translate3d(-8px, 0, 0); }
+  to { opacity: 0; transform: translate3d(-12px, 0, 0); }
 }
 @keyframes bm8-frameless-out-rev {
   from { opacity: 1; transform: translate3d(0, 0, 0); }
-  to { opacity: 0; transform: translate3d(8px, 0, 0); }
+  to { opacity: 0; transform: translate3d(12px, 0, 0); }
 }
 @keyframes bm8-frameless-in {
-  from { opacity: 0; transform: translate3d(8px, 0, 0); }
+  from { opacity: 0; transform: translate3d(12px, 0, 0); }
   to { opacity: 1; transform: none; }
 }
 @keyframes bm8-frameless-in-rev {
-  from { opacity: 0; transform: translate3d(-8px, 0, 0); }
+  from { opacity: 0; transform: translate3d(-12px, 0, 0); }
   to { opacity: 1; transform: none; }
+}
+@keyframes bm8-cel-panel-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(-18px, 0, 0); }
+}
+@keyframes bm8-cel-panel-out-rev {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(18px, 0, 0); }
+}
+@keyframes bm8-cel-panel-in {
+  0% { opacity: 0; transform: translate3d(18px, 0, 0); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-cel-panel-in-rev {
+  0% { opacity: 0; transform: translate3d(-18px, 0, 0); }
+  100% { opacity: 1; transform: none; }
+}
+/* 晴空画集三款动效的入场内容物理呼应：
+ * - prism（晴空棱镜）：轻微方向色散边缘迅速凝结清透
+ * - veil （白羽柔纱）：柔和纯白空气羽化（微柔焦与微亮雾感）轻盈显影，零彩色阴影
+ * - ripple（澄水涟漪）：清澈水面微涟浮现
+ */
+.bm7-root[data-bm8-cel-fx="prism"] .bm8-paper-under-reveal.is-cel-in,
+.bm7-root[data-bm8-cel-fx="prism"] .bm8-cel-hero-in-next {
+  animation-name: bm8-cel-prism-content-in;
+}
+.bm7-root[data-bm8-cel-fx="prism"] .bm8-paper-under-reveal.is-cel-in-rev,
+.bm7-root[data-bm8-cel-fx="prism"] .bm8-cel-hero-in-prev {
+  animation-name: bm8-cel-prism-content-in-rev;
+}
+.bm7-root[data-bm8-cel-fx="veil"] .bm8-paper-under-reveal.is-cel-in,
+.bm7-root[data-bm8-cel-fx="veil"] .bm8-cel-hero-in-next,
+.bm7-root[data-bm8-cel-fx="sheen"] .bm8-paper-under-reveal.is-cel-in,
+.bm7-root[data-bm8-cel-fx="sheen"] .bm8-cel-hero-in-next {
+  animation-name: bm8-cel-veil-content-in;
+  animation-duration: .34s;
+}
+.bm7-root[data-bm8-cel-fx="veil"] .bm8-paper-under-reveal.is-cel-in-rev,
+.bm7-root[data-bm8-cel-fx="veil"] .bm8-cel-hero-in-prev,
+.bm7-root[data-bm8-cel-fx="sheen"] .bm8-paper-under-reveal.is-cel-in-rev,
+.bm7-root[data-bm8-cel-fx="sheen"] .bm8-cel-hero-in-prev {
+  animation-name: bm8-cel-veil-content-in-rev;
+  animation-duration: .34s;
+}
+.bm7-root[data-bm8-cel-fx="ripple"] .bm8-paper-under-reveal.is-cel-in,
+.bm7-root[data-bm8-cel-fx="ripple"] .bm8-cel-hero-in-next,
+.bm7-root[data-bm8-cel-fx="louvers"] .bm8-paper-under-reveal.is-cel-in,
+.bm7-root[data-bm8-cel-fx="louvers"] .bm8-cel-hero-in-next {
+  animation-name: bm8-cel-ripple-content-in;
+  animation-duration: .34s;
+}
+.bm7-root[data-bm8-cel-fx="ripple"] .bm8-paper-under-reveal.is-cel-in-rev,
+.bm7-root[data-bm8-cel-fx="ripple"] .bm8-cel-hero-in-prev,
+.bm7-root[data-bm8-cel-fx="louvers"] .bm8-paper-under-reveal.is-cel-in-rev,
+.bm7-root[data-bm8-cel-fx="louvers"] .bm8-cel-hero-in-prev {
+  animation-name: bm8-cel-ripple-content-in-rev;
+  animation-duration: .34s;
+}
+@keyframes bm8-cel-prism-content-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(20px, 0, 0);
+    filter: drop-shadow(-4px 0 0 rgb(14 165 233 / .45)) drop-shadow(4px 0 0 rgb(244 63 94 / .38));
+  }
+  58% {
+    opacity: 1;
+    filter: drop-shadow(-1.5px 0 0 rgb(14 165 233 / .22)) drop-shadow(1.5px 0 0 rgb(168 85 247 / .18));
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+@keyframes bm8-cel-prism-content-in-rev {
+  0% {
+    opacity: 0;
+    transform: translate3d(-20px, 0, 0);
+    filter: drop-shadow(4px 0 0 rgb(14 165 233 / .45)) drop-shadow(-4px 0 0 rgb(244 63 94 / .38));
+  }
+  58% {
+    opacity: 1;
+    filter: drop-shadow(1.5px 0 0 rgb(14 165 233 / .22)) drop-shadow(-1.5px 0 0 rgb(168 85 247 / .18));
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+@keyframes bm8-cel-veil-content-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(14px, 0, 0);
+    filter: blur(2.6px) brightness(1.07);
+  }
+  62% {
+    opacity: 1;
+    filter: blur(0.6px) brightness(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+@keyframes bm8-cel-veil-content-in-rev {
+  0% {
+    opacity: 0;
+    transform: translate3d(-14px, 0, 0);
+    filter: blur(2.6px) brightness(1.07);
+  }
+  62% {
+    opacity: 1;
+    filter: blur(0.6px) brightness(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+@keyframes bm8-cel-ripple-content-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(14px, 0, 0) scale(.992);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bm8-cel-ripple-content-in-rev {
+  0% {
+    opacity: 0;
+    transform: translate3d(-14px, 0, 0) scale(.992);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* =========================================================================
+ * 晴空画集（cel）专属：方向感知的三套差异化光学与柔白水纹体系（全宽轨道纯 GPU 驱动）
+ *   .bm8-cel-track 恒为舞台 100% 宽度，位移 -126% <-> +126% 相对于整个舞台宽度计算，
+ *   确保从右往左与从左往右双向均完整掠出面板边缘，绝不在面板中途停滞或消失。
+ * ========================================================================= */
+.bm8-cel-optics-stage {
+  position: absolute !important;
+  inset: -2px !important;
+  border-radius: var(--bm7-r-lg, 14px);
+  overflow: hidden !important;
+  pointer-events: none !important;
+  z-index: 9;
+  contain: paint;
+}
+.bm8-cel-optics-stage.is-hero {
+  inset: 0 !important;
+  border-radius: inherit !important;
+}
+.bm8-cel-track {
+  position: absolute;
+  top: -26%;
+  bottom: -26%;
+  left: 0;
+  width: 100%;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.bm8-cel-track.is-rim {
+  top: 0;
+  bottom: auto;
+  height: 3px;
+}
+
+/* -------- 方案 1：晴空棱镜（is-prism） -------- */
+.bm8-cel-prism-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 30%;
+  width: 38%;
+  min-width: 136px;
+  transform: skewX(-18deg);
+  backdrop-filter: blur(4px) saturate(1.58) contrast(1.04);
+  -webkit-backdrop-filter: blur(4px) saturate(1.58) contrast(1.04);
+  border-left: 1.5px solid rgb(14 165 233 / .66);
+  border-right: 1.5px solid rgb(236 72 153 / .50);
+  background: linear-gradient(
+    90deg,
+    rgb(2 132 199 / .08) 0%,
+    rgb(14 165 233 / .36) 18%,
+    rgb(125 211 252 / .46) 34%,
+    rgb(255 255 255 / .92) 50%,
+    rgb(168 85 247 / .32) 68%,
+    rgb(251 113 133 / .28) 84%,
+    rgb(251 191 36 / .16) 100%
+  );
+  box-shadow:
+    inset 2px 0 0 rgb(255 255 255 / .94),
+    -10px 0 24px -6px rgb(14 165 233 / .26),
+    10px 0 24px -6px rgb(168 85 247 / .20);
+}
+.theme-dark .bm8-cel-prism-band {
+  backdrop-filter: blur(5px) saturate(1.68) brightness(1.14);
+  -webkit-backdrop-filter: blur(5px) saturate(1.68) brightness(1.14);
+  border-left-color: rgb(34 211 238 / .80);
+  border-right-color: rgb(244 114 182 / .70);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(34 211 238 / .40) 16%,
+    rgb(96 165 250 / .42) 35%,
+    rgb(240 249 255 / .78) 50%,
+    rgb(192 132 252 / .44) 68%,
+    rgb(244 114 182 / .36) 86%,
+    transparent 100%
+  );
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-prism-band {
+  transform: skewX(18deg);
+  border-left-color: rgb(236 72 153 / .50);
+  border-right-color: rgb(14 165 233 / .66);
+  background: linear-gradient(
+    270deg,
+    rgb(2 132 199 / .08) 0%,
+    rgb(14 165 233 / .36) 18%,
+    rgb(125 211 252 / .46) 34%,
+    rgb(255 255 255 / .92) 50%,
+    rgb(168 85 247 / .32) 68%,
+    rgb(251 113 133 / .28) 84%,
+    rgb(251 191 36 / .16) 100%
+  );
+  box-shadow:
+    inset -2px 0 0 rgb(255 255 255 / .94),
+    10px 0 24px -6px rgb(14 165 233 / .26),
+    -10px 0 24px -6px rgb(168 85 247 / .20);
+}
+.theme-dark .bm8-cel-optics-stage.is-dir-left .bm8-cel-prism-band {
+  border-left-color: rgb(244 114 182 / .70);
+  border-right-color: rgb(34 211 238 / .80);
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    rgb(34 211 238 / .40) 16%,
+    rgb(96 165 250 / .42) 35%,
+    rgb(240 249 255 / .78) 50%,
+    rgb(192 132 252 / .44) 68%,
+    rgb(244 114 182 / .36) 86%,
+    transparent 100%
+  );
+}
+.bm8-cel-prism-crest {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 48%;
+  width: 4px;
+  background: linear-gradient(180deg, transparent 0%, rgb(255 255 255 / .98) 20%, rgb(255 255 255 / 1) 80%, transparent 100%);
+  box-shadow: 0 0 12px rgb(56 189 248 / .82);
+}
+.bm8-cel-prism-caustic {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0 10px,
+    rgb(255 255 255 / .26) 10px 12px,
+    rgb(14 165 233 / .14) 12px 15px
+  );
+}
+.bm8-cel-prism-trail {
+  position: absolute;
+  top: 4%;
+  bottom: 4%;
+  left: 41%;
+  width: 18%;
+  min-width: 68px;
+  transform: skewX(-18deg);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(14 165 233 / .24) 30%,
+    rgb(255 255 255 / .78) 52%,
+    rgb(236 72 153 / .24) 78%,
+    transparent 100%
+  );
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-prism-trail {
+  transform: skewX(18deg);
+}
+.bm8-cel-optics-stage.is-prism.is-dir-right .bm8-cel-track.is-prism-main {
+  animation: bm8-cel-track-rtl .40s cubic-bezier(.22, .86, .32, 1) both;
+}
+.bm8-cel-optics-stage.is-prism.is-dir-left .bm8-cel-track.is-prism-main {
+  animation: bm8-cel-track-ltr .40s cubic-bezier(.22, .86, .32, 1) both;
+}
+.bm8-cel-optics-stage.is-prism.is-dir-right .bm8-cel-track.is-prism-sub {
+  animation: bm8-cel-track-rtl .43s cubic-bezier(.20, .82, .32, 1) .045s both;
+}
+.bm8-cel-optics-stage.is-prism.is-dir-left .bm8-cel-track.is-prism-sub {
+  animation: bm8-cel-track-ltr .43s cubic-bezier(.20, .82, .32, 1) .045s both;
+}
+.bm8-cel-spark-burst {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  width: 108px;
+  height: 44px;
+  fill: #0ea5e9;
+  filter: drop-shadow(0 0 6px rgb(56 189 248 / .75));
+}
+.theme-dark .bm8-cel-spark-burst {
+  fill: #7dd3fc;
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-spark-burst {
+  right: auto;
+  left: 18px;
+  transform: scaleX(-1);
+}
+.bm8-cel-spark-burst path {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  animation: bm8-cel-spark-flash .38s cubic-bezier(.22, 1, .36, 1) .05s forwards;
+}
+.bm8-cel-spark-burst path.is-sp2 {
+  fill: #ec4899;
+  animation-delay: .11s;
+}
+
+/* -------- 方案 2：白羽柔纱（is-veil · 纯白半透薄纱与微光斑，零深色调零硬描边） -------- */
+.bm8-cel-veil-curtain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 18%;
+  width: 64%;
+  min-width: 210px;
+  border-radius: 999px;
+  border: none;
+  transform: skewX(-12deg);
+  backdrop-filter: blur(5.5px) brightness(1.06);
+  -webkit-backdrop-filter: blur(5.5px) brightness(1.06);
+  background: linear-gradient(
+    90deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(255 255 255 / .24) 16%,
+    rgb(255 255 255 / .68) 38%,
+    rgb(255 255 255 / .93) 52%,
+    rgb(255 255 255 / .58) 70%,
+    rgb(255 255 255 / .18) 86%,
+    rgb(255 255 255 / 0) 100%
+  );
+  box-shadow: 0 0 36px 8px rgb(255 255 255 / .55);
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-veil-curtain {
+  transform: skewX(12deg);
+  background: linear-gradient(
+    270deg,
+    rgb(255 255 255 / 0) 0%,
+    rgb(255 255 255 / .24) 16%,
+    rgb(255 255 255 / .68) 38%,
+    rgb(255 255 255 / .93) 52%,
+    rgb(255 255 255 / .58) 70%,
+    rgb(255 255 255 / .18) 86%,
+    rgb(255 255 255 / 0) 100%
+  );
+}
+.theme-dark .bm8-cel-veil-curtain {
+  backdrop-filter: blur(6px) brightness(1.12);
+  -webkit-backdrop-filter: blur(6px) brightness(1.12);
+  background: linear-gradient(
+    90deg,
+    rgb(248 250 252 / 0) 0%,
+    rgb(248 250 252 / .10) 18%,
+    rgb(248 250 252 / .24) 40%,
+    rgb(255 255 255 / .36) 52%,
+    rgb(248 250 252 / .20) 70%,
+    rgb(248 250 252 / .06) 86%,
+    rgb(248 250 252 / 0) 100%
+  );
+  box-shadow: 0 0 32px 4px rgb(248 250 252 / .16);
+}
+.theme-dark .bm8-cel-optics-stage.is-dir-left .bm8-cel-veil-curtain {
+  background: linear-gradient(
+    270deg,
+    rgb(248 250 252 / 0) 0%,
+    rgb(248 250 252 / .10) 18%,
+    rgb(248 250 252 / .24) 40%,
+    rgb(255 255 255 / .36) 52%,
+    rgb(248 250 252 / .20) 70%,
+    rgb(248 250 252 / .06) 86%,
+    rgb(248 250 252 / 0) 100%
+  );
+}
+.bm8-cel-veil-bokeh {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgb(255 255 255 / .98) 0%,
+    rgb(255 255 255 / .72) 45%,
+    rgb(224 242 254 / .22) 72%,
+    transparent 100%
+  );
+  box-shadow: 0 0 16px rgb(255 255 255 / .85);
+}
+.theme-dark .bm8-cel-veil-bokeh {
+  background: radial-gradient(
+    circle,
+    rgb(255 255 255 / .68) 0%,
+    rgb(241 245 249 / .34) 50%,
+    transparent 100%
+  );
+  box-shadow: 0 0 14px rgb(255 255 255 / .32);
+}
+.bm8-cel-veil-bokeh.is-b1 {
+  width: 54px;
+  height: 54px;
+  top: 26%;
+  left: 34%;
+}
+.bm8-cel-veil-bokeh.is-b2 {
+  width: 34px;
+  height: 34px;
+  top: 56%;
+  left: 58%;
+}
+.bm8-cel-veil-bokeh.is-b3 {
+  width: 24px;
+  height: 24px;
+  top: 36%;
+  left: 70%;
+}
+.bm8-cel-veil-silk {
+  position: absolute;
+  top: 6%;
+  bottom: 6%;
+  left: 36%;
+  width: 28%;
+  min-width: 96px;
+  transform: skewX(-14deg);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(255 255 255 / .52) 32%,
+    rgb(255 255 255 / .96) 50%,
+    rgb(255 255 255 / .48) 68%,
+    transparent 100%
+  );
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-veil-silk {
+  transform: skewX(14deg);
+}
+.theme-dark .bm8-cel-veil-silk {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(255 255 255 / .18) 32%,
+    rgb(255 255 255 / .44) 50%,
+    rgb(255 255 255 / .16) 68%,
+    transparent 100%
+  );
+}
+.bm8-cel-veil-plume {
+  position: absolute;
+  top: 32%;
+  left: 26%;
+  width: 48%;
+  height: 36%;
+  filter: drop-shadow(0 0 8px rgb(255 255 255 / .88));
+}
+.theme-dark .bm8-cel-veil-plume {
+  opacity: .58;
+  filter: drop-shadow(0 0 6px rgb(255 255 255 / .38));
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-veil-plume {
+  transform: scaleX(-1);
+}
+.bm8-cel-optics-stage.is-veil.is-dir-right .bm8-cel-track.is-veil-main {
+  animation: bm8-cel-track-rtl .42s cubic-bezier(.22, .84, .30, 1) both;
+}
+.bm8-cel-optics-stage.is-veil.is-dir-left .bm8-cel-track.is-veil-main {
+  animation: bm8-cel-track-ltr .42s cubic-bezier(.22, .84, .30, 1) both;
+}
+.bm8-cel-optics-stage.is-veil.is-dir-right .bm8-cel-track.is-veil-wisp {
+  animation: bm8-cel-track-rtl .45s cubic-bezier(.18, .82, .28, 1) .04s both;
+}
+.bm8-cel-optics-stage.is-veil.is-dir-left .bm8-cel-track.is-veil-wisp {
+  animation: bm8-cel-track-ltr .45s cubic-bezier(.18, .82, .28, 1) .04s both;
+}
+
+/* -------- 方案 3：澄水涟漪（is-ripple · 从点击侧荡开清透纯白与浅天水双层圆环水波） -------- */
+.bm8-cel-ripple-origin {
+  position: absolute;
+  top: 50%;
+  left: 88%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-ripple-origin {
+  left: 12%;
+}
+.bm8-cel-ripple-drop {
+  position: absolute;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  transform: translate3d(-50%, -50%, 0);
+  background: radial-gradient(
+    circle,
+    rgb(255 255 255 / .96) 0%,
+    rgb(224 247 255 / .72) 42%,
+    rgb(125 211 252 / .18) 72%,
+    transparent 100%
+  );
+  animation: bm8-cel-ripple-drop .32s cubic-bezier(.20, .86, .32, 1) both;
+}
+.theme-dark .bm8-cel-ripple-drop {
+  background: radial-gradient(
+    circle,
+    rgb(240 249 255 / .72) 0%,
+    rgb(125 211 252 / .34) 48%,
+    transparent 100%
+  );
+}
+.bm8-cel-ripple-ring {
+  position: absolute;
+  width: 1120px;
+  height: 1120px;
+  max-width: 145vw;
+  max-height: 145vw;
+  border-radius: 50%;
+  border: none;
+  will-change: transform, opacity;
+  background: radial-gradient(
+    closest-side,
+    transparent 0% 78%,
+    rgb(255 255 255 / .28) 83.5%,
+    rgb(224 247 255 / .76) 88.5%,
+    rgb(255 255 255 / .96) 91.5%,
+    rgb(125 211 252 / .34) 94.8%,
+    transparent 100%
+  );
+}
+.bm8-cel-ripple-ring.is-r2 {
+  width: 920px;
+  height: 920px;
+  background: radial-gradient(
+    closest-side,
+    transparent 0% 82%,
+    rgb(255 255 255 / .36) 87%,
+    rgb(255 255 255 / .90) 91.5%,
+    rgb(186 230 253 / .42) 95%,
+    transparent 100%
+  );
+}
+.theme-dark .bm8-cel-ripple-ring {
+  background: radial-gradient(
+    closest-side,
+    transparent 0% 79%,
+    rgb(186 230 253 / .12) 84.5%,
+    rgb(224 242 254 / .42) 89.5%,
+    rgb(255 255 255 / .62) 92%,
+    rgb(56 189 248 / .26) 95.5%,
+    transparent 100%
+  );
+}
+.theme-dark .bm8-cel-ripple-ring.is-r2 {
+  background: radial-gradient(
+    closest-side,
+    transparent 0% 83%,
+    rgb(224 242 254 / .24) 88%,
+    rgb(255 255 255 / .50) 92%,
+    rgb(125 211 252 / .22) 95.5%,
+    transparent 100%
+  );
+}
+.bm8-cel-optics-stage.is-ripple .bm8-cel-ripple-ring.is-r1 {
+  animation: bm8-cel-ripple-expand .46s cubic-bezier(.18, .82, .28, 1) 0s both;
+}
+.bm8-cel-optics-stage.is-ripple .bm8-cel-ripple-ring.is-r2 {
+  animation: bm8-cel-ripple-expand .48s cubic-bezier(.18, .82, .28, 1) .065s both;
+}
+
+/* 顶部边框玻璃流光掠影（统一挂载在 100% 宽度 .bm8-cel-track.is-rim 上，左右双向彻底滑出边界） */
+.bm8-cel-rim-glint {
+  position: absolute;
+  top: 0;
+  left: 24%;
+  width: 52%;
+  height: 2.5px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(255 255 255 / .86) 28%,
+    rgb(255 255 255 / 1) 50%,
+    rgb(224 247 255 / .88) 72%,
+    transparent 100%
+  );
+  box-shadow: 0 1px 8px rgb(255 255 255 / .65);
+}
+.bm8-cel-rim-glint.is-ripple {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(186 230 253 / .78) 26%,
+    rgb(255 255 255 / .98) 50%,
+    rgb(125 211 252 / .72) 74%,
+    transparent 100%
+  );
+  box-shadow: 0 1px 8px rgb(125 211 252 / .42);
+}
+.bm8-cel-rim-glint.is-prism {
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(6 182 212 / .92) 22%,
+    rgb(255 255 255 / 1) 48%,
+    rgb(168 85 247 / .88) 72%,
+    rgb(244 63 94 / .82) 88%,
+    transparent 100%
+  );
+  box-shadow: 0 1px 10px rgb(168 85 247 / .40);
+}
+.bm8-cel-optics-stage.is-dir-right .bm8-cel-track.is-rim {
+  animation: bm8-cel-track-rtl .39s cubic-bezier(.22, .86, .32, 1) both;
+}
+.bm8-cel-optics-stage.is-dir-left .bm8-cel-track.is-rim {
+  animation: bm8-cel-track-ltr .39s cubic-bezier(.22, .86, .32, 1) both;
+}
+
+@keyframes bm8-cel-track-rtl {
+  0% { opacity: 0; transform: translate3d(118%, 0, 0); }
+  12% { opacity: 1; }
+  88% { opacity: .96; }
+  100% { opacity: 0; transform: translate3d(-118%, 0, 0); }
+}
+@keyframes bm8-cel-track-ltr {
+  0% { opacity: 0; transform: translate3d(-118%, 0, 0); }
+  12% { opacity: 1; }
+  88% { opacity: .96; }
+  100% { opacity: 0; transform: translate3d(118%, 0, 0); }
+}
+@keyframes bm8-cel-ripple-expand {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(.05);
+  }
+  16% {
+    opacity: .96;
+  }
+  78% {
+    opacity: .72;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(1.75);
+  }
+}
+@keyframes bm8-cel-ripple-drop {
+  0% { opacity: 0; transform: translate3d(-50%, -50%, 0) scale(.35); }
+  36% { opacity: .95; transform: translate3d(-50%, -50%, 0) scale(1.15); }
+  100% { opacity: 0; transform: translate3d(-50%, -50%, 0) scale(1.9); }
+}
+@keyframes bm8-cel-spark-flash {
+  0% { opacity: 0; transform: scale(.3) rotate(-25deg); }
+  45% { opacity: .98; transform: scale(1.12) rotate(8deg); }
+  100% { opacity: 0; transform: scale(.5) rotate(32deg); }
 }
 @keyframes bm8-memo-slip-out {
   0% { opacity: 1; transform: translate3d(0, 0, 0) rotateZ(0deg); }
@@ -3455,6 +4392,8 @@ module.exports = {
   paperSlipSwap,
   scrollUnrollMorph,
   animateWorkspaceGlide,
+  registerThemePanelTransition,
+  spawnCelOpticalSweep,
   createPageJumpLink,
   spawnInkFlourish,
   renderWatchLensDeck,

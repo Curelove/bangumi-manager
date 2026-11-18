@@ -105,7 +105,8 @@ function renderRandomPicker(host, cfg) {
           dir,
           frameless: true,
           skipHeight: true,
-          allowOverflow: true
+          allowOverflow: true,
+          celStageHost: stage
         });
       } catch (_) {
         paintIdleInfo(list);

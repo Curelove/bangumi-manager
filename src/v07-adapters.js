@@ -22,6 +22,7 @@ const reviewStudioService = require("./review-studio-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
 const gameMultisourceApi = require("./game-multisource-api.js");
 const gameStatsService = require("./game-stats-and-groups-service.js");
+const gameCapsuleService = require("./game-floating-capsule-service.js");
 
 function getAppearance(plugin) {
   const s = (plugin && plugin.settings) || {};
@@ -43,6 +44,7 @@ async function saveAppearance(plugin, next) {
   plugin.settings.archiveVisualTheme = norm.theme === "follow" ? "obsidian" : norm.theme;
   plugin.settings.archiveDynamicThemeMotion = norm.motion !== false;
   await plugin.saveSettings();
+  gameCapsuleService.broadcastToCapsuleWindow(plugin);
 }
 
 function itemKey(it) {
@@ -672,6 +674,31 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
   const games = Array.isArray(plugin.settings.gameCollection) ? plugin.settings.gameCollection : [];
   const save = async () => plugin.saveSettings();
   const refresh = () => typeof rerender === "function" && rerender();
+  if (typeof plugin._v07GameStageUnreg === "function") {
+    plugin._v07GameStageUnreg();
+  }
+  plugin._v07GameStageUnreg = gameCapsuleService.registerGameStageRefreshHook(plugin, refresh);
+
+  const capsuleBridge = {
+    supported: gameCapsuleService.isDesktopCapsuleSupported(),
+    getSettings: () => gameCapsuleService.ensureGameCapsuleSettings(plugin),
+    updateSettings: async (patch, opts = {}) => {
+      const cfg = gameCapsuleService.ensureGameCapsuleSettings(plugin);
+      const turningOn = patch && patch.enabled === true && !cfg.enabled;
+      Object.assign(cfg, patch || {});
+      gameCapsuleService.ensureGameCapsuleSettings(plugin);
+      await save();
+      gameCapsuleService.refreshGameCapsuleLifecycle(plugin);
+      gameCapsuleService.broadcastToCapsuleWindow(plugin);
+      if (turningOn && cfg.taskbarPolicy === "ask" && opts.promptTaskbar !== false) {
+        gameCapsuleService.promptTaskbarPolicyIfNeeded(plugin, () => {
+          refresh();
+        });
+      }
+      return cfg;
+    },
+    preview: (g) => gameCapsuleService.openCapsulePreview(plugin, g)
+  };
   const getCover = (g) => {
     try {
       return typeof mh.resolveLocalOrVaultImageUrl === "function"
@@ -711,6 +738,7 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
     games,
     initialSearchQuery: extraOpts.searchQuery || "",
     appearance: getAppearance(plugin),
+    capsule: capsuleBridge,
     settings: {
       gameUi: plugin.settings.gameUi || {},
       gameGroups: ensureNormalizedGameGroups(plugin)

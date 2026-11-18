@@ -5919,7 +5919,7 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     );
   };
 
-  const renderRankAndSync = (animMode = "none") => {
+  const renderRankAndSync = (animMode = "none", rankDir = 1) => {
     const paintRank = () => {
       rankHost.empty();
       renderMoePreferenceRankingSection(
@@ -5928,18 +5928,18 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
         allRankedTraits,
         uiState,
         options,
-        (triggerKind = "tab") => {
+        (triggerKind = "tab", dir = 1) => {
           if (triggerKind === "trait") {
             renderRankAndSync("none");
-            renderGalleryOnly({ small: true, frameless: true });
+            renderGalleryOnly({ small: true, frameless: true, dir });
           } else {
-            renderRankAndSync("rank");
+            renderRankAndSync("rank", dir);
           }
         }
       );
     };
     if (animMode === "rank") {
-      paperSlipSwap(rankHost, paintRank, { small: true, frameless: true });
+      paperSlipSwap(rankHost, paintRank, { dir: rankDir, small: true, frameless: true });
     } else {
       withPreservedScroll(rankHost, paintRank, { anchorScroll: false });
     }
@@ -6563,7 +6563,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
     { id: "appearance", label: "发色·瞳色" },
     { id: "cv", label: "声优" }
   ];
-  catTabs.forEach((tab) => {
+  catTabs.forEach((tab, tabIdx) => {
     const btn = dossierTabs.createEl("button", {
       cls: `bm8-dossier-tab ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
       text: tab.label,
@@ -6574,8 +6574,10 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
     });
     btn.onclick = (e) => {
       e.preventDefault();
+      if (uiState.rankCategory === tab.id) return;
+      const prevIdx = catTabs.findIndex((t) => t.id === uiState.rankCategory);
       uiState.rankCategory = tab.id;
-      onRefresh();
+      onRefresh("tab", tabIdx >= prevIdx ? 1 : -1);
     };
   });
 
@@ -6870,13 +6872,14 @@ function renderCharacterGallerySection(
 
   const caliperStrip = sortWrap.createDiv("bm8-caliper-strip");
   caliperStrip.createSpan({ cls: "bm8-caliper-label", text: "排序" });
-  [
+  const sortModes = [
     { id: "score-desc", label: "喜爱度" },
     { id: "height-desc", label: "身高↓" },
     { id: "height-asc", label: "身高↑" },
     { id: "date-desc", label: "最近收录" },
     { id: "name-asc", label: "姓名" }
-  ].forEach((mode) => {
+  ];
+  sortModes.forEach((mode, modeIdx) => {
     const b = caliperStrip.createEl("button", {
       cls: `bm8-caliper-btn ${uiState.gallerySortMode === mode.id ? "is-active" : ""}`,
       text: mode.label,
@@ -6888,6 +6891,7 @@ function renderCharacterGallerySection(
     b.onclick = (e) => {
       e.preventDefault();
       if (uiState.gallerySortMode === mode.id) return;
+      const prevIdx = sortModes.findIndex((m) => m.id === uiState.gallerySortMode);
       uiState.gallerySortMode = mode.id;
       renderCharacterGallerySection(
         plugin,
@@ -6897,7 +6901,7 @@ function renderCharacterGallerySection(
         uiState,
         options,
         onFullRefresh,
-        { small: true, frameless: true }
+        { dir: modeIdx >= prevIdx ? 1 : -1, small: true, frameless: true }
       );
     };
   });

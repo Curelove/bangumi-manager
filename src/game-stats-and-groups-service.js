@@ -334,6 +334,10 @@ function startActiveGameTimer(plugin, game) {
     startedAtIso: new Date().toISOString()
   };
   plugin._activeGameTimers.set(game.id, state);
+  try {
+    const capSvc = require("./game-floating-capsule-service.js");
+    capSvc.activateGameSideCapsule(plugin, game, { source: "internal" });
+  } catch (_) {}
   return state;
 }
 
@@ -347,6 +351,10 @@ async function stopActiveGameTimer(plugin, game, syncCallback) {
   const active = plugin._activeGameTimers.get(game.id);
   if (!active) return null;
   plugin._activeGameTimers.delete(game.id);
+  try {
+    const capSvc = require("./game-floating-capsule-service.js");
+    capSvc.deactivateGameSideCapsule(plugin, game.id);
+  } catch (_) {}
   const elapsedHours = Math.max(0.05, (Date.now() - active.startedAtMs) / 3600000);
   const entry = recordGameSessionInternal(game, {
     startedAt: active.startedAtIso,
@@ -585,6 +593,7 @@ module.exports = {
   startActiveGameTimer,
   getActiveGameTimer,
   stopActiveGameTimer,
+  finishActiveGameTimer: stopActiveGameTimer,
   addManualGameHoursBackfill,
   computeGamePlayStats,
   pickRandomGame,

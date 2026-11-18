@@ -36,13 +36,20 @@ const DEFAULT_THEME_MOTION_LEVEL = {
 };
 
 const VALID_MOTION_LEVELS = new Set(["full", "lite", "off"]);
+const VALID_CEL_FX = new Set(["prism", "veil", "ripple"]);
+
+function normalizeCelFx(rawFx) {
+  if (rawFx === "veil" || rawFx === "sheen") return "veil";
+  if (rawFx === "ripple" || rawFx === "louvers") return "ripple";
+  return VALID_CEL_FX.has(rawFx) ? rawFx : "prism";
+}
 
 const THEMES = [
   {
     id: "follow",
     name: "跟随 Obsidian",
     desc: "跟随当前 Obsidian 主题配色，明暗自动切换",
-    motionHint: "开启后，顶部泛起当前番剧封面的柔和环境色呼吸，切换焦点时带轻巧掀页转场",
+    motionHint: "开启后，顶部泛起当前番剧封面的柔和环境色呼吸，面板内按左右方向清爽滑移切换",
     defaultMotion: false,
     swatch: ["linear-gradient(135deg,#f4f4f4 0 50%,#2a2a2a 50% 100%)", "rgba(150,150,150,.38)", "#7c6fd8"]
   },
@@ -50,7 +57,7 @@ const THEMES = [
     id: "paper",
     name: "暖色纸本",
     desc: "温润米白纸张配胡桃木棕，久看柔和不刺眼",
-    motionHint: "开启后，纸面右上角浮现午后窗棂暖阳与树影微风轻晃，切换焦点时带卡片掀页转场",
+    motionHint: "开启后，纸面右上角浮现午后窗棂暖阳与树影微风轻晃，面板内按左右方向清爽滑移切换",
     defaultMotion: false,
     swatch: ["#fbf7ef", "#efe6d6", "#8f683d"]
   },
@@ -58,7 +65,7 @@ const THEMES = [
     id: "glow",
     name: "封面柔光",
     desc: "焦点封面化作多层呼吸柔光，磨砂面板随光标轻移",
-    motionHint: "开启后，焦点封面柔光随光标流动，磨砂边框折射高光，封面支持微倾光泽与掀页转场",
+    motionHint: "开启后，焦点封面柔光随光标流动，磨砂边框折射高光，面板内按左右方向清爽滑移切换",
     defaultMotion: true,
     swatch: ["#e9dfe6", "#b9a3c4", "#5d6fb3"]
   },
@@ -66,7 +73,7 @@ const THEMES = [
     id: "cinema",
     name: "夜间影院",
     desc: "暖调暗场配琥珀微光，适合夜晚安静看番",
-    motionHint: "开启后，暗场上方洒下柔和的琥珀放映机光束与微尘浮动，切换焦点时带暗房掀页转场",
+    motionHint: "开启后，暗场上方洒下柔和的琥珀放映机光束与微尘浮动，面板内按左右方向清爽滑移切换",
     defaultMotion: false,
     swatch: ["#171411", "#2a241e", "#e0a458"]
   },
@@ -82,7 +89,7 @@ const THEMES = [
     id: "cel",
     name: "晴空画集",
     desc: "澄澈晴空水色配赛璐璐网点画集，通透清爽",
-    motionHint: "开启后，晴空流云光斑与赛璐璐胶片微粒轻柔漂移（暗色化作夏夜流萤星光），带画集掀页转场",
+    motionHint: "开启后，晴空流云光斑轻柔漂移（暗色化作夏夜星穹），面板左右切换时随方向展现晴空棱镜、白羽柔纱或澄水涟漪",
     defaultMotion: true,
     swatch: ["linear-gradient(155deg,#dff0ff 0%,#f5faff 62%,#fff8eb 100%)", "#ffffff", "#2c7be5"]
   }
@@ -97,7 +104,8 @@ const DEFAULT_APPEARANCE = {
   roxyArt: true,
   roxyGaze: true,
   roxyHat: false,
-  roxyNoteCollapsed: false
+  roxyNoteCollapsed: false,
+  celFx: "prism"
 };
 
 function normalizeAppearance(raw) {
@@ -145,7 +153,8 @@ function normalizeAppearance(raw) {
     roxyArt: src.roxyArt !== false,
     roxyGaze: src.roxyGaze !== false,
     roxyHat: Boolean(src.roxyHat),
-    roxyNoteCollapsed: Boolean(src.roxyNoteCollapsed)
+    roxyNoteCollapsed: Boolean(src.roxyNoteCollapsed),
+    celFx: normalizeCelFx(src.celFx)
   };
 }
 
@@ -173,6 +182,7 @@ function applyTheme(rootEl, appearance) {
   rootEl.setAttribute("data-bm7-theme", a.theme);
   rootEl.setAttribute("data-bm7-motion", a.motion ? "on" : "off");
   rootEl.setAttribute("data-bm7-motion-tier", a.motionLevel);
+  rootEl.setAttribute("data-bm8-cel-fx", a.celFx || "prism");
   ensureDecorLayer(rootEl, a);
   if (a.theme === "glow" && a.motionLevel === "full") {
     attachCoverGlowMotion(rootEl);
@@ -359,6 +369,16 @@ function renderAppearancePicker(host, opts = {}) {
     motionSegHost
   ]);
 
+  const celFxLabel = h("div.bm7-toggle-label", { text: "晴空画集 · 面板切换光效" });
+  const celFxHint = h("div.bm7-toggle-hint", {
+    text: "随面板向左或向右切换自动翻转光线倾角与掠过方向"
+  });
+  const celFxSegHost = h("div.bm8-motion-tier-seg");
+  const celFxRow = h("div.bm8-motion-tier-row", [
+    h("div.bm7-toggle-text", [celFxLabel, celFxHint]),
+    celFxSegHost
+  ]);
+
   const artRow = toggleRow({
     label: "显示洛琪希插画与批注",
     hint: "在「洛琪希手记」下展示侧栏探头小人与手写批注卡（轻点小人可切换脱帽呆毛与巫师帽）",
@@ -474,6 +494,35 @@ function renderAppearancePicker(host, opts = {}) {
     artInput.checked = Boolean(a.roxyArt);
     artRow.style.display = a.theme === "roxy" ? "" : "none";
 
+    celFxRow.style.display = a.theme === "cel" ? "" : "none";
+    const celFxDisabled = a.motionLevel !== "full";
+    celFxRow.classList.toggle("is-disabled", celFxDisabled);
+    clear(celFxSegHost);
+    celFxSegHost.appendChild(
+      segmented(
+        [
+          { value: "prism", label: "晴空棱镜", title: "通透斜面玻璃折射伴随水青与微光谱边掠过" },
+          { value: "veil", label: "白羽柔纱", title: "纯白半透薄纱与柔焦光斑随风漫透，无深色调与硬描边" },
+          { value: "ripple", label: "澄水涟漪", title: "从点击侧荡开清透纯白与浅天水双层环形水纹" }
+        ],
+        a.celFx || "prism",
+        (fx) => {
+          if (celFxDisabled) return;
+          commit({ celFx: fx });
+        },
+        "is-small"
+      )
+    );
+    if (celFxHint) {
+      celFxHint.textContent = celFxDisabled
+        ? "需将上方动效强度设为「丰富」以启用晴空画集专属切换转场"
+        : a.celFx === "veil"
+        ? "纯白半透薄纱携柔焦微光斑随风向轻拂漫透，零深色调、零硬描边"
+        : a.celFx === "ripple"
+        ? "从点击方向的一侧荡开清透纯白与浅天水双层环形水波纹，悠然散至对侧"
+        : "斜面光学棱镜折射带伴随水青—纯白—微粉紫光谱边随切换方向掠过";
+    }
+
     gazeInput.checked = Boolean(a.roxyGaze);
     gazeRow.style.display = a.theme === "roxy" ? "" : "none";
     const gazeDisabled = a.motionLevel !== "full" || !a.roxyArt;
@@ -487,7 +536,7 @@ function renderAppearancePicker(host, opts = {}) {
     }
   };
 
-  toggles.append(motionRow, artRow, gazeRow);
+  toggles.append(motionRow, celFxRow, artRow, gazeRow);
   wrap.append(grid, toggles);
   host.appendChild(wrap);
   paint();

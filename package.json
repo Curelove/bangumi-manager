@@ -1,6 +1,6 @@
 {
   "name": "bangumi-manager",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "description": "Bangumi anime note manager for Obsidian.",
   "scripts": {

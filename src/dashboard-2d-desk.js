@@ -2088,7 +2088,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
     }
 
     filterBar.empty();
-    baseFilters.forEach((f) => {
+    baseFilters.forEach((f, fIdx) => {
       const pill = filterBar.createEl("button", {
         cls: `curator-filter-pill ${state.statusFilter === f.key ? "is-active" : ""}`
       });
@@ -2098,8 +2098,9 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       pill.onclick = (e) => {
         e.preventDefault();
         if (state.statusFilter === f.key) return;
+        const prevIdx = baseFilters.findIndex((x) => x.key === state.statusFilter);
         state.statusFilter = f.key;
-        state._nextCatalogAnim = { dir: 1, small: true };
+        state._nextCatalogAnim = { dir: fIdx >= prevIdx ? 1 : -1, small: true };
         renderCatalogSection(plugin, catalogMount, state, helpers);
       };
     });

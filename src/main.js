@@ -99,6 +99,7 @@ const {
 const bangumiApi = require("./bangumi-api.js");
 const noteManager = require("./note-manager.js");
 const bilibiliLiveService = require("./bilibili-live-service.js");
+const gameCapsuleService = require("./game-floating-capsule-service.js");
 const animeActivityService = require("./anime-activity-and-random-service.js");
 const importManager = require("./import-manager.js");
 const batchImportManager = require("./batch-import-manager.js");
@@ -259,6 +260,7 @@ var DEFAULT_SETTINGS = {
     groupMode: "none",
     status: "all"
   },
+  gameCapsule: Object.assign({}, gameCapsuleService.DEFAULT_GAME_CAPSULE_SETTINGS),
   archiveAppearance: {
     theme: "follow",
     motion: true,
@@ -1306,11 +1308,20 @@ var BangumiManagerPlugin = class extends Plugin {
     this.startStatusTimer();
     this._biliLiveUnloaded = false;
     bilibiliLiveService.startBilibiliLiveMonitor(this);
+    gameCapsuleService.refreshGameCapsuleLifecycle(this);
+    if (this.app && this.app.workspace && typeof this.app.workspace.on === "function") {
+      this.registerEvent(
+        this.app.workspace.on("css-change", () => {
+          gameCapsuleService.broadcastToCapsuleWindow(this);
+        })
+      );
+    }
   }
   onunload() {
     this.unloaded = true;
     this._biliLiveUnloaded = true;
     bilibiliLiveService.stopBilibiliLiveMonitor(this);
+    gameCapsuleService.stopGameCapsuleService(this);
 
     this.stopStatusTimer();
     clearTimeout(this.saveCheckTimer);

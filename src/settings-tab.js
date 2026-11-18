@@ -30,6 +30,7 @@ const {
   removeAtelierHdPack,
   preloadAtelierHdPrototypes
 } = require("./atelier-3d-pack-service");
+const gameCapsuleService = require("./game-floating-capsule-service");
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -820,7 +821,8 @@ module.exports = function createSettingsTabClass({
     ["score", "rating", "评分", "排行", "同步", "监测", "bgm", "bangumi", "netaba", "趋势", "对比", "分布", "pf", "pftb", "ph"],
     ["path", "folder", "dir", "目录", "路径", "文件夹", "封面", "音声", "音声典藏", "台词音声", "画册", "游戏", "本地", "根目录", "初始化", "base", "仓库", "ml", "lj", "wjj"],
     ["legacy", "upgrade", "migrate", "兼容", "旧版", "旧版本", "过时", "升级", "补齐", "修复", "维护", "笔记结构", "jb", "sj"],
-    ["season", "季度", "新番", "排期", "清理", "视图", "年代", "年份", "jd", "xf"]
+    ["season", "季度", "新番", "排期", "清理", "视图", "年代", "年份", "jd", "xf"],
+    ["game", "capsule", "游戏", "侧边", "胶囊", "手札胶囊", "悬浮", "悬浮窗", "全屏", "窄条", "任务栏", "yx", "cb", "jn"]
   ];
 
   function isFuzzySubsequence(needle, haystack) {
@@ -2313,8 +2315,10 @@ module.exports = function createSettingsTabClass({
           });
       });
 
+    this.addGameCapsuleSettings(container, true);
+
     this.addGuideDemoDrawer(container, {
-      title: "番剧档案馆与 3D 原画展厅双视图实机导览",
+      title: "番剧档案馆、3D 原画展厅与游戏侧边手札实机导览",
       items: [
         {
           fileName: "guide-archive-hall.gif",
@@ -2323,6 +2327,10 @@ module.exports = function createSettingsTabClass({
         {
           fileName: "guide-3d-subview.gif",
           caption: "三维「状态与收藏轨」常驻立式分栏导视牌，支持在「开架回廊」与「折屏展架」双视图间自由切换。"
+        },
+        {
+          fileName: "guide-game-capsule.gif",
+          caption: "启动已收录游戏后手札面板自动收拢至屏幕旁侧化作半透明窄条，全屏游戏内移近边缘即可展开记录并实时同步。"
         }
       ]
     });
@@ -3065,6 +3073,8 @@ module.exports = function createSettingsTabClass({
     });
 
     this.addAtelier3DPackSettings(container, false);
+
+    this.addGameCapsuleSettings(container, false);
 
     if (!isDesktopNodeAvailable()) {
       const mobileNote = container.createDiv({
@@ -4553,6 +4563,168 @@ await this.saveAndSynchronizeNoteScores();
       });
     });
   }
+  addGameCapsuleSettings(container, compact = false) {
+    container.createEl("h3", {
+      text: "游戏典藏 · 桌面侧边手札胶囊"
+    });
+
+    if (!gameCapsuleService.isDesktopCapsuleSupported()) {
+      const note = container.createDiv({
+        cls: "setting-item-description",
+        text: "跨显示器侧边半透明胶囊与全屏手札浮窗依赖桌面端操作系统窗口层，当前移动端环境下仅保留馆内游戏手札面板，不会影响原有笔记同步。"
+      });
+      note.style.padding = "8px 12px";
+      note.style.marginBottom = "10px";
+      note.style.borderRadius = "8px";
+      note.style.background = "var(--background-secondary)";
+      return;
+    }
+
+    const cfg = gameCapsuleService.ensureGameCapsuleSettings(this.plugin);
+
+    new Setting(container)
+      .setName("游戏运行时启用桌面侧边手札胶囊")
+      .setDesc(
+        "开启后，当启动已收录游戏（或开始计时）时，自动在显示器左右旁侧挂起窄窄的半透明竖条；光标移近时亮显浮起，点击即展开与档案馆实时镜像同步的「游戏手札」浮窗。平时未运行游戏时不占用屏幕。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(Boolean(cfg.enabled));
+        toggle.onChange(async (value) => {
+          const turningOn = value && !cfg.enabled;
+          cfg.enabled = value;
+          await this.plugin.saveSettings();
+          gameCapsuleService.refreshGameCapsuleLifecycle(this.plugin);
+          gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+          if (turningOn && cfg.taskbarPolicy === "ask") {
+            gameCapsuleService.promptTaskbarPolicyIfNeeded(this.plugin, () => {
+              this.display();
+            });
+          } else {
+            this.display();
+          }
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("预览侧边胶囊");
+        btn.onClick(() => {
+          gameCapsuleService.openCapsulePreview(this.plugin);
+        });
+      });
+
+    if (compact && !cfg.enabled) {
+      return;
+    }
+
+    new Setting(container)
+      .setName("自动识别桌面快捷方式或 Steam 直接启动的游戏")
+      .setDesc(
+        "开启后，即使不从 Obsidian 内点启动，直接在电脑桌面双击已绑定路径的游戏（.exe / .lnk / Steam .url）运行时，也会自动唤出侧边手札胶囊并记录本次游玩时长。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(cfg.autoDetectExternalProcess !== false);
+        toggle.onChange(async (value) => {
+          cfg.autoDetectExternalProcess = value;
+          await this.plugin.saveSettings();
+          gameCapsuleService.refreshGameCapsuleLifecycle(this.plugin);
+        });
+      });
+
+    new Setting(container)
+      .setName("侧边窄条静默不透明度")
+      .setDesc(
+        `当前：${cfg.idleOpacity === 0 ? "0%（全透明隐形，仅光标移近该侧边缘时浮现）" : `${cfg.idleOpacity}%`}。窄条材质会自动跟随当前番剧档案馆的 6 款外观主题。`
+      )
+      .addSlider((slider) => {
+        slider
+          .setLimits(0, 100, 1)
+          .setValue(cfg.idleOpacity)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            cfg.idleOpacity = Math.round(value);
+            await this.plugin.saveSettings();
+            gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+          });
+      });
+
+    new Setting(container)
+      .setName("侧边窄条距显示器边缘间距")
+      .setDesc("设置平行于显示器左右边缘的呼吸留白距离（0px 紧贴边缘 ～ 28px；按住胶囊或浮窗顶栏可跨多显示器自由拖动磁吸）。")
+      .addSlider((slider) => {
+        slider
+          .setLimits(0, 28, 1)
+          .setValue(cfg.edgeMargin)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            cfg.edgeMargin = Math.round(value);
+            await this.plugin.saveSettings();
+            gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+          });
+      });
+
+    if (!compact) {
+      new Setting(container)
+        .setName("侧边窄条粗细与长度")
+        .setDesc(`当前窄条宽 ${cfg.stripWidth}px · 高 ${cfg.stripHeight}px。`)
+        .addSlider((slider) => {
+          slider
+            .setLimits(4, 14, 1)
+            .setValue(cfg.stripWidth)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              cfg.stripWidth = Math.round(value);
+              await this.plugin.saveSettings();
+              gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+            });
+        })
+        .addSlider((slider) => {
+          slider
+            .setLimits(52, 148, 4)
+            .setValue(cfg.stripHeight)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              cfg.stripHeight = Math.round(value);
+              await this.plugin.saveSettings();
+              gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+            });
+        });
+
+      new Setting(container)
+        .setName("默认附着屏幕侧边")
+        .setDesc("选择侧边胶囊默认吸附在屏幕左侧还是右侧（也可直接鼠标按住胶囊拖向任意显示器边缘自动吸附）。")
+        .addDropdown((dd) => {
+          dd.addOptions({
+            right: "屏幕右侧",
+            left: "屏幕左侧"
+          });
+          dd.setValue(cfg.dockSide === "left" ? "left" : "right");
+          dd.onChange(async (value) => {
+            cfg.dockSide = value === "left" ? "left" : "right";
+            await this.plugin.saveSettings();
+            gameCapsuleService.refreshGameCapsuleLifecycle(this.plugin);
+            gameCapsuleService.broadcastToCapsuleWindow(this.plugin);
+          });
+        });
+    }
+
+    new Setting(container)
+      .setName("全屏游戏展开打字时的任务栏处理")
+      .setDesc(
+        "平时浏览、悬停或勾选待办采用无焦点置顶，不会唤出底部任务栏；点进文本框打字时，可选择临时自动收起系统任务栏（收起手札即刻还原），或保持系统默认。"
+      )
+      .addDropdown((dd) => {
+        dd.addOptions({
+          ask: "首次开启时询问我",
+          auto_hide: "打字时临时收起系统任务栏（收起即还原）",
+          keep_system: "不修改系统设置（允许任务栏浮现）"
+        });
+        dd.setValue(cfg.taskbarPolicy || "ask");
+        dd.onChange(async (value) => {
+          cfg.taskbarPolicy = value;
+          await this.plugin.saveSettings();
+        });
+      });
+  }
+
   addSeasonSettings(container) {
     new Setting(container).setName("\u5B63\u5EA6\u89C6\u56FE\u7B56\u7565").setDesc(
       this.plugin.settings.mode === "lazy" ? "\u9ED8\u8BA4\u4E0D\u81EA\u52A8\u589E\u52A0\u5B63\u5EA6\u89C6\u56FE\uFF1B\u9700\u8981\u65F6\u70B9\u51FB\u201C\u751F\u6210\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE\u201D\u3002" : "\u53EA\u65B0\u589E\u89C6\u56FE\uFF0C\u4E0D\u5220\u9664\u5DF2\u6709\u89C6\u56FE\uFF1B\u201C\u5168\u90E8\u52A8\u753B\u201D\u59CB\u7EC8\u4FDD\u7559\u3002"
