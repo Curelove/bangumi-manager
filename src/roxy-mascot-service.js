@@ -12,6 +12,7 @@
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
+  isMobileEnv,
   pluginAssetExists,
   writePluginAssetBinary
 } = require("./platform-env.js");
@@ -892,44 +893,134 @@ function resolveRoxyAssetUrl(plugin, relativeFile) {
 }
 
 /**
- * 解析内置校准版 8 态 Q 版洛琪希立绘及玩偶彩蛋资源 URL（assets/roxy-chibi-sprites/），无需下载高清立绘包
+ * 解析内置校准版 8 态 Q 版洛琪希立绘及玩偶彩蛋资源 URL（assets/roxy-chibi-sprites/），桌面端与移动端统一加载
  */
 function resolveRoxyChibiAssetUrl(plugin, fileName) {
   try {
     const cleanName = String(fileName || "chibi_guide.png").replace(/^\//, "");
+    const coord = plugin && plugin._roxyCoordinator;
+    if (coord && coord.missingChibiFiles && coord.missingChibiFiles.has(cleanName)) {
+      return "";
+    }
     const cfgDir = String(plugin?.app?.vault?.configDir || ".obsidian").replace(/\\/g, "/").replace(/\/+$/, "");
     const baseDir =
       plugin && plugin.manifest && plugin.manifest.dir
         ? plugin.manifest.dir.replace(/\\/g, "/").replace(/\/$/, "")
         : `${cfgDir}/plugins/bangumi-manager`;
     const cleanRel = `${baseDir}/assets/roxy-chibi-sprites/${cleanName}`;
+    const adapter = plugin?.app?.vault?.adapter;
+    if (!adapter || typeof adapter.getResourcePath !== "function") {
+      return "";
+    }
 
-    // 检测本地插件目录是否存在该文件（移动端无 Node fs 时安全回退至内置像素形象或已存在 adapter 资源）
     const fs = tryRequireNode("fs");
     const path = tryRequireNode("path");
     const vaultBase =
-      isDesktopNodeAvailable() &&
-      plugin?.app?.vault?.adapter &&
-      typeof plugin.app.vault.adapter.getBasePath === "function"
-        ? plugin.app.vault.adapter.getBasePath()
+      isDesktopNodeAvailable() && typeof adapter.getBasePath === "function"
+        ? adapter.getBasePath()
         : "";
     if (fs && path && vaultBase) {
       const absTarget = path.join(vaultBase, baseDir, "assets", "roxy-chibi-sprites", cleanName);
-      if (fs.existsSync(absTarget) && plugin?.app?.vault?.adapter?.getResourcePath) {
-        let resourceUrl = plugin.app.vault.adapter.getResourcePath(cleanRel);
-        const bust = plugin._roxyCoordinator && plugin._roxyCoordinator.assetCacheBust;
-        if (resourceUrl && bust) {
-          resourceUrl += (resourceUrl.includes("?") ? "&" : "?") + `v=${bust}`;
-        }
-        return resourceUrl;
+      if (!fs.existsSync(absTarget)) {
+        return "";
       }
-      return "";
     }
-    return "";
+
+    let resourceUrl = adapter.getResourcePath(cleanRel);
+    const bust = coord && coord.assetCacheBust;
+    if (resourceUrl && bust) {
+      resourceUrl += (resourceUrl.includes("?") ? "&" : "?") + `v=${bust}`;
+    }
+    return resourceUrl || "";
   } catch (err) {
     // ignore
   }
   return "";
+}
+
+/**
+ * 若本地插件目录缺少内置 Q 版洛琪希精灵（如精简安装/BRAT 场景），按需静默拉取并缓存至 assets/roxy-chibi-sprites/
+ */
+function ensureRoxyChibiSpritesCached(plugin, priorityFile) {
+  if (!plugin) return Promise.resolve(false);
+  const coord = ensureRoxyCoordinator(plugin);
+  if (!coord) return Promise.resolve(false);
+  if (coord._chibiAutoCachePromise) return coord._chibiAutoCachePromise;
+
+  const uniqueFiles = Array.from(new Set(Object.values(ROXY_CHIBI_SPRITE_FILES)));
+  if (priorityFile && uniqueFiles.includes(priorityFile)) {
+    uniqueFiles.splice(uniqueFiles.indexOf(priorityFile), 1);
+    uniqueFiles.unshift(priorityFile);
+  }
+
+  coord._chibiAutoCachePromise = (async () => {
+    const { requestUrl } = require("obsidian");
+    const REPO_SLUG = "Curelove/bangumi-manager";
+    let fetchedAny = false;
+
+    for (const fileName of uniqueFiles) {
+      try {
+        const exists = await pluginAssetExists(plugin, `assets/roxy-chibi-sprites/${fileName}`);
+        if (exists) {
+          if (coord.missingChibiFiles) coord.missingChibiFiles.delete(fileName);
+          continue;
+        }
+        const candidateUrls = [
+          `https://cdn.jsdelivr.net/gh/${REPO_SLUG}@main/assets/roxy-chibi-sprites/${encodeURIComponent(fileName)}`,
+          `https://fastly.jsdelivr.net/gh/${REPO_SLUG}@main/assets/roxy-chibi-sprites/${encodeURIComponent(fileName)}`,
+          `https://raw.githubusercontent.com/${REPO_SLUG}/main/assets/roxy-chibi-sprites/${encodeURIComponent(fileName)}`
+        ];
+        let fileBuffer = null;
+        for (const url of candidateUrls) {
+          try {
+            const res = await Promise.race([
+              requestUrl({ url, method: "GET", throw: true }),
+              new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 7500))
+            ]);
+            if (res && res.arrayBuffer && res.arrayBuffer.byteLength > 1024) {
+              fileBuffer = res.arrayBuffer;
+              break;
+            }
+          } catch (_) {
+            // try next mirror
+          }
+        }
+        if (fileBuffer) {
+          await writePluginAssetBinary(plugin, `assets/roxy-chibi-sprites/${fileName}`, fileBuffer);
+          if (coord.missingChibiFiles) coord.missingChibiFiles.delete(fileName);
+          fetchedAny = true;
+        }
+      } catch (_) {
+        // ignore individual file failure
+      }
+    }
+
+    if (fetchedAny) {
+      coord.assetCacheBust = Date.now();
+      coord.chibiPreloaded = false;
+      coord.resolvedChibiUrls = {};
+      preloadAllRoxyPortraits(plugin, coord);
+      if (typeof document !== "undefined") {
+        document.querySelectorAll(".curator-roxy-widget, .atelier-roxy3d-widget").forEach((w) => {
+          if (typeof w._refreshRoxyStageMode === "function") {
+            w._refreshRoxyStageMode();
+          }
+        });
+      }
+    }
+    return fetchedAny;
+  })()
+    .catch(() => false)
+    .finally(() => {
+      coord._chibiAutoCachePromise = null;
+    });
+
+  return coord._chibiAutoCachePromise;
+}
+
+function getRoxyChibiCdnFallbackUrl(fileName) {
+  const cleanName = String(fileName || "chibi_guide.png").replace(/^\//, "");
+  return `https://cdn.jsdelivr.net/gh/Curelove/bangumi-manager@main/assets/roxy-chibi-sprites/${encodeURIComponent(cleanName)}`;
 }
 
 /**
@@ -954,6 +1045,7 @@ function preloadAllRoxyPortraits(plugin, coord) {
     coord.resolvedChibiUrls = {};
   }
   const uniqueChibiFiles = new Set(Object.values(ROXY_CHIBI_SPRITE_FILES));
+  let missingChibiCount = 0;
   uniqueChibiFiles.forEach((file) => {
     const url = resolveRoxyChibiAssetUrl(plugin, file);
     if (url) {
@@ -962,9 +1054,15 @@ function preloadAllRoxyPortraits(plugin, coord) {
         const img = new Image();
         img.src = url;
       }
+    } else {
+      missingChibiCount++;
     }
   });
   coord.chibiPreloaded = true;
+  if (missingChibiCount > 0 && !coord._chibiAutoCacheAttempted) {
+    coord._chibiAutoCacheAttempted = true;
+    ensureRoxyChibiSpritesCached(plugin, ROXY_CHIBI_SPRITE_FILES.explain);
+  }
 
   if (!hdStatus.installed) {
     coord.resolvedUrls = {};
@@ -1023,55 +1121,6 @@ function ensureRoxyCoordinator(plugin) {
   }
   preloadAllRoxyPortraits(plugin, plugin._roxyCoordinator);
   return plugin._roxyCoordinator;
-}
-
-/**
- * 加载并获取 Q 版像素/矢量骨骼组件 RoxyPixelAvatar（专用于三维原画档案室，与二维高清立绘形态区分）
- */
-function ensureRoxyPixelAvatarClass() {
-  if (typeof window !== "undefined") {
-    if (!window.RoxyPixelAvatar) {
-      try {
-        require("../assets/roxy/roxy-pixel.js");
-      } catch (err) {
-        // ignore
-      }
-    }
-    return window.RoxyPixelAvatar || null;
-  }
-  return null;
-}
-
-/**
- * 将 7 种洛琪希情绪状态映射到 RoxyPixelAvatar 的静态姿态（不启动无限循环 RAF，保持低打扰与零常驻 CPU 开销）
- */
-function applyRoxy3DPixelPose(avatar, state) {
-  if (!avatar || typeof avatar.setState !== "function") return;
-  const st = ROXY_PORTRAIT_FILES[state] ? state : "explain";
-  const baseState = st === "warn2" ? "warn" : st === "idle" ? "explain" : st;
-  avatar.setState(baseState, false);
-  // 选取 t = 0.45s 的确定性帧（此时眨眼判定 isBlink 为 false，双目自然睁开，姿态端正）
-  avatar.update(0.45);
-
-  // 针对 warn2（教师叮嘱态）与 warn（软气抗议态）做差分修饰，保证 7 种情绪在 3D 手办上均有独立神态
-  if (typeof avatar.q === "function") {
-    const rootG = avatar.q("#rx-root");
-    if (rootG) {
-      rootG.setAttribute("transform", st === "blocked" ? "translate(0, 3)" : "translate(0, 0)");
-    }
-    if (st === "warn2") {
-      const fxWarn = avatar.q("#rx-fx-warn");
-      const fxStars = avatar.q("#rx-fx-stars");
-      const armL = avatar.q("#rx-arm-left");
-      const armR = avatar.q("#rx-arm-right");
-      const staffGlow = avatar.q("#rx-staff-glow");
-      if (fxWarn) fxWarn.style.display = "none";
-      if (fxStars) fxStars.style.display = "block";
-      if (armL) armL.style.transform = "rotate(18deg)";
-      if (armR) armR.style.transform = "rotate(-28deg)";
-      if (staffGlow) staffGlow.setAttribute("opacity", "0.82");
-    }
-  }
 }
 
 /**
@@ -1386,13 +1435,27 @@ function bindRoxyLeafBoundsAnchor(targetEl, hostEl) {
     }
     targetEl.classList.remove("is-pane-hidden");
 
-    const isCompactPane = rect.width <= 760;
-    const isTightPane = rect.width <= 560;
+    const isMobileLayout =
+      isMobileEnv() || Boolean(document.body && document.body.classList.contains("is-mobile"));
+    const hasFloatingNav = Boolean(
+      document.body && document.body.classList.contains("is-floating-nav")
+    );
+    const isCompactPane = !isMobileLayout && rect.width <= 760;
+    const isTightPane = !isMobileLayout && rect.width <= 560;
     targetEl.classList.toggle("is-compact-pane", isCompactPane);
     targetEl.classList.toggle("is-tight-pane", isTightPane);
+    targetEl.classList.toggle("is-mobile-roxy", isMobileLayout);
 
-    const padRight = isTightPane ? 8 : isCompactPane ? 12 : 20;
-    const padBottom = isTightPane ? 10 : isCompactPane ? 14 : 24;
+    const padRight = isMobileLayout ? 10 : isTightPane ? 8 : isCompactPane ? 12 : 20;
+    const padBottom = isMobileLayout
+      ? hasFloatingNav
+        ? 88
+        : 66
+      : isTightPane
+      ? 10
+      : isCompactPane
+      ? 14
+      : 24;
 
     // 检测是否存在建立独立 fixed 包含块的祖先（如 Obsidian .workspace-leaf-content 的 contain: strict）
     let cbRight = vw;
@@ -2199,6 +2262,17 @@ function emitRoxyEvent(plugin, payload = {}) {
   return true;
 }
 
+function resolveRoxyOverlayMountHost(container) {
+  if (!container) return null;
+  const leafContent =
+    typeof container.closest === "function" ? container.closest(".workspace-leaf-content") : null;
+  if (leafContent) return leafContent;
+  if (container.parentElement && container.parentElement.classList.contains("bangumi-score-dashboard-view")) {
+    return container.parentElement;
+  }
+  return container;
+}
+
 /**
  * 在二维“案头编目台”挂载或刷新洛琪希馆藏记录员
  */
@@ -2206,33 +2280,49 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   const coord = ensureRoxyCoordinator(plugin);
   if (!coord || !container) return null;
 
-  const hostEl =
+  const scrollHostEl =
     container.parentElement && container.parentElement.classList.contains("bangumi-score-dashboard-view")
       ? container.parentElement
       : container;
+  // 挂载到非滚动的 .workspace-leaf-content 层，避免 Android Chromium 在 contain:strict + overflow:auto 下把 position:fixed 随内容滚出视口
+  const hostEl = resolveRoxyOverlayMountHost(container) || scrollHostEl;
 
-  hostEl.querySelectorAll(".curator-roxy-widget").forEach((existing) => {
-    if (typeof existing._cleanupRoxy === "function") {
-      existing._cleanupRoxy();
-    }
-    existing.remove();
-  });
-  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((pill) => {
-    if (typeof pill._cleanupAnchor === "function") {
-      pill._cleanupAnchor();
-    }
-    pill.remove();
+  [hostEl, scrollHostEl].forEach((scope) => {
+    if (!scope) return;
+    scope.querySelectorAll(".curator-roxy-widget").forEach((existing) => {
+      if (typeof existing._cleanupRoxy === "function") {
+        existing._cleanupRoxy();
+      }
+      existing.remove();
+    });
+    scope.querySelectorAll(".curator-roxy-wakeup-pill").forEach((pill) => {
+      if (typeof pill._cleanupAnchor === "function") {
+        pill._cleanupAnchor();
+      }
+      pill.remove();
+    });
   });
 
   const modeInfo = normalizeRoxy2DModeSettings(plugin);
   coord.hdPortraitsAvailable = modeInfo.hdInstalled;
 
+  const isMobile = isMobileEnv();
   const isEnabled = modeInfo.isEnabled;
   const isSessionHidden = Boolean(coord.sessionHidden2D);
-  const isMinimized = Boolean(plugin.settings.roxy2DMinimized);
+  const isCurrentlyMinimized = () =>
+    isMobile ? coord.mobileExpanded2D !== true : Boolean(plugin.settings.roxy2DMinimized);
+  const setMinimizedState = async (nextMin) => {
+    if (isMobile) {
+      coord.mobileExpanded2D = !nextMin;
+    } else {
+      plugin.settings.roxy2DMinimized = nextMin;
+      await plugin.saveSettings().catch(() => {});
+    }
+  };
+  const isMinimized = isCurrentlyMinimized();
   const isRunaway = Boolean(coord.runaway2D);
   const isPlushie = Boolean(coord.plushieState2D);
-  const isDockAutoCollapse = Boolean(plugin.settings.roxyDockExpandOnClickOnly);
+  const isDockAutoCollapse = !isMobile && Boolean(plugin.settings.roxyDockExpandOnClickOnly);
   const isQuietMode = Boolean(plugin.settings.roxyQuietMode);
   const mascotName = getMascotDisplayName(plugin);
 
@@ -2249,7 +2339,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
       useHdInitially ? "is-hd-portrait-mode" : "is-pixel-fallback-mode"
     }${isPlushie ? " is-plushie-mode" : ""}${isDockAutoCollapse ? " is-dock-auto-collapse" : ""}${
       isQuietMode ? " is-quiet-mode" : ""
-    }`
+    }${isMobile ? " is-mobile-roxy" : ""}`
   );
   widget.dataset.roxyState = coord.plushieState2D || coord.currentState || "explain";
   const cleanupLeafAnchor = bindRoxyLeafBoundsAnchor(widget, hostEl);
@@ -2310,13 +2400,15 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     cls: "curator-roxy-chibi-sprite"
   });
   chibiSpriteImg.draggable = false;
-  const pixelSvgMount = pixelFallbackHost.createDiv("curator-roxy-pixel-svg-mount");
-  pixelSvgMount.style.display = "none";
+  const chibiOfflineBadge = pixelFallbackHost.createDiv({
+    cls: "curator-roxy-chibi-offline-badge",
+    text: `✦ ${mascotName}`
+  });
+  chibiOfflineBadge.style.display = "none";
   const chibiBandageEl = pixelFallbackHost.createDiv(
     `roxy-mouth-bandage is-2d-chibi${isQuietMode ? " is-visible" : ""}`
   );
   chibiBandageEl.createSpan({ cls: "roxy-mouth-bandage-cross", text: "×" });
-  let pixelFallbackAvatar = null;
 
   // 蓄力下拉弹簧回顶指示器（按住 1 秒或向下拖动时浮现呼吸下箭头与蓄力进度提示）
   const pullIndicator = stage.createDiv("curator-roxy-pull-indicator");
@@ -2333,47 +2425,36 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     const activePose = coord.plushieState2D || poseState || coord.currentState || "explain";
     const chibiFile =
       ROXY_CHIBI_SPRITE_FILES[activePose] || ROXY_CHIBI_SPRITE_FILES.explain;
-    const chibiUrl =
+    const localUrl =
       (coord.resolvedChibiUrls && coord.resolvedChibiUrls[chibiFile]) ||
       resolveRoxyChibiAssetUrl(plugin, chibiFile);
+    const targetUrl = localUrl || getRoxyChibiCdnFallbackUrl(chibiFile);
 
-    if (chibiUrl) {
-      chibiSpriteImg.style.display = "block";
-      pixelSvgMount.style.display = "none";
-      if (chibiSpriteImg.getAttribute("src") !== chibiUrl) {
-        chibiSpriteImg.src = chibiUrl;
-      }
-      return chibiSpriteImg;
+    chibiSpriteImg.dataset.chibiFile = chibiFile;
+    chibiSpriteImg.dataset.chibiFallbackStage = localUrl ? "local" : "cdn";
+    chibiOfflineBadge.style.display = "none";
+    chibiSpriteImg.style.display = "block";
+    if (chibiSpriteImg.getAttribute("src") !== targetUrl) {
+      chibiSpriteImg.src = targetUrl;
     }
-
-    chibiSpriteImg.style.display = "none";
-    pixelSvgMount.style.display = "flex";
-    const PixelAvatarClass = ensureRoxyPixelAvatarClass();
-    if (!PixelAvatarClass) return null;
-    if (!pixelFallbackAvatar) {
-      pixelSvgMount.empty();
-      pixelFallbackAvatar = new PixelAvatarClass(pixelSvgMount, {
-        scale: 0.56,
-        state: activePose,
-        talking: false
-      });
+    if (!localUrl) {
+      ensureRoxyChibiSpritesCached(plugin, chibiFile);
     }
-    applyRoxy3DPixelPose(pixelFallbackAvatar, activePose);
-    return pixelFallbackAvatar;
+    return chibiSpriteImg;
   };
 
   chibiSpriteImg.onerror = () => {
-    chibiSpriteImg.style.display = "none";
-    pixelSvgMount.style.display = "flex";
-    const PixelAvatarClass = ensureRoxyPixelAvatarClass();
-    if (PixelAvatarClass && !pixelFallbackAvatar) {
-      pixelSvgMount.empty();
-      pixelFallbackAvatar = new PixelAvatarClass(pixelSvgMount, {
-        scale: 0.56,
-        state: widget.dataset.roxyState || "explain",
-        talking: false
-      });
+    const chibiFile = chibiSpriteImg.dataset.chibiFile || ROXY_CHIBI_SPRITE_FILES.explain;
+    if (chibiSpriteImg.dataset.chibiFallbackStage === "local") {
+      if (!coord.missingChibiFiles) coord.missingChibiFiles = new Set();
+      coord.missingChibiFiles.add(chibiFile);
+      chibiSpriteImg.dataset.chibiFallbackStage = "cdn";
+      chibiSpriteImg.src = getRoxyChibiCdnFallbackUrl(chibiFile);
+      ensureRoxyChibiSpritesCached(plugin, chibiFile);
+      return;
     }
+    chibiSpriteImg.style.display = "none";
+    chibiOfflineBadge.style.display = "inline-flex";
   };
 
   const initState = coord.plushieState2D || coord.currentState || "explain";
@@ -2489,14 +2570,20 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   unplushieBtn.title = `解除米格路德替身玩偶术，把躲起来喝甜茶的${mascotName}真身唤回页面`;
 
   const getDockModeBtnLabel = () => {
-    if (plugin.settings.roxy2DMinimized) {
-      return `✦ ${mascotName} [展开]`;
+    if (isCurrentlyMinimized()) {
+      return isMobile ? `✦ ${mascotName}` : `✦ ${mascotName} [展开]`;
+    }
+    if (isMobile) {
+      return `收起 ${mascotName}`;
     }
     return plugin.settings.roxyDockExpandOnClickOnly ? "固定底栏" : "点立绘展栏";
   };
   const getDockModeBtnTitle = () => {
-    if (plugin.settings.roxy2DMinimized) {
+    if (isCurrentlyMinimized()) {
       return `展开${mascotName}馆藏记录员`;
+    }
+    if (isMobile) {
+      return `收起${mascotName}为轻量悬浮胶囊`;
     }
     return plugin.settings.roxyDockExpandOnClickOnly
       ? "当前：点击看板娘后才长出底部小横条 · 点击切换为常驻显示底栏"
@@ -2892,8 +2979,9 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   // =========================================================================
   // 洛琪希 2D 挂件“长按拉动蓄力 · 弹簧回顶（Pull-to-Top Spring）”四阶段交互
   // =========================================================================
-  const PULL_THRESHOLD = 32;
+  const PULL_THRESHOLD = isMobile ? 24 : 32;
   let isPointerDown = false;
+  let activePointerId = null;
   let startY = 0;
   let startX = 0;
   let currentDy = 0;
@@ -2903,6 +2991,27 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   let hintShownDuringHold = false;
   let suppressNextClick = false;
   let activeScrollRaf = null;
+
+  const getScrollHost = () => {
+    const primary =
+      typeof plugin.getDashboardScrollParent === "function"
+        ? plugin.getDashboardScrollParent(container)
+        : container.closest(".bangumi-score-dashboard-view") || container;
+    if (primary && (primary.scrollTop > 0 || primary.scrollHeight - primary.clientHeight > 24)) {
+      return primary;
+    }
+    let cur = container;
+    while (cur && cur !== document.body) {
+      if (cur.scrollTop > 0) return cur;
+      cur = cur.parentElement;
+    }
+    cur = container;
+    while (cur && cur !== document.body) {
+      if (cur.scrollHeight - cur.clientHeight > 24) return cur;
+      cur = cur.parentElement;
+    }
+    return primary || container;
+  };
 
   const clearPullTimers = () => {
     if (hold1sTimer) {
@@ -2930,10 +3039,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
 
     // 阶段四：松手激发“弹簧发射回顶”与动态高度跳跃 + 阻尼果冻回弹落地
-    const scrollEl =
-      typeof plugin.getDashboardScrollParent === "function"
-        ? plugin.getDashboardScrollParent(container)
-        : container.closest(".bangumi-score-dashboard-view") || container;
+    const scrollEl = getScrollHost();
     const startScrollTop = scrollEl ? Math.max(0, scrollEl.scrollTop || 0) : 0;
     const pullNorm = Math.min(1, Math.max(0.25, pullDy / 110));
     const scrollBoost = Math.min(1, startScrollTop / 1200);
@@ -3027,11 +3133,6 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
   };
 
-  const getScrollHost = () =>
-    typeof plugin.getDashboardScrollParent === "function"
-      ? plugin.getDashboardScrollParent(container)
-      : container.closest(".bangumi-score-dashboard-view") || container;
-
   const isDashboardScrollable = () => {
     const scrollEl = getScrollHost();
     if (!scrollEl) return false;
@@ -3044,8 +3145,17 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
       : "点击切换番剧咨讯 · 右键还原首要事项";
   });
 
+  const onTouchMoveBlock = (e) => {
+    if (isPointerDown && e.cancelable) {
+      e.preventDefault();
+    }
+  };
+
   const onWindowPointerMove = (e) => {
     if (!isPointerDown) return;
+    if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) {
+      return;
+    }
     const dy = e.clientY - startY;
     const dx = e.clientX - startX;
     currentDy = dy;
@@ -3089,19 +3199,30 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   const finishPointerInteraction = (isCancel = false) => {
     if (!isPointerDown) return;
     isPointerDown = false;
+    const prevPid = activePointerId;
+    activePointerId = null;
+    if (prevPid !== null && typeof hitZone.releasePointerCapture === "function") {
+      try {
+        if (hitZone.hasPointerCapture && hitZone.hasPointerCapture(prevPid)) {
+          hitZone.releasePointerCapture(prevPid);
+        }
+      } catch (_) {}
+    }
     window.removeEventListener("pointermove", onWindowPointerMove);
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
+    window.removeEventListener("touchmove", onTouchMoveBlock, { passive: false });
     clearPullTimers();
 
     const canPullTop = isDashboardScrollable();
-    const pulledEnough = !isCancel && canPullTop && currentDy >= PULL_THRESHOLD;
+    const effectiveDy = Math.max(currentDy, maxDy >= PULL_THRESHOLD + 8 && currentDy >= PULL_THRESHOLD * 0.65 ? maxDy : currentDy);
+    const pulledEnough = !isCancel && canPullTop && effectiveDy >= PULL_THRESHOLD;
     if (pulledEnough) {
       suppressNextClick = true;
       recordPullToTopUsed(plugin);
       // 用户完成下拉回顶操作，立即关闭气泡并执行弹簧发射回顶
       hideBubble();
-      resetPullVisuals(true, currentDy);
+      resetPullVisuals(true, effectiveDy);
     } else if (hintShownDuringHold) {
       // 阶段三关键要求：长按满 3 秒弹出教学气泡后松开鼠标，气泡不得随之消失！
       suppressNextClick = true;
@@ -3115,14 +3236,30 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
   };
 
-  const onWindowPointerUp = () => finishPointerInteraction(false);
-  const onWindowPointerCancel = () => finishPointerInteraction(true);
+  const onWindowPointerUp = (e) => {
+    if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) {
+      return;
+    }
+    finishPointerInteraction(false);
+  };
+  const onWindowPointerCancel = (e) => {
+    if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) {
+      return;
+    }
+    finishPointerInteraction(true);
+  };
 
   hitZone.addEventListener("pointerdown", (e) => {
     if (e.button !== undefined && e.button !== 0) return;
     if (coord.isPinballFlying2D || coord.runaway2D) return;
 
     isPointerDown = true;
+    activePointerId = e.pointerId !== undefined ? e.pointerId : null;
+    if (activePointerId !== null && typeof hitZone.setPointerCapture === "function") {
+      try {
+        hitZone.setPointerCapture(activePointerId);
+      } catch (_) {}
+    }
     startY = e.clientY;
     startX = e.clientX;
     currentDy = 0;
@@ -3179,6 +3316,7 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     window.addEventListener("pointermove", onWindowPointerMove);
     window.addEventListener("pointerup", onWindowPointerUp);
     window.addEventListener("pointercancel", onWindowPointerCancel);
+    window.addEventListener("touchmove", onTouchMoveBlock, { passive: false });
   });
 
   // 右键立绘可直接还原到「首要事项」
@@ -3431,19 +3569,28 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
     }
   };
 
-  // 底部最左侧按钮：最小化时点击展开；平时作为「常驻底栏 / 点击看板娘才长出底栏」的快捷切换器（不再重复立绘点击）
+  // 底部最左侧按钮：最小化时点击展开；移动端展开态点击即收起；桌面端作为常驻/自动收起切换器
   nameTagBtn.onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (plugin.settings.roxy2DMinimized) {
-      plugin.settings.roxy2DMinimized = false;
-      await plugin.saveSettings().catch(() => {});
+    if (isCurrentlyMinimized()) {
+      await setMinimizedState(false);
       widget.classList.remove("is-minimized");
       widget.classList.add("is-expanded");
       nameTagBtn.textContent = getDockModeBtnLabel();
       nameTagBtn.title = getDockModeBtnTitle();
       minBtn.textContent = "最小化";
       restoreToPrimary();
+      return;
+    }
+    if (isMobile) {
+      await setMinimizedState(true);
+      widget.classList.add("is-minimized");
+      widget.classList.remove("is-expanded");
+      nameTagBtn.textContent = getDockModeBtnLabel();
+      nameTagBtn.title = getDockModeBtnTitle();
+      minBtn.textContent = "展开";
+      hideBubble();
       return;
     }
     const nextAutoCollapse = !plugin.settings.roxyDockExpandOnClickOnly;
@@ -3471,9 +3618,8 @@ function mountRoxy2DMascot(plugin, container, state, helpers = {}) {
   minBtn.onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const nextMin = !plugin.settings.roxy2DMinimized;
-    plugin.settings.roxy2DMinimized = nextMin;
-    await plugin.saveSettings();
+    const nextMin = !isCurrentlyMinimized();
+    await setMinimizedState(nextMin);
     widget.classList.toggle("is-minimized", nextMin);
     widget.classList.toggle("is-expanded", !nextMin);
     nameTagBtn.textContent = getDockModeBtnLabel();
@@ -3608,16 +3754,20 @@ function syncTopbarRoxyButton(plugin, container, state, helpers) {
     actionsCol.querySelectorAll(".curator-roxy-topbar-toggle").forEach((el) => el.remove());
   }
 
-  const hostEl =
+  const scrollHostEl =
     container.parentElement && container.parentElement.classList.contains("bangumi-score-dashboard-view")
       ? container.parentElement
       : container;
+  const hostEl = resolveRoxyOverlayMountHost(container) || scrollHostEl;
 
-  hostEl.querySelectorAll(".curator-roxy-wakeup-pill").forEach((el) => {
-    if (typeof el._cleanupAnchor === "function") {
-      el._cleanupAnchor();
-    }
-    el.remove();
+  [hostEl, scrollHostEl].forEach((scope) => {
+    if (!scope) return;
+    scope.querySelectorAll(".curator-roxy-wakeup-pill").forEach((el) => {
+      if (typeof el._cleanupAnchor === "function") {
+        el._cleanupAnchor();
+      }
+      el.remove();
+    });
   });
 
   const coord = ensureRoxyCoordinator(plugin);
@@ -3791,8 +3941,23 @@ function getRoxy2DMascotStyles() {
     /* 预留底部滚动呼吸空间：单屏追番页使用紧凑下边距避免无意义留白，长列表页保留 136px 防右下角挂件遮挡 */
     ".curator-desk-root{padding-bottom:136px !important;}",
     ".curator-desk-root[data-active-mode=\"desk\"],.curator-desk-root:has(.curator-unified-workspace[data-active-mode=\"desk\"]){padding-bottom:28px !important;}",
-    "@media (max-width: 920px){.curator-desk-root[data-active-mode=\"desk\"],.curator-desk-root:has(.curator-unified-workspace[data-active-mode=\"desk\"]){padding-bottom:84px !important;}}",
-    "@media (max-width: 600px){.curator-roxy-widget:not(.is-pinball-rampage){right:10px !important;bottom:12px !important;transform:scale(0.68) !important;}.curator-roxy-bubble{max-width:min(240px,calc(100vw - 88px)) !important;padding:7px 10px !important;}}",
+    "@media (max-width: 920px){.curator-desk-root[data-active-mode=\"desk\"],.curator-desk-root:has(.curator-unified-workspace[data-active-mode=\"desk\"]){padding-bottom:112px !important;}}",
+    "body.is-mobile .curator-desk-root,body.is-mobile .curator-desk-root[data-active-mode=\"desk\"]{padding-bottom:calc(118px + env(safe-area-inset-bottom, 0px)) !important;}",
+    ".curator-roxy-widget.is-mobile-roxy:not(.is-pinball-rampage){right:10px !important;bottom:calc(88px + env(safe-area-inset-bottom, 0px)) !important;transform:none !important;max-width:calc(100vw - 20px) !important;z-index:45;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-minimized .curator-roxy-dock-bar{padding:5px 11px !important;border-radius:999px !important;box-shadow:0 6px 18px rgba(28,20,12,0.16) !important;opacity:0.94;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-minimized .curator-roxy-ctrl-group{display:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-stage{width:96px !important;height:132px !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded.is-pixel-fallback-mode .curator-roxy-stage{width:96px !important;height:108px !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-hd-host,.curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-portrait{width:96px !important;height:132px !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-pixel-fallback,.curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-chibi-sprite{width:92px !important;height:102px !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded .curator-roxy-hit-zone{top:6px;left:6px;width:84px;height:122px;touch-action:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded.is-pixel-fallback-mode .curator-roxy-hit-zone{top:2px;left:4px;width:88px;height:104px;touch-action:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy .curator-roxy-bubble{max-width:min(280px,calc(100vw - 24px)) !important;padding:9px 12px !important;margin-right:0 !important;background:var(--background-primary) !important;border:1px solid var(--background-modifier-border) !important;box-shadow:0 12px 30px rgba(15,18,24,0.22) !important;backdrop-filter:none !important;-webkit-backdrop-filter:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy .curator-roxy-dock-bar{max-width:calc(100vw - 20px) !important;max-height:none !important;flex-wrap:wrap !important;justify-content:flex-end !important;border-radius:14px !important;padding:4px 8px !important;box-sizing:border-box !important;background:var(--background-primary) !important;backdrop-filter:none !important;-webkit-backdrop-filter:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy.is-expanded [data-roxy-action=\"minimize\"]{display:none !important;}",
+    ".curator-roxy-widget.is-mobile-roxy .curator-roxy-ctrl-group{flex-wrap:wrap !important;justify-content:flex-end !important;gap:3px !important;}",
+    "body.is-mobile .curator-roxy-wakeup-pill{right:10px !important;bottom:calc(88px + env(safe-area-inset-bottom, 0px)) !important;}",
+    "@media (max-width: 600px){.curator-roxy-widget:not(.is-pinball-rampage):not(.is-mobile-roxy){right:10px !important;bottom:14px !important;transform:none !important;max-width:calc(100vw - 20px) !important;}.curator-roxy-dock-bar{max-width:calc(100vw - 20px) !important;flex-wrap:wrap !important;max-height:none !important;}.curator-roxy-bubble{max-width:min(260px,calc(100vw - 28px)) !important;padding:7px 10px !important;}}",
     /* 右下角轻量记录员容器（动态锚定于当前 Leaf 内容区右下角，绝不越界覆盖右侧边栏） */
     ".curator-roxy-widget{position:fixed;right:20px;bottom:24px;z-index:40;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;gap:0;user-select:none;transform-origin:100% 100%;transition:transform .2s ease,opacity .16s ease;}",
     ".curator-roxy-widget.is-pane-hidden,.curator-roxy-wakeup-pill.is-pane-hidden{opacity:0 !important;visibility:hidden !important;pointer-events:none !important;}",
@@ -3828,6 +3993,7 @@ function getRoxy2DMascotStyles() {
     ".curator-roxy-portrait{width:146px;height:218px;object-fit:contain;object-position:bottom center;transform-origin:50% 100%;pointer-events:none;will-change:transform;}",
     ".curator-roxy-pixel-fallback{position:relative;width:138px;height:148px;display:none;align-items:flex-end;justify-content:center;transform-origin:50% 100%;pointer-events:none;will-change:transform;transition:transform 0.2s cubic-bezier(0.34,1.56,0.64,1);}",
     ".curator-roxy-chibi-sprite{width:136px;height:146px;object-fit:contain;object-position:bottom center;pointer-events:none;user-select:none;}",
+    ".curator-roxy-chibi-offline-badge{display:none;align-items:center;justify-content:center;padding:6px 10px;margin-bottom:8px;border-radius:999px;border:1px solid color-mix(in srgb, #8f683d 42%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 94%, #f6efe3 6%);color:#8f683d;font-size:12px;font-weight:700;white-space:nowrap;box-shadow:0 4px 12px rgba(34,24,14,0.12);}",
     ".curator-roxy-pixel-fallback *{pointer-events:none !important;}",
     /* 可爱嘴部静音白色小封条（代码绘制：圆角奶白胶布 + 两端微透气点 + 腮红粉小叉号，严格锚定在动画容器内随 Q 弹与拉动同步形变） */
     ".roxy-mouth-bandage{position:absolute;z-index:5;pointer-events:none !important;display:none;align-items:center;justify-content:center;border-radius:999px;background:linear-gradient(180deg,#fffefb 0%,#f7efe2 100%);border:1px solid rgba(138,98,64,0.68);box-shadow:0 1.5px 4px rgba(36,24,14,0.22),inset 0 0.5px 0 rgba(255,255,255,0.95);transform:translate(-50%,-50%) rotate(var(--roxy-bandage-rot,-4deg));transform-origin:50% 50%;}",
@@ -3840,8 +4006,8 @@ function getRoxy2DMascotStyles() {
     ".roxy-mouth-bandage.is-sticking{animation:roxy-bandage-stick 0.42s cubic-bezier(0.22,1,0.36,1) 1 forwards;}",
     ".roxy-mouth-bandage.is-dropping{animation:roxy-bandage-peel-drop 0.38s cubic-bezier(0.22,1,0.36,1) 1 forwards;}",
     ".roxy-detached-falling-bandage{position:fixed !important;z-index:9999 !important;pointer-events:none !important;box-shadow:0 3px 8px rgba(36,24,14,0.22),inset 0 0.5px 0 rgba(255,255,255,0.95);}",
-    ".curator-roxy-hit-zone{position:absolute;top:12px;left:22px;width:102px;height:198px;pointer-events:auto;cursor:pointer;border-radius:40% 40% 16% 16%;-webkit-tap-highlight-color:transparent;}",
-    ".curator-roxy-widget.is-pixel-fallback-mode .curator-roxy-hit-zone{top:8px;height:140px;}",
+    ".curator-roxy-hit-zone{position:absolute;top:12px;left:22px;width:102px;height:198px;pointer-events:auto;cursor:pointer;border-radius:40% 40% 16% 16%;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}",
+    ".curator-roxy-widget.is-pixel-fallback-mode:not(.is-mobile-roxy) .curator-roxy-hit-zone{top:8px;height:140px;}",
     ".curator-roxy-widget.is-pinball-rampage .curator-roxy-hit-zone{pointer-events:none !important;}",
     /* 底部轻量控制名牌：支持常驻显示或「点击看板娘后才长出底部小横条 (.is-dock-auto-collapse)」 */
     ".curator-roxy-dock-bar{position:relative;z-index:2;pointer-events:auto;display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin-bottom:2px;max-width:480px;max-height:42px;border-radius:999px;border:1px solid color-mix(in srgb, #8f683d 38%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 96%, #f5ede0 4%);box-shadow:0 4px 12px rgba(34,24,14,0.12);transform-origin:85% 0%;transition:transform 0.24s cubic-bezier(0.34,1.56,0.64,1),opacity 0.18s ease,max-width 0.24s ease,max-height 0.24s ease,padding 0.2s ease;}",
@@ -3944,10 +4110,10 @@ function sync3DTopbarRoxyButton(plugin, space) {
   if (!space || !space.root) return;
   const coord = ensureRoxyCoordinator(plugin);
 
-  // 统一 3D 原画展厅左上角主标识文案
+  // 统一 3D 原画展厅左上角主标识文案（移动端保持简洁，避免挤压虚拟横屏顶栏）
   const brandEl = space.root.querySelector(".atelier-mark");
   if (brandEl && brandEl.childNodes[0] && brandEl.childNodes[0].nodeType === 3) {
-    brandEl.childNodes[0].nodeValue = "3D 原画展厅 · ATELIER CEL";
+    brandEl.childNodes[0].nodeValue = isMobileEnv() ? "3D 原画展厅" : "3D 原画展厅 · ATELIER CEL";
   }
 
   const actionsEl = space.root.querySelector(".atelier-actions");
@@ -4590,7 +4756,10 @@ function mountRoxy3DMascot(plugin, space) {
 
   const isEnabled = plugin.settings.enableRoxy3DMascot !== false;
   const isSessionHidden = Boolean(coord.sessionHidden3D);
-  const isMinimized = Boolean(plugin.settings.roxy3DMinimized);
+  const isMobile3D = isMobileEnv();
+  const isMinimized = isMobile3D
+    ? coord.mobile3DExpanded !== true
+    : Boolean(plugin.settings.roxy3DMinimized);
   const isRunaway3D = Boolean(coord.runaway3D);
   const isPlushie3D = Boolean(coord.plushieState3D);
   const isDockAutoCollapse = Boolean(plugin.settings.roxyDockExpandOnClickOnly);
@@ -4606,7 +4775,7 @@ function mountRoxy3DMascot(plugin, space) {
   const widget = document.createElement("div");
   widget.className = `atelier-roxy3d-widget ${
     isRunaway3D ? "is-runaway" : isMinimized ? "is-minimized" : "is-expanded"
-  }${isPlushie3D ? " is-plushie-mode" : ""}${isDockAutoCollapse ? " is-dock-auto-collapse" : ""}${
+  }${isMobile3D ? " is-mobile-roxy3d" : ""}${isPlushie3D ? " is-plushie-mode" : ""}${isDockAutoCollapse ? " is-dock-auto-collapse" : ""}${
     isQuietMode3D ? " is-quiet-mode" : ""
   }`;
   widget.dataset.ui = "roxy-3d-mascot";
@@ -4638,10 +4807,11 @@ function mountRoxy3DMascot(plugin, space) {
   chibiImg3D.draggable = false;
   avatarHost.appendChild(chibiImg3D);
 
-  const pixelMount3D = document.createElement("div");
-  pixelMount3D.className = "atelier-roxy3d-pixel-mount";
-  pixelMount3D.style.display = "none";
-  avatarHost.appendChild(pixelMount3D);
+  const offlineBadge3D = document.createElement("div");
+  offlineBadge3D.className = "curator-roxy-chibi-offline-badge";
+  offlineBadge3D.textContent = `✦ ${mascotName}`;
+  offlineBadge3D.style.display = "none";
+  avatarHost.appendChild(offlineBadge3D);
 
   const bandage3DEl = document.createElement("div");
   bandage3DEl.className = `roxy-mouth-bandage is-3d${isQuietMode3D ? " is-visible" : ""}`;
@@ -4650,8 +4820,6 @@ function mountRoxy3DMascot(plugin, space) {
   bandage3DCross.textContent = "×";
   bandage3DEl.appendChild(bandage3DCross);
   avatarHost.appendChild(bandage3DEl);
-
-  let pixelAvatar = null;
 
   const subPlaque = document.createElement("div");
   subPlaque.className = "atelier-roxy3d-subplaque";
@@ -4667,7 +4835,7 @@ function mountRoxy3DMascot(plugin, space) {
       const customUrl = resolveCustomPortraitOverride(plugin, activePose);
       if (customUrl) {
         chibiImg3D.style.display = "block";
-        pixelMount3D.style.display = "none";
+        offlineBadge3D.style.display = "none";
         if (chibiImg3D.getAttribute("src") !== customUrl) {
           chibiImg3D.src = customUrl;
         }
@@ -4677,44 +4845,38 @@ function mountRoxy3DMascot(plugin, space) {
 
     const chibiFile =
       ROXY_CHIBI_SPRITE_FILES[activePose] || ROXY_CHIBI_SPRITE_FILES.explain;
-    const chibiUrl =
+    const localUrl =
       (coord.resolvedChibiUrls && coord.resolvedChibiUrls[chibiFile]) ||
       resolveRoxyChibiAssetUrl(plugin, chibiFile);
-    if (chibiUrl) {
-      chibiImg3D.style.display = "block";
-      pixelMount3D.style.display = "none";
-      if (chibiImg3D.getAttribute("src") !== chibiUrl) {
-        chibiImg3D.src = chibiUrl;
-      }
-      return;
+    const targetUrl = localUrl || getRoxyChibiCdnFallbackUrl(chibiFile);
+    chibiImg3D.dataset.chibiFile = chibiFile;
+    chibiImg3D.dataset.chibiFallbackStage = localUrl ? "local" : "cdn";
+    chibiImg3D.style.display = "block";
+    offlineBadge3D.style.display = "none";
+    if (chibiImg3D.getAttribute("src") !== targetUrl) {
+      chibiImg3D.src = targetUrl;
     }
-
-    chibiImg3D.style.display = "none";
-    pixelMount3D.style.display = "flex";
-    const PixelAvatarClass = ensureRoxyPixelAvatarClass();
-    if (PixelAvatarClass) {
-      if (!pixelAvatar) {
-        pixelAvatar = new PixelAvatarClass(pixelMount3D, {
-          scale: 0.275,
-          state: activePose,
-          talking: false
-        });
-      }
-      applyRoxy3DPixelPose(pixelAvatar, activePose);
+    if (!localUrl) {
+      ensureRoxyChibiSpritesCached(plugin, chibiFile);
     }
   };
 
   chibiImg3D.onerror = () => {
-    chibiImg3D.style.display = "none";
-    pixelMount3D.style.display = "flex";
-    const PixelAvatarClass = ensureRoxyPixelAvatarClass();
-    if (PixelAvatarClass && !pixelAvatar) {
-      pixelAvatar = new PixelAvatarClass(pixelMount3D, {
-        scale: 0.275,
-        state: widget.dataset.roxyState || "explain",
-        talking: false
-      });
+    const chibiFile = chibiImg3D.dataset.chibiFile || ROXY_CHIBI_SPRITE_FILES.explain;
+    if (chibiImg3D.dataset.chibiFallbackStage === "local") {
+      if (!coord.missingChibiFiles) coord.missingChibiFiles = new Set();
+      coord.missingChibiFiles.add(chibiFile);
+      chibiImg3D.dataset.chibiFallbackStage = "cdn";
+      chibiImg3D.src = getRoxyChibiCdnFallbackUrl(chibiFile);
+      ensureRoxyChibiSpritesCached(plugin, chibiFile);
+      return;
     }
+    chibiImg3D.style.display = "none";
+    offlineBadge3D.style.display = "inline-flex";
+  };
+
+  widget._refreshRoxyStageMode = () => {
+    apply3DAvatarPose(coord.plushieState3D || widget.dataset.roxyState || coord.currentState || "explain");
   };
 
   apply3DAvatarPose(coord.plushieState3D || coord.currentState || "explain");
@@ -4743,14 +4905,16 @@ function mountRoxy3DMascot(plugin, space) {
   unplushieBtn3D.title = `解除米格路德替身玩偶术，把${mascotName}真身唤回原画台角`;
   dockBar.appendChild(unplushieBtn3D);
 
+  const isCurrently3DMinimized = () =>
+    isMobile3D ? coord.mobile3DExpanded !== true : Boolean(plugin.settings.roxy3DMinimized);
   const get3DDockModeLabel = () => {
-    if (plugin.settings.roxy3DMinimized) {
-      return `✦ ${mascotName} [展开]`;
+    if (isCurrently3DMinimized()) {
+      return isMobile3D ? `✦ ${mascotName}` : `✦ ${mascotName} [展开]`;
     }
     return plugin.settings.roxyDockExpandOnClickOnly ? "固定底栏" : "点立绘展栏";
   };
   const get3DDockModeTitle = () => {
-    if (plugin.settings.roxy3DMinimized) {
+    if (isCurrently3DMinimized()) {
       return `展开${mascotName}手办框`;
     }
     return plugin.settings.roxyDockExpandOnClickOnly
@@ -4924,6 +5088,9 @@ function mountRoxy3DMascot(plugin, space) {
 
   const show3DRecord = (record) => {
     if (!record || coord.runaway3D || coord.isPinballFlying3D) return;
+    if (isMobile3D && isCurrently3DMinimized() && !record.userInitiated) {
+      return;
+    }
     if (plugin.settings && plugin.settings.roxyQuietMode && !record.userInitiated) {
       return;
     }
@@ -5280,9 +5447,13 @@ function mountRoxy3DMascot(plugin, space) {
   nameBtn.onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (plugin.settings.roxy3DMinimized) {
-      plugin.settings.roxy3DMinimized = false;
-      await plugin.saveSettings().catch(() => {});
+    if (isCurrently3DMinimized()) {
+      if (isMobile3D) {
+        coord.mobile3DExpanded = true;
+      } else {
+        plugin.settings.roxy3DMinimized = false;
+        await plugin.saveSettings().catch(() => {});
+      }
       widget.classList.remove("is-minimized");
       widget.classList.add("is-expanded");
       nameBtn.textContent = get3DDockModeLabel();
@@ -5316,9 +5487,13 @@ function mountRoxy3DMascot(plugin, space) {
   minBtn.onclick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const nextMin = !plugin.settings.roxy3DMinimized;
-    plugin.settings.roxy3DMinimized = nextMin;
-    await plugin.saveSettings();
+    const nextMin = !isCurrently3DMinimized();
+    if (isMobile3D) {
+      coord.mobile3DExpanded = !nextMin;
+    } else {
+      plugin.settings.roxy3DMinimized = nextMin;
+      await plugin.saveSettings();
+    }
     widget.classList.toggle("is-minimized", nextMin);
     widget.classList.toggle("is-expanded", !nextMin);
     nameBtn.textContent = get3DDockModeLabel();
@@ -5370,7 +5545,7 @@ function mountRoxy3DMascot(plugin, space) {
   };
 
   // 若序幕已结束（如 bootMode === "none" 或重新开启记录员），立即展示首要导览
-  if (isRunaway3D) {
+  if (isRunaway3D || (isMobile3D && isMinimized)) {
     hide3DBubble();
   } else if (space.spaceState !== "boot" && !plugin.settings.roxyQuietMode) {
     const primary = buildPrimary3DRecord(plugin, space);
@@ -5468,7 +5643,12 @@ function getRoxy3DMascotStyles() {
     "  .atelier-roxy3d-widget{left:12px!important;top:102px!important;bottom:auto!important;transform:scale(0.8);transform-origin:0% 0%;}",
     "  .bangumi-3d-root[data-space-state=\"entering-detail\"] .atelier-roxy3d-bubble,.bangumi-3d-root[data-space-state=\"detail\"] .atelier-roxy3d-bubble{display:none!important;}",
     "  .atelier-roxy3d-bubble{max-width:206px!important;padding:6px 9px!important;}",
-    "}"
+    "}",
+    ".atelier-roxy3d-widget.is-mobile-roxy3d.is-minimized .atelier-roxy3d-ctrl-group{display:none!important;}",
+    ".atelier-roxy3d-widget.is-mobile-roxy3d.is-minimized .atelier-roxy3d-dock{padding:3px 9px;border-radius:999px;background:rgba(250,246,238,0.92);}",
+    ".bangumi-3d-root.is-virtual-landscape .atelier-roxy3d-widget{left:max(34px,env(safe-area-inset-top))!important;top:50px!important;transform:scale(0.86)!important;transform-origin:0% 0%!important;}",
+    ".bangumi-3d-root.is-virtual-landscape[data-lens-mode=\"highscore\"][data-space-state=\"array\"] .atelier-roxy3d-widget{top:86px!important;}",
+    ".bangumi-3d-root.is-mobile-portrait .atelier-roxy3d-widget{left:12px!important;top:calc(max(34px,env(safe-area-inset-top)) + 84px)!important;transform:scale(0.85)!important;transform-origin:0% 0%!important;}"
   ].join("\n");
 }
 

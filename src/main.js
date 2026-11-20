@@ -79,7 +79,13 @@ let {
 
 const netabaTrendService = require("./netaba-trend-service.js");
 const NetabaTrendModal = netabaTrendService.createNetabaTrendModalClass({ Modal, Notice });
-const { Dashboard3DSpace } = require("./dashboard-3d-view.js");
+let _cachedDashboard3DSpaceClass = null;
+function getDashboard3DSpaceClass() {
+  if (!_cachedDashboard3DSpaceClass) {
+    _cachedDashboard3DSpaceClass = require("./dashboard-3d-view.js").Dashboard3DSpace;
+  }
+  return _cachedDashboard3DSpaceClass;
+}
 const curatorDesk = require("./dashboard-2d-desk.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
@@ -88,6 +94,7 @@ const multiHallArchiveService = require("./multi-hall-archive-service.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
+  isMobileEnv,
   canSafelyAutoReconcileVaultFolder
 } = require("./platform-env.js");
 const {
@@ -99,7 +106,28 @@ const {
 const bangumiApi = require("./bangumi-api.js");
 const noteManager = require("./note-manager.js");
 const bilibiliLiveService = require("./bilibili-live-service.js");
-const gameCapsuleService = require("./game-floating-capsule-service.js");
+let _cachedGameCapsuleService = null;
+function getGameCapsuleService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedGameCapsuleService) {
+    _cachedGameCapsuleService = require("./game-floating-capsule-service.js");
+  }
+  return _cachedGameCapsuleService;
+}
+const DEFAULT_GAME_CAPSULE_SETTINGS_INLINE = {
+  enabled: true,
+  autoEnabledV2: true,
+  autoDetectExternalProcess: true,
+  idleOpacity: 42,
+  edgeMargin: 6,
+  stripWidth: 6,
+  stripHeight: 84,
+  dockSide: "right",
+  dockRatioY: 0.42,
+  dockDisplayId: null,
+  taskbarPolicy: "ask",
+  taskbarTempApplied: false
+};
 const animeActivityService = require("./anime-activity-and-random-service.js");
 const importManager = require("./import-manager.js");
 const batchImportManager = require("./batch-import-manager.js");
@@ -260,7 +288,7 @@ var DEFAULT_SETTINGS = {
     groupMode: "none",
     status: "all"
   },
-  gameCapsule: Object.assign({}, gameCapsuleService.DEFAULT_GAME_CAPSULE_SETTINGS),
+  gameCapsule: Object.assign({}, DEFAULT_GAME_CAPSULE_SETTINGS_INLINE),
   archiveAppearance: {
     theme: "follow",
     motion: true,
@@ -273,8 +301,11 @@ var DEFAULT_SETTINGS = {
   bilibiliLiveRooms: [],
   bilibiliLiveMonitorEnabled: true,
   bilibiliLiveSystemNotifyEnabled: true,
+  bilibiliLiveMobileOpenMode: "auto",
   bilibiliLivePollIntervalSec: 120,
   bilibiliLiveNotifiedSessions: {},
+  settingsBriefDescMobile: true,
+  settingsBriefDescDesktop: false,
   animeActivityLog: [],
   ffmpegCustomPath: ""
 };
@@ -323,6 +354,9 @@ var BangumiScoreDashboardView = class extends ItemView {
   }
 
   async onOpen() {
+    if (this.plugin && typeof this.plugin.ensureScoreDashboardStyles === "function") {
+      this.plugin.ensureScoreDashboardStyles();
+    }
     this.contentEl.empty();
     this.contentEl.addClass(
       "bangumi-score-dashboard-view"
@@ -352,13 +386,27 @@ var BangumiScoreDashboardView = class extends ItemView {
     if (this.dashboardEl) {
       this.dashboardEl.style.display = "none";
     }
-    const roxyEl = this.contentEl ? this.contentEl.querySelector(".curator-roxy-widget") : null;
+    const roxyScope =
+      (this.contentEl && typeof this.contentEl.closest === "function" && this.contentEl.closest(".workspace-leaf-content")) ||
+      this.contentEl;
+    const roxyEl = roxyScope ? roxyScope.querySelector(".curator-roxy-widget") : null;
     if (roxyEl) {
       roxyEl.style.display = "none";
     }
     const items = await this.plugin.collectDashboardItems();
-    this.space3DContainer = this.contentEl.createDiv("bangumi-3d-wrapper");
-    this.space3DInstance = new Dashboard3DSpace(this.space3DContainer, this.plugin, {
+    const mobileFullscreen = isMobileEnv();
+    this._isMobile3DFullscreen = mobileFullscreen;
+    if (mobileFullscreen && typeof document !== "undefined" && document.body) {
+      document.body.classList.add("bangumi-3d-mobile-active");
+      const wrapper = document.createElement("div");
+      wrapper.className = "bangumi-3d-wrapper is-mobile-3d-fullscreen";
+      document.body.appendChild(wrapper);
+      this.space3DContainer = wrapper;
+    } else {
+      this.space3DContainer = this.contentEl.createDiv("bangumi-3d-wrapper");
+    }
+    const Dashboard3DSpaceClass = getDashboard3DSpaceClass();
+    this.space3DInstance = new Dashboard3DSpaceClass(this.space3DContainer, this.plugin, {
       items,
       filterMode: "watching"
     });
@@ -391,6 +439,10 @@ var BangumiScoreDashboardView = class extends ItemView {
   }
 
   destroy3D() {
+    if (typeof document !== "undefined" && document.body) {
+      document.body.classList.remove("bangumi-3d-mobile-active");
+    }
+    this._isMobile3DFullscreen = false;
     if (this.space3DInstance) {
       this.space3DInstance.destroy();
       this.space3DInstance = null;
@@ -448,6 +500,18 @@ var BangumiScoreDashboardView = class extends ItemView {
       this._resizeSettleTimer = null;
     }
     if (this.contentEl) {
+      const leafScope =
+        (typeof this.contentEl.closest === "function" && this.contentEl.closest(".workspace-leaf-content")) ||
+        this.contentEl;
+      leafScope.querySelectorAll(".curator-roxy-widget, .curator-roxy-wakeup-pill").forEach((el) => {
+        if (typeof el._cleanupRoxy === "function") {
+          try { el._cleanupRoxy(); } catch (_) {}
+        }
+        if (typeof el._cleanupAnchor === "function") {
+          try { el._cleanupAnchor(); } catch (_) {}
+        }
+        el.remove();
+      });
       this.contentEl.querySelectorAll(".bm7-root, .curator-desk-root").forEach((el) => {
         if (el._roxyRigCtrl && typeof el._roxyRigCtrl.destroy === "function") {
           try { el._roxyRigCtrl.destroy(); } catch (_) {}
@@ -490,6 +554,7 @@ var BangumiManagerPlugin = class extends Plugin {
     registerBangumiCustomIcons();
     const savedSettings =
       await this.loadData();
+    const savedSettingsSnapshot = savedSettings ? JSON.stringify(savedSettings) : "";
 
     this.settings = Object.assign(
       {},
@@ -728,7 +793,18 @@ var BangumiManagerPlugin = class extends Plugin {
       this.settings.preferredEpisodeFiles && typeof this.settings.preferredEpisodeFiles === "object"
         ? this.settings.preferredEpisodeFiles
         : {};
-    await this.saveData(this.settings);
+    // 仅在首次初始化或迁移归一化确实改动配置时才写盘，避免每次移动端冷启动无谓重写数百 KB 的 data.json
+    let settingsChangedOnLoad = !savedSettings;
+    if (!settingsChangedOnLoad) {
+      try {
+        settingsChangedOnLoad = JSON.stringify(this.settings) !== savedSettingsSnapshot;
+      } catch (_) {
+        settingsChangedOnLoad = true;
+      }
+    }
+    if (settingsChangedOnLoad) {
+      await this.saveData(this.settings);
+    }
     this.ratingSync = new RatingSyncManager(this);
 
     const netabaModals =
@@ -1166,127 +1242,178 @@ var BangumiManagerPlugin = class extends Plugin {
     );
 
     if (this.app.workspace && typeof this.app.workspace.onLayoutReady === "function") {
-      this.app.workspace.onLayoutReady(async () => {
+      this.app.workspace.onLayoutReady(() => {
         this._layoutReadyDone = true;
-        try {
-          const legacySharedDir = "附件/Bangumi Images";
-          const legacyFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
-          if (legacyFolderObj && Array.isArray(legacyFolderObj.children) && legacyFolderObj.children.length > 0) {
-            const splitOrder = [
-              { key: "characterImageFolder", targetDir: this.settings.characterImageFolder || "附件/角色立绘" },
-              { key: "reviewImageFolder", targetDir: this.settings.reviewImageFolder || "附件/观片手札图片" },
-              { key: "gameImageFolder", targetDir: this.settings.gameImageFolder || "附件/游戏封面" },
-              { key: "illustrationGalleryFolder", targetDir: this.settings.illustrationGalleryFolder || "附件/画册典藏" },
-              { key: "coverFolder", targetDir: this.settings.coverFolder || "附件/动画封面" }
-            ];
-            for (const item of splitOrder) {
-              if (item.targetDir && item.targetDir !== legacySharedDir) {
-                await this.migrateVaultFolderPath(item.key, legacySharedDir, item.targetDir, {
-                  showNotice: false,
-                  strictCategoryFilter: true
-                });
-              }
-            }
-          }
-          // 若旧版共享目录已排空且未被任何当前目录配置指向，自动清理空文件夹
-          try {
-            const configuredDirs = [
-              this.settings.coverFolder,
-              this.settings.characterImageFolder,
-              this.settings.reviewImageFolder,
-              this.settings.illustrationGalleryFolder,
-              this.settings.gameImageFolder
-            ].map((d) => String(d || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""));
-            if (!configuredDirs.includes(legacySharedDir)) {
-              const postFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
-              if (postFolderObj && Array.isArray(postFolderObj.children) && postFolderObj.children.length === 0) {
-                await this.app.vault.delete(postFolderObj);
-              }
-              const fs = tryRequireNode("fs");
-              const path = tryRequireNode("path");
-              const vaultBase =
-                isDesktopNodeAvailable() &&
-                fs &&
-                path &&
-                this.app?.vault?.adapter &&
-                typeof this.app.vault.adapter.getBasePath === "function"
-                  ? this.app.vault.adapter.getBasePath()
-                  : "";
-              if (vaultBase) {
-                const absLegacy = path.join(vaultBase, ...legacySharedDir.split("/"));
-                if (fs.existsSync(absLegacy) && fs.statSync(absLegacy).isDirectory()) {
-                  const leftFiles = fs.readdirSync(absLegacy);
-                  if (leftFiles.length === 0) {
-                    fs.rmdirSync(absLegacy);
+        const isMobile = isMobileEnv();
+        const runStartupReconcilePipeline = async () => {
+          if (this.unloaded) return;
+          if (!this.settings.imageFoldersSplitV2Migrated) {
+            try {
+              const legacySharedDir = "附件/Bangumi Images";
+              const legacyFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
+              if (legacyFolderObj && Array.isArray(legacyFolderObj.children) && legacyFolderObj.children.length > 0) {
+                const splitOrder = [
+                  { key: "characterImageFolder", targetDir: this.settings.characterImageFolder || "附件/角色立绘" },
+                  { key: "reviewImageFolder", targetDir: this.settings.reviewImageFolder || "附件/观片手札图片" },
+                  { key: "gameImageFolder", targetDir: this.settings.gameImageFolder || "附件/游戏封面" },
+                  { key: "illustrationGalleryFolder", targetDir: this.settings.illustrationGalleryFolder || "附件/画册典藏" },
+                  { key: "coverFolder", targetDir: this.settings.coverFolder || "附件/动画封面" }
+                ];
+                for (const item of splitOrder) {
+                  if (item.targetDir && item.targetDir !== legacySharedDir) {
+                    await this.migrateVaultFolderPath(item.key, legacySharedDir, item.targetDir, {
+                      showNotice: false,
+                      strictCategoryFilter: true
+                    });
                   }
                 }
               }
+              try {
+                const configuredDirs = [
+                  this.settings.coverFolder,
+                  this.settings.characterImageFolder,
+                  this.settings.reviewImageFolder,
+                  this.settings.illustrationGalleryFolder,
+                  this.settings.gameImageFolder
+                ].map((d) => String(d || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""));
+                if (!configuredDirs.includes(legacySharedDir)) {
+                  const postFolderObj = this.app.vault.getAbstractFileByPath(legacySharedDir);
+                  if (postFolderObj && Array.isArray(postFolderObj.children) && postFolderObj.children.length === 0) {
+                    await this.app.vault.delete(postFolderObj);
+                  }
+                  const fs = tryRequireNode("fs");
+                  const path = tryRequireNode("path");
+                  const vaultBase =
+                    isDesktopNodeAvailable() &&
+                    fs &&
+                    path &&
+                    this.app?.vault?.adapter &&
+                    typeof this.app.vault.adapter.getBasePath === "function"
+                      ? this.app.vault.adapter.getBasePath()
+                      : "";
+                  if (vaultBase) {
+                    const absLegacy = path.join(vaultBase, ...legacySharedDir.split("/"));
+                    if (fs.existsSync(absLegacy) && fs.statSync(absLegacy).isDirectory()) {
+                      const leftFiles = fs.readdirSync(absLegacy);
+                      if (leftFiles.length === 0) {
+                        fs.rmdirSync(absLegacy);
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+              this.settings.imageFoldersSplitV2Migrated = true;
+              await this.saveSettings();
+            } catch (legacyErr) {
+              console.warn("[Bangumi Manager] 旧版共享图片目录自动分类迁移失败:", legacyErr);
+            }
+          }
+          if (this.unloaded) return;
+          try {
+            await this.autoDetectVaultFoldersIfNeeded({ force: false, silent: true });
+          } catch (e) {
+            console.warn("[Bangumi Manager] 自动探测仓库目录失败:", e);
+          }
+          if (this.unloaded) return;
+          const yieldTick = () => new Promise((r) => window.setTimeout(r, isMobile ? 45 : 0));
+          try {
+            await characterArchiveService.reconcileCharacterCollectionWithNotes(this);
+          } catch (e) {
+            console.warn("[Bangumi Manager] 角色典藏笔记启动同步失败:", e);
+          }
+          if (this.unloaded) return;
+          await yieldTick();
+          try {
+            await multiHallArchiveService.reconcileGameCollectionWithNotes(this);
+          } catch (e) {
+            console.warn("[Bangumi Manager] 游戏典藏笔记启动同步失败:", e);
+          }
+          if (this.unloaded) return;
+          await yieldTick();
+          try {
+            await multiHallArchiveService.reconcileVoiceCollectionWithVault(this);
+          } catch (e) {
+            console.warn("[Bangumi Manager] 音声典藏仓库启动同步失败:", e);
+          }
+          if (this.unloaded) return;
+          await yieldTick();
+          try {
+            const hasSavedIllusts =
+              Array.isArray(this.settings.illustrationCollection) &&
+              this.settings.illustrationCollection.length > 0;
+            const canReconcile = await canSafelyAutoReconcileVaultFolder(
+              this.app,
+              this.settings.illustrationGalleryFolder || "附件/画册典藏",
+              hasSavedIllusts
+            );
+            if (canReconcile) {
+              await multiHallArchiveService.reconcileIllustrationCollectionWithDisk(this);
+            }
+          } catch (e) {
+            console.warn("[Bangumi Manager] 画册典藏磁盘对账启动同步失败:", e);
+          }
+          if (this.unloaded) return;
+          try {
+            const resolvedVoiceDir = multiHallArchiveService.resolveDefaultVoiceArchiveFolder(this);
+            if (resolvedVoiceDir && this.settings.voiceArchiveFolder !== resolvedVoiceDir) {
+              this.settings.voiceArchiveFolder = resolvedVoiceDir;
+              await this.saveData(this.settings);
             }
           } catch (_) {}
-          if (!this.settings.imageFoldersSplitV2Migrated) {
-            this.settings.imageFoldersSplitV2Migrated = true;
-            await this.saveSettings();
-          }
-        } catch (legacyErr) {
-          console.warn("[Bangumi Manager] 旧版共享图片目录自动分类迁移失败:", legacyErr);
-        }
-        try {
-          await characterArchiveService.reconcileCharacterCollectionWithNotes(this);
-        } catch (e) {
-          console.warn("[Bangumi Manager] 角色典藏笔记启动同步失败:", e);
-        }
-        try {
-          const hasSavedIllusts =
-            Array.isArray(this.settings.illustrationCollection) &&
-            this.settings.illustrationCollection.length > 0;
-          const canReconcile = await canSafelyAutoReconcileVaultFolder(
-            this.app,
-            this.settings.illustrationGalleryFolder || "附件/画册典藏",
-            hasSavedIllusts
-          );
-          if (canReconcile) {
-            await multiHallArchiveService.reconcileIllustrationCollectionWithDisk(this);
-          }
-        } catch (e) {
-          console.warn("[Bangumi Manager] 画册典藏磁盘对账启动同步失败:", e);
-        }
-        try {
-          const resolvedVoiceDir = multiHallArchiveService.resolveDefaultVoiceArchiveFolder(this);
-          if (resolvedVoiceDir && this.settings.voiceArchiveFolder !== resolvedVoiceDir) {
-            this.settings.voiceArchiveFolder = resolvedVoiceDir;
-            await this.saveData(this.settings);
-          }
-        } catch (_) {}
-        try {
-          await this.refreshOpenDashboardViews();
-        } catch (e) {
-          console.warn("[Bangumi Manager] 启动时刷新已打开档案馆视图失败:", e);
-        }
-        this._startupRssTimer = window.setTimeout(async () => {
-          this._startupRssTimer = null;
-          if (this.unloaded) return;
-          const subs = Array.isArray(this.settings?.rssSubscriptions) ? this.settings.rssSubscriptions : [];
-          if (subs.length === 0) return;
           try {
-            await animeDownloadService.sanitizeDeadQbittorrentComicatRules(this);
-            await animeDownloadService.pollPluginRssSubscriptions(this);
+            const openLeaves = this.app?.workspace?.getLeavesOfType?.(BANGUMI_SCORE_DASHBOARD_VIEW_TYPE) || [];
+            if (openLeaves.length > 0) {
+              await this.refreshOpenDashboardViews();
+            }
           } catch (e) {
-            console.warn("[Bangumi Manager] qBittorrent 规则清理与磁力追更轮询异常:", e);
+            console.warn("[Bangumi Manager] 启动时刷新已打开档案馆视图失败:", e);
           }
-        }, 6200);
-        this.registerInterval(
-          window.setInterval(() => {
+        };
+
+        // 移动端让出首帧交互与工作区渲染，空闲后再错峰执行仓库核对与直播监测
+        if (isMobile) {
+          this._startupReconcileTimer = window.setTimeout(() => {
+            this._startupReconcileTimer = null;
+            runStartupReconcilePipeline().catch(() => {});
+          }, 2000);
+          this._startupLiveTimer = window.setTimeout(() => {
+            this._startupLiveTimer = null;
+            if (!this.unloaded) bilibiliLiveService.startBilibiliLiveMonitor(this);
+          }, 1600);
+        } else {
+          runStartupReconcilePipeline().catch(() => {});
+        }
+
+        if (!isMobile) {
+          this._startupRssTimer = window.setTimeout(async () => {
+            this._startupRssTimer = null;
+            if (this.unloaded) return;
             const subs = Array.isArray(this.settings?.rssSubscriptions) ? this.settings.rssSubscriptions : [];
             if (subs.length === 0) return;
-            animeDownloadService.pollPluginRssSubscriptions(this).catch(() => {});
-          }, 25 * 60 * 1000)
-        );
+            try {
+              await animeDownloadService.sanitizeDeadQbittorrentComicatRules(this);
+              await animeDownloadService.pollPluginRssSubscriptions(this);
+            } catch (e) {
+              console.warn("[Bangumi Manager] qBittorrent 规则清理与磁力追更轮询异常:", e);
+            }
+          }, 6200);
+          this.registerInterval(
+            window.setInterval(() => {
+              const subs = Array.isArray(this.settings?.rssSubscriptions) ? this.settings.rssSubscriptions : [];
+              if (subs.length === 0) return;
+              animeDownloadService.pollPluginRssSubscriptions(this).catch(() => {});
+            }, 25 * 60 * 1000)
+          );
+        }
       });
     }
     if (this.settings.checkOnStartup) {
       this.startupTimer = window.setTimeout(
         async () => {
-          await this.checkAllLocalStatus(false);
+          if (this.unloaded) return;
+          if (isDesktopNodeAvailable()) {
+            await this.checkAllLocalStatus(false);
+          }
 
           try {
             await this.refreshBangumiRatingsSilently();
@@ -1297,36 +1424,50 @@ var BangumiManagerPlugin = class extends Plugin {
             );
           }
         },
-        5e3
+        isMobileEnv() ? 8000 : 5e3
       );
     }
     this.registerNetabaMarkdownProcessor();
     this.registerScoreDashboardProcessor();
-    this.registerScoreDashboardStyles();
+    // 桌面端启动即注入，移动端按需在首次打开番剧档案馆/设置页/弹窗时注入 ~200KB 样式以显著缩短冷启动首屏卡顿
+    if (!isMobileEnv()) {
+      this.ensureScoreDashboardStyles();
+    }
     this.refreshManagerRibbon();
     this.refreshDashboardRibbon();
-    this.startStatusTimer();
-    this._biliLiveUnloaded = false;
-    bilibiliLiveService.startBilibiliLiveMonitor(this);
-    gameCapsuleService.refreshGameCapsuleLifecycle(this);
-    if (this.app && this.app.workspace && typeof this.app.workspace.on === "function") {
-      this.registerEvent(
-        this.app.workspace.on("css-change", () => {
-          gameCapsuleService.broadcastToCapsuleWindow(this);
-        })
-      );
+    if (!isMobileEnv()) {
+      this.startStatusTimer();
+      this._biliLiveUnloaded = false;
+      bilibiliLiveService.startBilibiliLiveMonitor(this);
+      const capSvc = getGameCapsuleService();
+      if (capSvc) {
+        capSvc.refreshGameCapsuleLifecycle(this);
+        if (this.app && this.app.workspace && typeof this.app.workspace.on === "function") {
+          this.registerEvent(
+            this.app.workspace.on("css-change", () => {
+              capSvc.broadcastToCapsuleWindow(this);
+            })
+          );
+        }
+      }
+    } else {
+      this._biliLiveUnloaded = false;
     }
   }
   onunload() {
     this.unloaded = true;
     this._biliLiveUnloaded = true;
     bilibiliLiveService.stopBilibiliLiveMonitor(this);
-    gameCapsuleService.stopGameCapsuleService(this);
+    if (_cachedGameCapsuleService) {
+      _cachedGameCapsuleService.stopGameCapsuleService(this);
+    }
 
     this.stopStatusTimer();
     clearTimeout(this.saveCheckTimer);
     clearTimeout(this.startupTimer);
     clearTimeout(this._startupRssTimer);
+    clearTimeout(this._startupReconcileTimer);
+    clearTimeout(this._startupLiveTimer);
     clearTimeout(this.dashboardAutoRefreshTimer);
     clearTimeout(this._galleryVaultSyncTimer);
     if (this._illustWatcherMap instanceof Map) {
@@ -1350,6 +1491,12 @@ var BangumiManagerPlugin = class extends Plugin {
       ]) {
         const node = document.getElementById(styleId);
         if (node) node.remove();
+      }
+      if (document.body) {
+        document.body
+          .querySelectorAll(":scope > .bm7-drawer, :scope > .bm7-portal-host, :scope > .bangumi-3d-wrapper")
+          .forEach((el) => el.remove());
+        document.body.classList.remove("bangumi-3d-mobile-active");
       }
     }
     if (this.calloutSyncTimers) {
@@ -1486,6 +1633,227 @@ var BangumiManagerPlugin = class extends Plugin {
         await this.openScoreDashboardView();
       }
     );
+  }
+
+  /**
+   * 跨平台自动探测仓库内已有的动画/角色/游戏笔记目录与附件目录：
+   * - 专为「只用微力同步/Syncthing/Git 同步仓库文件、不同步插件 data.json」的手机端与新设备设计
+   * - 默认仅在当前配置目录下查不到任何对应文件时才自动修正，绝不破坏用户已生效的自定义配置
+   */
+  async autoDetectVaultFoldersIfNeeded(options = {}) {
+    const force = Boolean(options.force);
+    const silent = options.silent !== false;
+    const vault = this.app?.vault;
+    if (!vault || typeof vault.getMarkdownFiles !== "function") {
+      return { changed: false, updatedKeys: [], summary: [] };
+    }
+
+    const normDir = (p) =>
+      String(p || "")
+        .trim()
+        .replace(/\\/g, "/")
+        .replace(/^\/+|\/+$/g, "");
+    const parentDirOf = (filePath) => {
+      const clean = normDir(filePath);
+      const idx = clean.lastIndexOf("/");
+      return idx > 0 ? clean.slice(0, idx) : "";
+    };
+    const pickTopDir = (counterMap) => {
+      let bestDir = "";
+      let bestCount = 0;
+      for (const [dir, count] of counterMap.entries()) {
+        if (!dir) continue;
+        if (count > bestCount || (count === bestCount && dir.length < bestDir.length)) {
+          bestDir = dir;
+          bestCount = count;
+        }
+      }
+      return { dir: bestDir, count: bestCount };
+    };
+    const bump = (map, dir) => {
+      if (!dir) return;
+      map.set(dir, (map.get(dir) || 0) + 1);
+    };
+
+    const allMd = vault.getMarkdownFiles();
+    const curAnimeDir = normDir(this.settings.noteRootFolder || "动画笔记");
+    const curCharDir = normDir(
+      this.settings.characterNoteFolder ||
+        (typeof this.getDefaultCharacterNoteFolder === "function"
+          ? this.getDefaultCharacterNoteFolder()
+          : "角色典藏")
+    );
+    const curGameDir = normDir(this.settings.gameNoteFolder || "游戏笔记");
+
+    const hasMdInDir = (dir) => {
+      if (!dir) return false;
+      const prefix = `${dir.toLowerCase()}/`;
+      return allMd.some((f) => String(f?.path || "").replace(/\\/g, "/").toLowerCase().startsWith(prefix));
+    };
+
+    const needAnime = force || !hasMdInDir(curAnimeDir);
+    const needChar = force || !hasMdInDir(curCharDir);
+    const needGame = force || !hasMdInDir(curGameDir);
+
+    const animeDirCounts = new Map();
+    const charDirCounts = new Map();
+    const gameDirCounts = new Map();
+
+    if (needAnime || needChar || needGame) {
+      let directReadBudget = 120;
+      for (const f of allMd) {
+        const p = String(f?.path || "").replace(/\\/g, "/");
+        if (p.startsWith(".obsidian/") || p.startsWith(".trash/")) continue;
+        const dir = parentDirOf(p);
+        if (!dir) continue;
+
+        let fm = this.app?.metadataCache?.getFileCache?.(f)?.frontmatter || null;
+        if (!fm && directReadBudget > 0 && typeof vault.cachedRead === "function") {
+          directReadBudget -= 1;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            const headText = (await vault.cachedRead(f)).slice(0, 1200);
+            if (headText.startsWith("---")) {
+              const parsed = parseFrontmatter(headText);
+              if (parsed && parsed.fields) fm = parsed.fields;
+            }
+          } catch (_) {}
+        }
+        if (!fm || typeof fm !== "object") continue;
+
+        const tagsRaw = fm.tags ?? fm["标签"] ?? "";
+        const tagText = Array.isArray(tagsRaw) ? tagsRaw.join(",") : String(tagsRaw || "");
+
+        const isCharNote =
+          Boolean(fm.character_id || fm["角色编号"] || fm["角色名"] || fm["声优"]) ||
+          tagText.includes("角色典藏");
+        const isGameNote =
+          tagText.includes("游戏典藏") ||
+          (Object.prototype.hasOwnProperty.call(fm, "play_hours") &&
+            Object.prototype.hasOwnProperty.call(fm, "launch_mode"));
+        const isAnimeNote =
+          !isCharNote &&
+          !isGameNote &&
+          Boolean(
+            fm["BGM链接"] ||
+              fm["Bangumi链接"] ||
+              fm.bgm_id ||
+              fm.bangumi_id ||
+              fm.subject_id ||
+              (fm["观看状态"] && (fm["已看集数"] !== undefined || fm["总集数"] !== undefined))
+          );
+
+        if (isAnimeNote) bump(animeDirCounts, dir);
+        else if (isCharNote) bump(charDirCounts, dir);
+        else if (isGameNote) bump(gameDirCounts, dir);
+      }
+    }
+
+    const updatedKeys = [];
+    const summary = [];
+
+    if (needAnime) {
+      const top = pickTopDir(animeDirCounts);
+      if (top.dir && top.count > 0 && top.dir !== curAnimeDir) {
+        this.settings.noteRootFolder = top.dir;
+        updatedKeys.push("noteRootFolder");
+        summary.push(`动画笔记目录 → ${top.dir}（${top.count} 篇）`);
+      }
+    }
+    if (needChar) {
+      const top = pickTopDir(charDirCounts);
+      if (top.dir && top.count > 0 && top.dir !== curCharDir) {
+        this.settings.characterNoteFolder = top.dir;
+        const autoDefault =
+          typeof this.getDefaultCharacterNoteFolder === "function"
+            ? normDir(this.getDefaultCharacterNoteFolder())
+            : "角色典藏";
+        this.settings.characterNoteFolderManuallySet = top.dir !== autoDefault;
+        updatedKeys.push("characterNoteFolder");
+        summary.push(`角色典藏目录 → ${top.dir}（${top.count} 篇）`);
+      }
+    }
+    if (needGame) {
+      const top = pickTopDir(gameDirCounts);
+      if (top.dir && top.count > 0 && top.dir !== curGameDir) {
+        this.settings.gameNoteFolder = top.dir;
+        updatedKeys.push("gameNoteFolder");
+        summary.push(`游戏典藏目录 → ${top.dir}（${top.count} 篇）`);
+      }
+    }
+
+    // 自动探测附件目录群（封面、立绘、画册、音声、游戏封面、手札图片）
+    if (typeof vault.getFiles === "function") {
+      const allFiles = vault.getFiles();
+      const hasAnyFileInDir = (dir) => {
+        const clean = normDir(dir);
+        if (!clean) return false;
+        const prefix = `${clean.toLowerCase()}/`;
+        return allFiles.some((vf) => String(vf?.path || "").replace(/\\/g, "/").toLowerCase().startsWith(prefix));
+      };
+
+      const coverMap = new Map();
+      const charImgMap = new Map();
+      const illustMap = new Map();
+      const voiceMap = new Map();
+      const gameImgMap = new Map();
+      const reviewImgMap = new Map();
+
+      for (const vf of allFiles) {
+        const p = String(vf?.path || "").replace(/\\/g, "/");
+        if (p.startsWith(".obsidian/") || p.startsWith(".trash/")) continue;
+        const dir = parentDirOf(p);
+        if (!dir) continue;
+        const name = String(vf.name || "");
+        const lower = name.toLowerCase();
+        if (/\.(png|jpe?g|webp|gif|avif)$/i.test(lower)) {
+          if (/^bangumi-cover-char-/i.test(lower) || /^char-/i.test(lower) || dir.includes("角色立绘")) {
+            bump(charImgMap, dir);
+          } else if (/^bangumi-cover-/i.test(lower) || dir.includes("动画封面")) {
+            bump(coverMap, dir);
+          } else if (/^game-cover-/i.test(lower) || dir.includes("游戏封面")) {
+            bump(gameImgMap, dir);
+          } else if (/^review-/i.test(lower) || dir.includes("观片手札图片")) {
+            bump(reviewImgMap, dir);
+          } else if (/^(keyvisual_|illust_)/i.test(lower) || dir.includes("画册典藏")) {
+            bump(illustMap, dir);
+          }
+        } else if (/\.(mp3|wav|ogg|m4a|flac|aac|opus)$/i.test(lower)) {
+          if (dir.includes("音声") || dir.includes("台词")) {
+            bump(voiceMap, dir);
+          }
+        }
+      }
+
+      const tryApplyAssetDir = (settingKey, label, countsMap, fallbackDefault) => {
+        const cur = normDir(this.settings[settingKey] || fallbackDefault);
+        if (!force && hasAnyFileInDir(cur)) return;
+        const top = pickTopDir(countsMap);
+        if (top.dir && top.count > 0 && top.dir !== cur) {
+          this.settings[settingKey] = top.dir;
+          updatedKeys.push(settingKey);
+          summary.push(`${label} → ${top.dir}`);
+        }
+      };
+
+      tryApplyAssetDir("coverFolder", "动画封面目录", coverMap, "附件/动画封面");
+      tryApplyAssetDir("characterImageFolder", "角色立绘目录", charImgMap, "附件/角色立绘");
+      tryApplyAssetDir("illustrationGalleryFolder", "画册典藏目录", illustMap, "附件/画册典藏");
+      tryApplyAssetDir("voiceArchiveFolder", "音声典藏目录", voiceMap, "附件/音声典藏");
+      tryApplyAssetDir("gameImageFolder", "游戏封面目录", gameImgMap, "附件/游戏封面");
+      tryApplyAssetDir("reviewImageFolder", "手札图片目录", reviewImgMap, "附件/观片手札图片");
+    }
+
+    if (updatedKeys.length > 0) {
+      await this.saveData(this.settings).catch(() => {});
+      if (!silent && Notice) {
+        new Notice(`已自动识别仓库目录：\n${summary.join("\n")}`, 6500);
+      }
+    } else if (!silent && Notice) {
+      new Notice("当前所有仓库目录均已准确匹配，无需调整。", 3600);
+    }
+
+    return { changed: updatedKeys.length > 0, updatedKeys, summary };
   }
 
   getAnimeMarkdownFiles() {
@@ -7103,6 +7471,7 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   async renderScoreDashboard(container, options = {}) {
+    this.ensureScoreDashboardStyles();
     return await curatorDesk.renderCuratorDesk(this, container, options, {
       openSetEpisodesModal: (item) => new SetEpisodesModal(this.app, this, item).open(),
       openQuickAddTagModal: (item) => new QuickAddTagModal(this.app, this, item).open(),
@@ -7159,6 +7528,12 @@ if (this.settings.seasonViewMode === "current") {
         updated
       );
     }
+  }
+
+  ensureScoreDashboardStyles() {
+    if (typeof document === "undefined") return;
+    if (document.getElementById("bangumi-score-dashboard-style")) return;
+    this.registerScoreDashboardStyles();
   }
 
   registerScoreDashboardStyles() {
@@ -7430,6 +7805,8 @@ if (this.settings.seasonViewMode === "current") {
       ".bangumi-local-action-btn.is-folder:hover{background:var(--background-modifier-hover);}",
       ".bangumi-grid-ep-btn.is-trend{margin-left:auto;background:rgba(0,123,255,0.12);color:var(--interactive-accent);border:1px solid rgba(0,123,255,0.25);font-size:.78em;padding:2px 6px;}",
       ".bangumi-3d-wrapper{width:100%;height:100%;min-height:640px;position:relative;}",
+      ".bangumi-3d-wrapper.is-mobile-3d-fullscreen{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;min-height:0!important;z-index:9999!important;overflow:hidden!important;background:#eae5e1!important;}",
+      "body.bangumi-3d-mobile-active .mobile-navbar,body.bangumi-3d-mobile-active .mobile-toolbar{pointer-events:none!important;}",
       curatorDesk.getCuratorDeskStyles()
     ].join("\n");
 
@@ -9819,7 +10196,15 @@ var BatchTagManagerModal = class extends Modal {
   }
 };
 
-BangumiManagerPlugin.Dashboard3DSpace = Dashboard3DSpace;
+Object.defineProperty(BangumiManagerPlugin, "Dashboard3DSpace", {
+  configurable: true,
+  enumerable: true,
+  get: getDashboard3DSpaceClass
+});
 module.exports = BangumiManagerPlugin;
-module.exports.Dashboard3DSpace = Dashboard3DSpace;
+Object.defineProperty(module.exports, "Dashboard3DSpace", {
+  configurable: true,
+  enumerable: true,
+  get: getDashboard3DSpaceClass
+});
 

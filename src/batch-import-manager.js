@@ -5,7 +5,7 @@ if (!Modal || !Notice) {
   throw new Error("主插件没有传入 Modal 或 Notice。");
 }
 
-const { tryRequireNode, isDesktopNodeAvailable, joinPosixPath } = require("./platform-env.js");
+const { tryRequireNode, isDesktopNodeAvailable, isMobileEnv, joinPosixPath } = require("./platform-env.js");
 const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 var bangumiApi = require("./bangumi-api.js");
 var noteManager = require("./note-manager.js");
@@ -74,10 +74,12 @@ var BatchAnimeImportModal = class extends Modal {
       contentEl
     } = this;
     contentEl.empty();
-    this.modalEl.style.width = "min(760px, 90vw)";
-    this.modalEl.style.maxWidth = "90vw";
-    this.modalEl.style.maxHeight = "90vh";
-    this.modalEl.style.overflowY = "auto";
+    if (!isMobileEnv()) {
+      this.modalEl.style.width = "min(760px, 90vw)";
+      this.modalEl.style.maxWidth = "90vw";
+      this.modalEl.style.maxHeight = "90vh";
+      this.modalEl.style.overflowY = "auto";
+    }
     contentEl.style.width = "100%";
     contentEl.style.boxSizing = "border-box";
     contentEl.createEl(

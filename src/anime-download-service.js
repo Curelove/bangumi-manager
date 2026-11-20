@@ -6,12 +6,75 @@ const v07Core = require("./v07-core.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
+  isMobileEnv,
   normalizeUnicodeNfc,
   pickNativeFolderOnDesktop,
   crossPlatformPath: path,
   crossPlatformFs: fs,
   toNodeBufferOrUint8
 } = require("./platform-env.js");
+
+function isMobileDownloadEnv() {
+  return isMobileEnv() || !isDesktopNodeAvailable();
+}
+
+function buildCompactMobileMagnet(epItem) {
+  const raw = String(epItem?.magnetUrl || "").trim();
+  const infoHash = String(epItem?.infoHash || "").trim().toLowerCase();
+  if (!infoHash) return raw;
+  const dn = epItem?.title ? `&dn=${encodeURIComponent(String(epItem.title))}` : "";
+  const topTrackers = PUBLIC_ANIME_TRACKERS.slice(0, 4)
+    .map((tr) => `&tr=${encodeURIComponent(tr)}`)
+    .join("");
+  return `magnet:?xt=urn:btih:${infoHash}${dn}${topTrackers}`;
+}
+
+async function copyTextCrossPlatform(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch (_) {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.setAttribute("readonly", "readonly");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return Boolean(ok);
+  } catch (_) {
+    return false;
+  }
+}
+
+function launchMagnetCrossPlatform(magnetUrl) {
+  const clean = String(magnetUrl || "").trim();
+  if (!clean) return;
+  try {
+    const a = document.createElement("a");
+    a.href = clean;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        a.remove();
+      } catch (_) {}
+    }, 300);
+  } catch (_) {
+    try {
+      window.open(clean);
+    } catch (_) {}
+  }
+}
 
 function getSafeEnv() {
   return (typeof process !== "undefined" && process && process.env) || {};
@@ -2938,13 +3001,21 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       this.errorMessage = "";
       this.lastFolderError = "";
       this.showCustomFolderInput = false;
+      this.isMobileMode = isMobileDownloadEnv();
     }
 
     onOpen() {
       this.modalEl.addClass("curator-download-modal-shell");
-      this.modalEl.style.width = "min(920px, 94vw)";
-      this.modalEl.style.maxWidth = "94vw";
-      this.modalEl.style.maxHeight = "88vh";
+      if (this.isMobileMode) {
+        this.modalEl.addClass("is-mobile-download-modal");
+        this.modalEl.style.width = "100%";
+        this.modalEl.style.maxWidth = "100vw";
+        this.modalEl.style.maxHeight = "92vh";
+      } else {
+        this.modalEl.style.width = "min(920px, 94vw)";
+        this.modalEl.style.maxWidth = "94vw";
+        this.modalEl.style.maxHeight = "88vh";
+      }
       this.renderShell();
 
       if (this.plugin.settings.enableComicatIntegration !== false && this.currentKeyword) {
@@ -2958,6 +3029,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
     getLocalExistingEpisodeSet() {
       const set = new Set();
+      if (this.isMobileMode) return set;
       if (this.item?.downloadPath && this.item.downloadPath !== "无") {
         const res = noteUtils.inspectLocalFolder(
           this.item.downloadPath,
@@ -2978,17 +3050,22 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       const { contentEl } = this;
       contentEl.empty();
       contentEl.addClass("curator-download-modal");
+      if (this.isMobileMode) {
+        contentEl.addClass("is-mobile-download");
+      }
 
       // 1. 顶部标题与本地路径/qBittorrent 状态栏
       const header = contentEl.createDiv("curator-dl-header");
       const titleCol = header.createDiv("curator-dl-title-col");
       titleCol.createDiv({
         cls: "curator-dl-kicker",
-        text: "番剧下载与单集 RSS 助手"
+        text: this.isMobileMode ? "移动端磁力检索助手" : "番剧下载与单集 RSS 助手"
       });
       titleCol.createEl("h2", {
         cls: "curator-dl-title",
-        text: `追番下载与单集 RSS 助手 · 《${this.item?.name || "未命名"}》`
+        text: this.isMobileMode
+          ? `追番磁力检索 · 《${this.item?.name || "未命名"}》`
+          : `追番下载与单集 RSS 助手 · 《${this.item?.name || "未命名"}》`
       });
 
       const metaSub = titleCol.createDiv("curator-dl-meta-sub");
@@ -2998,19 +3075,19 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       metaSub.createSpan({
         text: `${seasonStr} · 已看 ${watchedEp}${totalEp > 0 ? "/" + totalEp : ""} 话`
       });
-      if (this.item?.rssUrl) {
+      if (this.item?.downloadSourceKeyword || this.item?.rssUrl) {
         const boundBadge = metaSub.createSpan({
           cls: "curator-dl-bound-pill",
-          text: `已绑定源：${this.item.downloadSourceKeyword || "专属 RSS"}`
+          text: `常用源：${this.item.downloadSourceKeyword || "专属源"}`
         });
-        boundBadge.title = this.item.rssUrl;
+        boundBadge.title = this.item.rssUrl || this.item.downloadSourceKeyword || "";
       }
 
-      // 2. 本地文件夹与 qBittorrent 环境自检卡片（绝不默认用户已安装或已启动）
+      // 2. 本地文件夹与 qBittorrent 环境自检卡片（移动端改为简洁磁力指引）
       this.envBox = contentEl.createDiv("curator-dl-env-box");
       this.renderEnvStatus();
 
-      // 2.5 本机已添加 RSS 订阅与自动下载规则实时查重横幅（无论是否检测到均向用户出示结果）
+      // 2.5 本机已添加 RSS 订阅与自动下载规则实时查重横幅（仅桌面端显示）
       this.rssCheckBox = contentEl.createDiv("curator-dl-rss-check-box");
       this.renderRssRuleCheckBanner();
 
@@ -3021,7 +3098,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       this.keywordInput = searchRow.createEl("input", {
         type: "text",
         cls: "curator-dl-keyword-input",
-        placeholder: "输入动画名或「[字幕组] 动画名 来源词」（如：[ANi] 穹庐下的魔女 Baha）..."
+        placeholder: this.isMobileMode
+          ? "输入动画名或「字幕组 + 番名」检索磁力…"
+          : "输入动画名或「[字幕组] 动画名 来源词」（如：[ANi] 穹庐下的魔女 Baha）..."
       });
       this.keywordInput.value = this.currentKeyword;
       this.keywordInput.onkeydown = (e) => {
@@ -3035,7 +3114,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         const searchBtn = searchRow.createEl("button", {
           cls: "curator-dl-btn is-primary"
         });
-        v07Core.setBtnIconLabel(searchBtn, "search", "检索漫猫发布源", 14);
+        v07Core.setBtnIconLabel(searchBtn, "search", this.isMobileMode ? "检索资源" : "检索漫猫发布源", 14);
         searchBtn.onclick = () => {
           this.performSearch(this.keywordInput.value.trim(), { preserveStreams: false });
         };
@@ -3043,38 +3122,40 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         const openWebBtn = searchRow.createEl("button", {
           cls: "curator-dl-btn"
         });
-        v07Core.setBtnIconLabel(openWebBtn, "external", "漫猫网页搜索", 14);
+        v07Core.setBtnIconLabel(openWebBtn, "external", this.isMobileMode ? "漫猫网页" : "漫猫网页搜索", 14);
         openWebBtn.title = "在浏览器中打开 www.comicat.org 搜索结果页";
         openWebBtn.onclick = () => {
           const kw = this.keywordInput.value.trim() || this.item?.name || "";
           window.open(buildComicatSearchUrl(kw, this.baseUrl));
         };
 
-        const copyRssBtn = searchRow.createEl("button", {
-          cls: "curator-dl-btn"
-        });
-        v07Core.setBtnIconLabel(copyRssBtn, "copy", "复制当前 RSS", 14);
-        copyRssBtn.dataset.dlAction = "copy-rss";
-        copyRssBtn.title = "检测是否已有 RSS 订阅/下载规则并复制当前漫猫专属 RSS 订阅地址";
-        copyRssBtn.onclick = () => {
-          const kw = this.keywordInput.value.trim() || this.item?.name || "";
-          const rssUrl = buildComicatRssUrl(kw, this.baseUrl);
-          this.confirmRssRuleBeforeAction(
-            {
-              actionTitle: "复制 RSS 订阅地址（用于添加 RSS 订阅）",
-              targetKeyword: kw,
-              targetRss: rssUrl
-            },
-            async () => {
-              if (navigator.clipboard) {
-                await navigator.clipboard.writeText(rssUrl);
+        if (!this.isMobileMode) {
+          const copyRssBtn = searchRow.createEl("button", {
+            cls: "curator-dl-btn"
+          });
+          v07Core.setBtnIconLabel(copyRssBtn, "copy", "复制当前 RSS", 14);
+          copyRssBtn.dataset.dlAction = "copy-rss";
+          copyRssBtn.title = "检测是否已有 RSS 订阅/下载规则并复制当前漫猫专属 RSS 订阅地址";
+          copyRssBtn.onclick = () => {
+            const kw = this.keywordInput.value.trim() || this.item?.name || "";
+            const rssUrl = buildComicatRssUrl(kw, this.baseUrl);
+            this.confirmRssRuleBeforeAction(
+              {
+                actionTitle: "复制 RSS 订阅地址（用于添加 RSS 订阅）",
+                targetKeyword: kw,
+                targetRss: rssUrl
+              },
+              async () => {
+                if (navigator.clipboard) {
+                  await navigator.clipboard.writeText(rssUrl);
+                }
+                if (NoticeClass) {
+                  new NoticeClass(`已复制专属 RSS 链接：\n${rssUrl}`, 4500);
+                }
               }
-              if (NoticeClass) {
-                new NoticeClass(`已复制专属 RSS 链接：\n${rssUrl}`, 4500);
-              }
-            }
-          );
-        };
+            );
+          };
+        }
       }
 
       const customWebBtn = searchRow.createEl("button", {
@@ -3133,6 +3214,21 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
     renderEnvStatus() {
       if (!this.envBox) return;
       this.envBox.empty();
+
+      if (this.isMobileMode) {
+        const mobileCol = this.envBox.createDiv("curator-dl-env-col is-mobile-env-col");
+        const header = mobileCol.createDiv("curator-dl-env-line");
+        header.createSpan({ cls: "curator-dl-status-dot is-ok" });
+        header.createSpan({
+          cls: "curator-dl-env-title",
+          text: "移动端磁力检索模式（适配迅雷 / 夸克 / 115 / Flud 等下载 App）"
+        });
+        mobileCol.createDiv({
+          cls: "curator-dl-env-path",
+          text: "点「复制磁力」即可粘贴到手机网盘或下载器离线观看，或点「唤起 App」直接调起本机磁力下载应用。"
+        });
+        return;
+      }
 
       // 左侧：本地下载文件夹状态
       const folderCol = this.envBox.createDiv("curator-dl-env-col");
@@ -3615,6 +3711,11 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
     renderRssRuleCheckBanner() {
       if (!this.rssCheckBox) return;
       this.rssCheckBox.empty();
+      if (this.isMobileMode) {
+        this.rssCheckBox.style.display = "none";
+        return;
+      }
+      this.rssCheckBox.style.display = "";
 
       const report = this.getLatestRssCheckReport();
       const enabledCount = report.matchedRules.filter((r) => r.enabled).length;
@@ -4184,106 +4285,160 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       });
 
       const currentRssUrl = buildComicatRssUrl(this.currentKeyword, this.baseUrl);
-      verifyLeft.createDiv({
-        cls: "curator-dl-verify-rss curator-mono",
-        text: `专属 RSS：${currentRssUrl}`
-      });
+      if (!this.isMobileMode) {
+        verifyLeft.createDiv({
+          cls: "curator-dl-verify-rss curator-mono",
+          text: `专属 RSS：${currentRssUrl}`
+        });
+      }
 
       const verifyActions = actionBanner.createDiv("curator-dl-verify-actions");
       const qbStatus = detectQbittorrentStatus(this.plugin);
 
-      if (watchedNotInFolderCount > 0) {
-        const toggleWatchedMissingBtn = verifyActions.createEl("button", {
-          cls: "curator-dl-mini-btn",
-          text: this.includeWatchedInBatch
-            ? `已含前 ${watchedNotInFolderCount} 集已看补档 (点击仅下未看新集)`
-            : `已跳过 ${watchedNotInFolderCount} 集已看集数 (点击纳入补档)`
-        });
-        toggleWatchedMissingBtn.title =
-          "完美支持「看一集删一集」或「前几集在其他平台看过」：默认仅把大于已看话数的新集视为待下载";
-        toggleWatchedMissingBtn.onclick = () => {
-          this.includeWatchedInBatch = !this.includeWatchedInBatch;
-          this.renderResultsMount();
-        };
-      }
-
-      if (missingEpisodes.length > 0 && qbStatus.enabled && qbStatus.installed) {
-        const batchDlBtn = verifyActions.createEl("button", {
-          cls: "curator-dl-btn is-primary"
-        });
-        v07Core.setBtnIconLabel(batchDlBtn, "download", `一键下载未看缺失的 ${missingEpisodes.length} 集 (qBittorrent)`, 14);
-        batchDlBtn.dataset.dlAction = "batch-qb-download";
-        batchDlBtn.onclick = () => {
-          this.confirmRssRuleBeforeAction(
-            {
-              actionTitle: `一键投递缺失的 ${missingEpisodes.length} 集至 qBittorrent`,
-              targetKeyword: this.currentKeyword,
-              targetRss: currentRssUrl
-            },
-            async () => {
-              batchDlBtn.disabled = true;
-              const res = await dispatchDownloadToQbittorrent(
-                this.plugin,
-                this.item,
-                missingEpisodes
-              );
-              batchDlBtn.disabled = false;
-              if (res.ok) {
-                if (NoticeClass) {
-                  new NoticeClass(
-                    `已将《${this.item.name}》的 ${res.dispatchedCount} 集发送至 qBittorrent！\n保存目录：${res.savePath}`,
-                    5000
-                  );
-                }
-                this.renderEnvStatus();
-              } else if (NoticeClass) {
-                new NoticeClass(`发送失败：${res.reason}`);
-              }
-            }
+      if (this.isMobileMode) {
+        const unwatchedMagnets = unwatchedMissing
+          .map((ep) => buildCompactMobileMagnet(ep))
+          .filter(Boolean);
+        if (unwatchedMagnets.length > 0) {
+          const copyBatchBtn = verifyActions.createEl("button", {
+            cls: "curator-dl-btn is-primary"
+          });
+          v07Core.setBtnIconLabel(
+            copyBatchBtn,
+            "copy",
+            `批量复制未看 ${unwatchedMagnets.length} 集磁力`,
+            14
           );
-        };
-      }
-
-      const bindSourceBtn = verifyActions.createEl("button", {
-        cls: "curator-dl-btn is-accent"
-      });
-      v07Core.setBtnIconLabel(bindSourceBtn, "rss", "绑定为默认下载源并开启追更", 14);
-      bindSourceBtn.dataset.dlAction = "bind-rss-source";
-      bindSourceBtn.title =
-        "将该精准搜索词与专属 RSS 写入动画笔记并启用自动磁力追更（绕开失效种子站），同时立即下载当前未看缺失集数";
-      bindSourceBtn.onclick = () => {
-        this.confirmRssRuleBeforeAction(
-          {
-            actionTitle: "绑定默认下载源并开启自动追更",
-            targetKeyword: this.currentKeyword,
-            targetRss: currentRssUrl
-          },
-          async () => {
-            bindSourceBtn.disabled = true;
-            const syncRes = await bindAnimeDownloadSourceToNote(this.plugin, this.item, {
+          copyBatchBtn.onclick = async () => {
+            const ok = await copyTextCrossPlatform(unwatchedMagnets.join("\n"));
+            if (NoticeClass) {
+              new NoticeClass(
+                ok
+                  ? `已复制 ${unwatchedMagnets.length} 条未看剧集磁力链接（每行一条），可直接粘贴至迅雷 / 夸克 / 115 批量离线！`
+                  : "复制失败，请尝试逐集点击复制磁力。",
+                4500
+              );
+            }
+          };
+        }
+        const savePrefBtn = verifyActions.createEl("button", {
+          cls: "curator-dl-btn is-accent"
+        });
+        v07Core.setBtnIconLabel(savePrefBtn, "star", "记住该字幕组偏好", 14);
+        savePrefBtn.onclick = async () => {
+          savePrefBtn.disabled = true;
+          try {
+            await bindAnimeDownloadSourceToNote(this.plugin, this.item, {
               keyword: this.currentKeyword,
               rssUrl: currentRssUrl,
               streamId: this.activeStreamId || this.currentKeyword,
-              missingEpisodes: unwatchedMissing,
-              syncQb: true
+              missingEpisodes: [],
+              syncQb: false
             });
-            bindSourceBtn.disabled = false;
             if (NoticeClass) {
-              new NoticeClass(
-                syncRes?.ok
-                  ? `已绑定「${this.currentKeyword}」并开启自动追更${
-                      syncRes.dispatchedCount > 0 ? `（已同时投递 ${syncRes.dispatchedCount} 集未看新集）` : ""
-                    }！`
-                  : `已将「${this.currentKeyword}」绑定至《${this.item.name}》笔记！`,
-                5500
-              );
+              new NoticeClass(`已为《${this.item?.name || "番剧"}》记住常用发布源：${this.currentKeyword}`, 4000);
             }
             this.renderShell();
             this.renderResultsMount();
             if (typeof this.onUpdated === "function") this.onUpdated();
+          } finally {
+            savePrefBtn.disabled = false;
           }
-        );
-      };
+        };
+      } else {
+        if (watchedNotInFolderCount > 0) {
+          const toggleWatchedMissingBtn = verifyActions.createEl("button", {
+            cls: "curator-dl-mini-btn",
+            text: this.includeWatchedInBatch
+              ? `已含前 ${watchedNotInFolderCount} 集已看补档 (点击仅下未看新集)`
+              : `已跳过 ${watchedNotInFolderCount} 集已看集数 (点击纳入补档)`
+          });
+          toggleWatchedMissingBtn.title =
+            "完美支持「看一集删一集」或「前几集在其他平台看过」：默认仅把大于已看话数的新集视为待下载";
+          toggleWatchedMissingBtn.onclick = () => {
+            this.includeWatchedInBatch = !this.includeWatchedInBatch;
+            this.renderResultsMount();
+          };
+        }
+
+        if (missingEpisodes.length > 0 && qbStatus.enabled && qbStatus.installed) {
+          const batchDlBtn = verifyActions.createEl("button", {
+            cls: "curator-dl-btn is-primary"
+          });
+          v07Core.setBtnIconLabel(batchDlBtn, "download", `一键下载未看缺失的 ${missingEpisodes.length} 集 (qBittorrent)`, 14);
+          batchDlBtn.dataset.dlAction = "batch-qb-download";
+          batchDlBtn.onclick = () => {
+            this.confirmRssRuleBeforeAction(
+              {
+                actionTitle: `一键投递缺失的 ${missingEpisodes.length} 集至 qBittorrent`,
+                targetKeyword: this.currentKeyword,
+                targetRss: currentRssUrl
+              },
+              async () => {
+                batchDlBtn.disabled = true;
+                const res = await dispatchDownloadToQbittorrent(
+                  this.plugin,
+                  this.item,
+                  missingEpisodes
+                );
+                batchDlBtn.disabled = false;
+                if (res.ok) {
+                  if (NoticeClass) {
+                    new NoticeClass(
+                      `已将《${this.item.name}》的 ${res.dispatchedCount} 集发送至 qBittorrent！\n保存目录：${res.savePath}`,
+                      5000
+                    );
+                  }
+                  this.renderEnvStatus();
+                } else if (NoticeClass) {
+                  new NoticeClass(`发送失败：${res.reason}`);
+                }
+              }
+            );
+          };
+        }
+
+        const bindSourceBtn = verifyActions.createEl("button", {
+          cls: "curator-dl-btn is-accent"
+        });
+        v07Core.setBtnIconLabel(bindSourceBtn, "rss", "绑定为默认下载源并开启追更", 14);
+        bindSourceBtn.dataset.dlAction = "bind-rss-source";
+        bindSourceBtn.title =
+          "将该精准搜索词与专属 RSS 写入动画笔记并启用自动磁力追更（绕开失效种子站），同时立即下载当前未看缺失集数";
+        bindSourceBtn.onclick = () => {
+          this.confirmRssRuleBeforeAction(
+            {
+              actionTitle: "绑定默认下载源并开启自动追更",
+              targetKeyword: this.currentKeyword,
+              targetRss: currentRssUrl
+            },
+            async () => {
+              bindSourceBtn.disabled = true;
+              const syncRes = await bindAnimeDownloadSourceToNote(this.plugin, this.item, {
+                keyword: this.currentKeyword,
+                rssUrl: currentRssUrl,
+                streamId: this.activeStreamId || this.currentKeyword,
+                missingEpisodes: unwatchedMissing,
+                syncQb: true
+              });
+              bindSourceBtn.disabled = false;
+              if (NoticeClass) {
+                new NoticeClass(
+                  syncRes?.ok
+                    ? `已绑定「${this.currentKeyword}」并开启自动追更${
+                        syncRes.dispatchedCount > 0 ? `（已同时投递 ${syncRes.dispatchedCount} 集未看新集）` : ""
+                      }！`
+                    : `已将「${this.currentKeyword}」绑定至《${this.item.name}》笔记！`,
+                  5500
+                );
+              }
+              this.renderShell();
+              this.renderResultsMount();
+              if (typeof this.onUpdated === "function") this.onUpdated();
+            }
+          );
+        };
+      }
 
       // 4. 剧集明细列表（按集数从新到旧排列）
       const epListWrap = this.resultsMount.createDiv("curator-dl-ep-list");
@@ -4311,7 +4466,11 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           cls: `curator-dl-ep-local-tag ${
             isLocalDownloaded ? "is-ok" : isAlreadyWatched ? "is-ok" : "is-new"
           }`,
-          text: isLocalDownloaded
+          text: this.isMobileMode
+            ? isAlreadyWatched
+              ? "已看"
+              : "未看"
+            : isLocalDownloaded
             ? "本地已有"
             : isAlreadyWatched
             ? "已看(已清理/云端)"
@@ -4335,7 +4494,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         });
 
         const actCol = row.createDiv("curator-dl-ep-actions-col");
-        if (isLocalDownloaded) {
+        if (!this.isMobileMode && isLocalDownloaded) {
           const delEpBtn = actCol.createEl("button", {
             cls: "curator-dl-mini-btn is-subtle"
           });
@@ -4362,7 +4521,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           };
         }
 
-        if (qbStatus.enabled && qbStatus.installed) {
+        if (!this.isMobileMode && qbStatus.enabled && qbStatus.installed) {
           const qbBtn = actCol.createEl("button", {
             cls: "curator-dl-mini-btn is-primary"
           });
@@ -4395,46 +4554,77 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         }
 
         if (epItem.magnetUrl) {
-          const magBtn = actCol.createEl("button", {
-            cls: "curator-dl-mini-btn"
-          });
-          v07Core.setBtnIconLabel(magBtn, "magnet", "磁力/网盘", 13);
-          magBtn.title =
-            "唤起磁力链接（如夸克网盘/迅雷），并自动将本番剧本地文件夹路径复制到剪贴板，在网盘「下载到」直接按 Ctrl+V 即可关联路径！";
-          magBtn.onclick = () => {
-            this.confirmRssRuleBeforeAction(
-              {
-                actionTitle: `唤起第 ${String(epNum).padStart(2, "0")} 话磁力/网盘下载（自动复制本番保存目录供 Ctrl+V 粘贴）`,
-                targetKeyword: this.currentKeyword,
-                targetRss: currentRssUrl
-              },
-              async () => {
-                const folderRes = await ensureAnimeLocalDownloadFolder(
-                  this.plugin,
-                  this.item,
-                  true
+          if (this.isMobileMode) {
+            const copyMagBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn is-primary"
+            });
+            v07Core.setBtnIconLabel(copyMagBtn, "copy", "复制磁力", 13);
+            copyMagBtn.onclick = async () => {
+              const mag = buildCompactMobileMagnet(epItem);
+              const ok = await copyTextCrossPlatform(mag);
+              if (NoticeClass) {
+                new NoticeClass(
+                  ok
+                    ? `已复制第 ${String(epNum).padStart(2, "0")} 话磁力链接，可粘贴到迅雷 / 夸克 / 115 / Flud 下载！`
+                    : "复制失败，请长按磁力链接手动复制。",
+                  4000
                 );
-                const winFolder =
-                  folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
-                if (navigator.clipboard) {
-                  await navigator.clipboard
-                    .writeText(winFolder || epItem.magnetUrl)
-                    .catch(() => {});
-                }
-                window.open(enrichMagnetUrlWithTrackers(epItem.magnetUrl));
-                if (NoticeClass) {
-                  new NoticeClass(
-                    winFolder
-                      ? `已拉起磁力/夸克下载！\n已自动将本番保存路径复制到剪贴板：\n${winFolder}\n（在网盘弹窗的「下载到」直接 Ctrl+V 粘贴即可，或下载后点上方「从夸克/网盘目录归集」）`
-                      : `已唤起磁力链接（第 ${epNum} 话）${
-                          folderRes.error ? `\n本地目录未自动创建：${folderRes.error}` : ""
-                        }`,
-                    6500
-                  );
-                }
               }
-            );
-          };
+            };
+
+            const launchAppBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn is-accent"
+            });
+            v07Core.setBtnIconLabel(launchAppBtn, "magnet", "唤起 App", 13);
+            launchAppBtn.onclick = () => {
+              const mag = buildCompactMobileMagnet(epItem);
+              launchMagnetCrossPlatform(mag);
+              if (NoticeClass) {
+                new NoticeClass(`正在唤起本机磁力下载应用（第 ${String(epNum).padStart(2, "0")} 话）…`, 3200);
+              }
+            };
+          } else {
+            const magBtn = actCol.createEl("button", {
+              cls: "curator-dl-mini-btn"
+            });
+            v07Core.setBtnIconLabel(magBtn, "magnet", "磁力/网盘", 13);
+            magBtn.title =
+              "唤起磁力链接（如夸克网盘/迅雷），并自动将本番剧本地文件夹路径复制到剪贴板，在网盘「下载到」直接按 Ctrl+V 即可关联路径！";
+            magBtn.onclick = () => {
+              this.confirmRssRuleBeforeAction(
+                {
+                  actionTitle: `唤起第 ${String(epNum).padStart(2, "0")} 话磁力/网盘下载（自动复制本番保存目录供 Ctrl+V 粘贴）`,
+                  targetKeyword: this.currentKeyword,
+                  targetRss: currentRssUrl
+                },
+                async () => {
+                  const folderRes = await ensureAnimeLocalDownloadFolder(
+                    this.plugin,
+                    this.item,
+                    true
+                  );
+                  const winFolder =
+                    folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
+                  if (navigator.clipboard) {
+                    await navigator.clipboard
+                      .writeText(winFolder || epItem.magnetUrl)
+                      .catch(() => {});
+                  }
+                  window.open(enrichMagnetUrlWithTrackers(epItem.magnetUrl));
+                  if (NoticeClass) {
+                    new NoticeClass(
+                      winFolder
+                        ? `已拉起磁力/夸克下载！\n已自动将本番保存路径复制到剪贴板：\n${winFolder}\n（在网盘弹窗的「下载到」直接 Ctrl+V 粘贴即可，或下载后点上方「从夸克/网盘目录归集」）`
+                        : `已唤起磁力链接（第 ${epNum} 话）${
+                            folderRes.error ? `\n本地目录未自动创建：${folderRes.error}` : ""
+                          }`,
+                      6500
+                    );
+                  }
+                }
+              );
+            };
+          }
         }
 
         if (epItem.torrentUrl) {
@@ -4442,8 +4632,14 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             cls: "curator-dl-mini-btn"
           });
           v07Core.setBtnIconLabel(torBtn, "file", "种子", 13);
-          torBtn.title = "检测是否已有订阅规则并直接下载 .torrent 种子文件";
+          torBtn.title = this.isMobileMode
+            ? "下载 .torrent 种子文件"
+            : "检测是否已有订阅规则并直接下载 .torrent 种子文件";
           torBtn.onclick = () => {
+            if (this.isMobileMode) {
+              window.open(epItem.torrentUrl);
+              return;
+            }
             this.confirmRssRuleBeforeAction(
               {
                 actionTitle: `下载第 ${String(epNum).padStart(2, "0")} 话 .torrent 种子文件`,
@@ -4507,7 +4703,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           }
 
           const actCol = prow.createDiv("curator-dl-ep-actions-col");
-          if (qbStatus.enabled && qbStatus.installed) {
+          if (!this.isMobileMode && qbStatus.enabled && qbStatus.installed) {
             const qbPackBtn = actCol.createEl("button", {
               cls: "curator-dl-mini-btn is-primary"
             });
@@ -4538,42 +4734,70 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           }
 
           if (packItem.magnetUrl) {
-            const magPackBtn = actCol.createEl("button", {
-              cls: "curator-dl-mini-btn"
-            });
-            v07Core.setBtnIconLabel(magPackBtn, "magnet", "磁力/网盘", 13);
-            magPackBtn.onclick = () => {
-              this.confirmRssRuleBeforeAction(
-                {
-                  actionTitle: "唤起季度合集包磁力/网盘下载",
-                  targetKeyword: this.currentKeyword,
-                  targetRss: currentRssUrl
-                },
-                async () => {
-                  const folderRes = await ensureAnimeLocalDownloadFolder(
-                    this.plugin,
-                    this.item,
-                    true
+            if (this.isMobileMode) {
+              const copyPackBtn = actCol.createEl("button", {
+                cls: "curator-dl-mini-btn is-primary"
+              });
+              v07Core.setBtnIconLabel(copyPackBtn, "copy", "复制磁力", 13);
+              copyPackBtn.onclick = async () => {
+                const ok = await copyTextCrossPlatform(buildCompactMobileMagnet(packItem));
+                if (NoticeClass) {
+                  new NoticeClass(
+                    ok
+                      ? "已复制季度合集包磁力链接，可粘贴至迅雷 / 夸克 / 115 / Flud 离线下载！"
+                      : "复制失败，请稍后重试。",
+                    4200
                   );
-                  const winFolder =
-                    folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
-                  if (navigator.clipboard) {
-                    await navigator.clipboard
-                      .writeText(winFolder || packItem.magnetUrl)
-                      .catch(() => {});
-                  }
-                  window.open(enrichMagnetUrlWithTrackers(packItem.magnetUrl));
-                  if (NoticeClass) {
-                    new NoticeClass(
-                      winFolder
-                        ? `已拉起合集磁力下载！\n已将本番保存目录复制到剪贴板：\n${winFolder}`
-                        : "已唤起季度合集包磁力链接",
-                      5500
-                    );
-                  }
                 }
-              );
-            };
+              };
+              const launchPackBtn = actCol.createEl("button", {
+                cls: "curator-dl-mini-btn is-accent"
+              });
+              v07Core.setBtnIconLabel(launchPackBtn, "magnet", "唤起 App", 13);
+              launchPackBtn.onclick = () => {
+                launchMagnetCrossPlatform(buildCompactMobileMagnet(packItem));
+                if (NoticeClass) {
+                  new NoticeClass("正在唤起本机磁力下载应用（季度合集包）…", 3200);
+                }
+              };
+            } else {
+              const magPackBtn = actCol.createEl("button", {
+                cls: "curator-dl-mini-btn"
+              });
+              v07Core.setBtnIconLabel(magPackBtn, "magnet", "磁力/网盘", 13);
+              magPackBtn.onclick = () => {
+                this.confirmRssRuleBeforeAction(
+                  {
+                    actionTitle: "唤起季度合集包磁力/网盘下载",
+                    targetKeyword: this.currentKeyword,
+                    targetRss: currentRssUrl
+                  },
+                  async () => {
+                    const folderRes = await ensureAnimeLocalDownloadFolder(
+                      this.plugin,
+                      this.item,
+                      true
+                    );
+                    const winFolder =
+                      folderRes.ok && folderRes.targetPath ? path.normalize(folderRes.targetPath) : "";
+                    if (navigator.clipboard) {
+                      await navigator.clipboard
+                        .writeText(winFolder || packItem.magnetUrl)
+                        .catch(() => {});
+                    }
+                    window.open(enrichMagnetUrlWithTrackers(packItem.magnetUrl));
+                    if (NoticeClass) {
+                      new NoticeClass(
+                        winFolder
+                          ? `已拉起合集磁力下载！\n已将本番保存目录复制到剪贴板：\n${winFolder}`
+                          : "已唤起季度合集包磁力链接",
+                        5500
+                      );
+                    }
+                  }
+                );
+              };
+            }
           }
 
           if (packItem.torrentUrl) {

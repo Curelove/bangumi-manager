@@ -1,6 +1,11 @@
 const Modal = globalThis.__BangumiManagerModal;
 const { setIcon, getIconIds, Notice } = require("obsidian");
-const { resolveFfmpegExecutable, isPathInsideAnimeRoot } = require("./multi-hall-archive-service");
+const {
+  resolveFfmpegExecutable,
+  isPathInsideAnimeRoot,
+  reconcileGameCollectionWithNotes,
+  reconcileVoiceCollectionWithVault
+} = require("./multi-hall-archive-service");
 const {
   checkRoxyHdPortraitsStatus,
   downloadRoxyHdPortraitPack,
@@ -30,7 +35,14 @@ const {
   removeAtelierHdPack,
   preloadAtelierHdPrototypes
 } = require("./atelier-3d-pack-service");
-const gameCapsuleService = require("./game-floating-capsule-service");
+let _cachedSettingsCapsuleService = null;
+function getSettingsCapsuleService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedSettingsCapsuleService) {
+    _cachedSettingsCapsuleService = require("./game-floating-capsule-service");
+  }
+  return _cachedSettingsCapsuleService;
+}
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -918,9 +930,15 @@ module.exports = function createSettingsTabClass({
   function ensureSettingsSpotlightStyles(doc) {
     const targetDoc = doc || (typeof document !== "undefined" ? document : null);
     if (!targetDoc || !targetDoc.head) return;
-    if (targetDoc.getElementById("bangumi-settings-spotlight-styles")) return;
-    const styleEl = targetDoc.createElement("style");
-    styleEl.id = "bangumi-settings-spotlight-styles";
+    const STYLE_VER = "0.8.4-mobile-v2";
+    let styleEl = targetDoc.getElementById("bangumi-settings-spotlight-styles");
+    if (styleEl && styleEl.dataset.bgmVer === STYLE_VER) return;
+    if (!styleEl) {
+      styleEl = targetDoc.createElement("style");
+      styleEl.id = "bangumi-settings-spotlight-styles";
+      targetDoc.head.appendChild(styleEl);
+    }
+    styleEl.dataset.bgmVer = STYLE_VER;
     styleEl.textContent = [
       ".bgm-settings-sticky-hud{position:sticky;top:-18px;z-index:35;margin:-8px -8px 16px -8px;padding:12px 14px 10px;border-radius:11px;border:1px solid color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-primary) 92%, #f6efe3 8%);backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(28,20,12,0.09);display:flex;flex-direction:column;gap:9px;}",
       ".bgm-settings-hud-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}",
@@ -928,21 +946,21 @@ module.exports = function createSettingsTabClass({
       ".bgm-settings-hud-title{margin:0 !important;font-size:1.22em !important;font-weight:800 !important;color:var(--text-normal);}",
       ".bgm-settings-hud-mode-badge{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:rgba(143,104,61,0.14);color:#8f683d;border:1px solid rgba(143,104,61,0.34);letter-spacing:0.04em;}",
       ".bgm-settings-spotlight-capsule{position:relative;display:flex;align-items:center;flex:1 1 290px;max-width:460px;min-width:220px;}",
-      ".bgm-settings-spotlight-icon{position:absolute;left:10px;font-size:13px;color:#8f683d;pointer-events:none;}",
-      ".bgm-settings-spotlight-input{width:100% !important;padding:6px 86px 6px 30px !important;font-size:12.5px !important;border-radius:999px !important;border:1px solid color-mix(in srgb, #8f683d 38%, var(--background-modifier-border)) !important;background:var(--background-secondary) !important;color:var(--text-normal) !important;transition:all .16s ease !important;}",
+      ".bgm-settings-spotlight-icon{position:absolute;left:10px;font-size:13px;color:#8f683d;pointer-events:none;display:inline-flex;align-items:center;}",
+      ".bgm-settings-spotlight-input{width:100% !important;padding:6px 102px 6px 32px !important;font-size:12.5px !important;border-radius:999px !important;border:1px solid color-mix(in srgb, #8f683d 38%, var(--background-modifier-border)) !important;background:var(--background-secondary) !important;color:var(--text-normal) !important;transition:all .16s ease !important;box-sizing:border-box !important;}",
       ".bgm-settings-spotlight-input:focus{border-color:#8f683d !important;background:var(--background-primary) !important;box-shadow:0 0 0 3px rgba(143,104,61,0.18) !important;}",
       ".bgm-settings-spotlight-meta{position:absolute;right:8px;display:inline-flex;align-items:center;gap:4px;}",
-      ".bgm-settings-spotlight-count{font-size:10.5px;font-weight:700;padding:1.5px 7px;border-radius:999px;background:color-mix(in srgb, #8f683d 14%, var(--background-primary));color:#8f683d;pointer-events:none;font-variant-numeric:tabular-nums;}",
+      ".bgm-settings-spotlight-count{font-size:10.5px;font-weight:700;padding:1.5px 7px;border-radius:999px;background:color-mix(in srgb, #8f683d 14%, var(--background-primary));color:#8f683d;pointer-events:none;font-variant-numeric:tabular-nums;white-space:nowrap;}",
       ".bgm-settings-spotlight-clear{cursor:pointer;width:19px;height:19px;padding:0;border:none;border-radius:50%;background:rgba(143,104,61,0.16);color:#8f683d;font-size:12px;font-weight:800;display:none;align-items:center;justify-content:center;line-height:1;}",
       ".bgm-settings-spotlight-clear.is-visible{display:inline-flex;}",
       ".bgm-settings-spotlight-clear:hover{background:#8f683d;color:#fffdf9;}",
       ".bgm-settings-compass-rail{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding-top:6px;border-top:1px dashed color-mix(in srgb, #8f683d 24%, var(--background-modifier-border));}",
-      ".bgm-settings-compass-label{font-size:10.5px;font-weight:700;color:var(--text-muted);margin-right:2px;}",
-      ".bgm-settings-compass-chip{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:2.5px 9px;font-size:11px;font-weight:600;border-radius:999px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-muted);transition:all .14s ease;}",
+      ".bgm-settings-compass-label{font-size:10.5px;font-weight:700;color:var(--text-muted);margin-right:2px;flex:0 0 auto;}",
+      ".bgm-settings-compass-chip{cursor:pointer;display:inline-flex;align-items:center;gap:4px;padding:2.5px 9px;font-size:11px;font-weight:600;border-radius:999px;border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-muted);transition:all .14s ease;flex:0 0 auto;white-space:nowrap;}",
       ".bgm-settings-compass-chip:hover{border-color:#8f683d;color:var(--text-normal);transform:translateY(-1px);}",
       ".bgm-settings-compass-chip.is-active{background:linear-gradient(135deg,#8f683d,#b08450);border-color:#8f683d;color:#fffdf9;font-weight:700;box-shadow:0 2px 6px rgba(143,104,61,0.25);}",
       ".bgm-settings-compass-chip-cnt{font-size:9.5px;opacity:0.82;font-variant-numeric:tabular-nums;}",
-      ".bgm-settings-compass-mode-btn{cursor:pointer;margin-left:auto;padding:2px 8px;font-size:10.5px;font-weight:700;border-radius:6px;border:1px dashed rgba(143,104,61,0.48);background:transparent;color:#8f683d;transition:all .14s ease;}",
+      ".bgm-settings-compass-mode-btn{cursor:pointer;margin-left:auto;padding:2px 8px;font-size:10.5px;font-weight:700;border-radius:6px;border:1px dashed rgba(143,104,61,0.48);background:transparent;color:#8f683d;transition:all .14s ease;flex:0 0 auto;white-space:nowrap;}",
       ".bgm-settings-compass-mode-btn.is-focus-only{border-style:solid;background:rgba(143,104,61,0.14);}",
       ".bgm-settings-search-hidden{display:none !important;}",
       ".setting-item.is-bgm-search-match{border-left:3px solid #8f683d !important;padding-left:10px !important;background:color-mix(in srgb, #8f683d 5%, transparent);border-radius:6px;}",
@@ -963,6 +981,7 @@ module.exports = function createSettingsTabClass({
       ".bgm-settings-root-container .setting-item > .setting-item-control select.dropdown{max-width:min(220px, 100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
       ".bgm-settings-root-container .setting-item.is-roxy-sub-disabled{opacity:0.5;filter:grayscale(0.35);pointer-events:none;}",
       ".bgm-guide-step-note{margin:4px 0 14px;padding:10px 14px;border-radius:8px;border-left:3px solid #8f683d;background:color-mix(in srgb, var(--background-secondary) 84%, #f6efe3 16%);font-size:12.6px;line-height:1.62;color:var(--text-muted);}",
+      ".bgm-mobile-compat-banner{margin:10px 0 14px;padding:10px 12px;border-radius:9px;border:1px solid color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));background:color-mix(in srgb, var(--background-secondary) 86%, #f6efe3 14%);font-size:12px;line-height:1.55;color:var(--text-muted);}",
       ".bgm-ribbon-inline-dock{display:inline-flex;align-items:center;padding:3px;border-radius:9px;background:var(--ribbon-background, var(--background-secondary-alt, var(--background-secondary)));border:1px solid var(--background-modifier-border);margin-right:6px;}",
       ".bgm-ribbon-inline-btn{width:34px !important;height:34px !important;min-width:34px !important;padding:0 !important;border-radius:7px !important;border:1px solid transparent !important;background:transparent !important;color:var(--icon-color, var(--text-muted)) !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;cursor:pointer !important;box-shadow:none !important;transition:background .14s ease, color .14s ease, border-color .14s ease, transform .14s ease !important;}",
       ".bgm-ribbon-inline-btn:hover{background:var(--background-modifier-hover) !important;color:var(--icon-color-hover, var(--text-normal)) !important;border-color:rgba(143,104,61,0.45) !important;transform:translateY(-1px);}",
@@ -970,7 +989,7 @@ module.exports = function createSettingsTabClass({
       ".bgm-guide-demo-drawer{margin:6px 0 18px;border-radius:10px;border:1px solid color-mix(in srgb, #8f683d 28%, var(--background-modifier-border));background:var(--background-secondary);overflow:hidden;}",
       ".bgm-guide-demo-summary{cursor:pointer;padding:10px 14px;font-size:12.8px;font-weight:700;color:var(--text-normal);user-select:none;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px;}",
       ".bgm-guide-demo-summary::-webkit-details-marker{display:none;}",
-      ".bgm-guide-demo-summary::after{content:'展开演示 ▾';font-size:11.5px;font-weight:600;color:#8f683d;}",
+      ".bgm-guide-demo-summary::after{content:'展开演示 ▾';font-size:11.5px;font-weight:600;color:#8f683d;flex:0 0 auto;}",
       ".bgm-guide-demo-drawer[open] .bgm-guide-demo-summary{border-bottom:1px solid var(--background-modifier-border);}",
       ".bgm-guide-demo-drawer[open] .bgm-guide-demo-summary::after{content:'收起演示 ▴';}",
       ".bgm-guide-demo-body{padding:12px 14px;display:flex;flex-direction:column;gap:14px;background:var(--background-primary);}",
@@ -1004,9 +1023,56 @@ module.exports = function createSettingsTabClass({
       ".bgm-icon-picker-search{width:100% !important;margin-bottom:6px;}",
       ".bgm-icon-picker-count{font-size:11.5px;color:var(--text-muted);margin-bottom:8px;}",
       ".bgm-icon-picker-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(40px, 1fr));gap:6px;max-height:240px;overflow-y:auto;padding:4px 2px;}",
-      ".bgm-icon-picker-cell{width:40px !important;height:38px !important;padding:0 !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;border-radius:7px !important;border:1px solid var(--background-modifier-border) !important;background:var(--background-secondary) !important;cursor:pointer;}"
+      ".bgm-icon-picker-cell{width:40px !important;height:38px !important;padding:0 !important;display:inline-flex !important;align-items:center !important;justify-content:center !important;border-radius:7px !important;border:1px solid var(--background-modifier-border) !important;background:var(--background-secondary) !important;cursor:pointer;}",
+      "body.is-mobile .bgm-settings-root-container{padding-bottom:calc(92px + env(safe-area-inset-bottom, 0px)) !important;box-sizing:border-box;}",
+      "body.is-mobile .bgm-settings-root-container h3{margin:18px 0 8px !important;font-size:1.05em !important;scroll-margin-top:128px;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item{display:flex !important;flex-direction:column !important;flex-wrap:nowrap !important;align-items:stretch !important;gap:9px !important;padding:12px 13px !important;margin:0 0 8px 0 !important;height:auto !important;min-height:0 !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-info{flex:0 0 auto !important;flex-basis:auto !important;min-width:0 !important;width:100% !important;height:auto !important;margin:0 !important;padding:0 !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-control{flex:0 0 auto !important;width:100% !important;min-width:0 !important;display:flex !important;flex-wrap:wrap !important;align-items:center !important;justify-content:flex-start !important;gap:8px !important;padding-top:2px !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item.mod-toggle:not(:has(.setting-item-control button)):not(:has(input[type=\"text\"])):not(:has(select)){flex-direction:row !important;align-items:center !important;justify-content:space-between !important;gap:12px !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item.mod-toggle:not(:has(.setting-item-control button)):not(:has(input[type=\"text\"])):not(:has(select)) > .setting-item-info{flex:1 1 auto !important;width:auto !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item.mod-toggle:not(:has(.setting-item-control button)):not(:has(input[type=\"text\"])):not(:has(select)) > .setting-item-control{flex:0 0 auto !important;width:auto !important;justify-content:flex-end !important;padding-top:0 !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-control input[type=\"text\"],body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-control input[type=\"search\"],body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-control select.dropdown{width:100% !important;max-width:100% !important;min-height:38px !important;box-sizing:border-box !important;}",
+      "body.is-mobile .bgm-settings-root-container .setting-item > .setting-item-control button:not(.bgm-ribbon-inline-btn){min-height:36px !important;padding:6px 12px !important;font-size:13px !important;}",
+      "body.is-mobile .bgm-settings-sticky-hud{position:relative !important;top:auto !important;z-index:2 !important;margin:0 0 12px 0;padding:10px 11px 9px;border-radius:12px;gap:8px;background:var(--background-primary) !important;backdrop-filter:none !important;-webkit-backdrop-filter:none !important;box-shadow:0 4px 14px rgba(28,20,12,0.06);}",
+      "body.is-mobile .bgm-settings-hud-top{gap:7px;}",
+      "body.is-mobile .bgm-settings-hud-brand{width:100%;justify-content:space-between;align-items:center;}",
+      "body.is-mobile .bgm-settings-hud-title{font-size:1.05em !important;}",
+      "body.is-mobile .bgm-settings-hud-mode-badge{font-size:10px;padding:1.5px 7px;}",
+      "body.is-mobile .bgm-settings-spotlight-capsule{flex:1 1 100%;max-width:100%;min-width:0;}",
+      "body.is-mobile .bgm-settings-spotlight-input{font-size:13px !important;min-height:36px !important;padding:6px 96px 6px 32px !important;}",
+      "body.is-mobile .bgm-settings-compass-rail{flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;gap:6px;padding:6px 1px 2px;}",
+      "body.is-mobile .bgm-settings-compass-rail::-webkit-scrollbar{display:none;}",
+      "body.is-mobile .bgm-settings-compass-label{display:none;}",
+      "body.is-mobile .bgm-settings-compass-chip{padding:4px 10px;font-size:11.5px;}",
+      "body.is-mobile .bgm-settings-compass-mode-btn{margin-left:2px;padding:4px 9px;font-size:11px;}",
+      "body.is-mobile .bgm-pro-upgrade-card{padding:13px 14px;gap:10px;}",
+      "body.is-mobile .bgm-pro-upgrade-info{flex:1 1 100%;min-width:0;}",
+      "body.is-mobile .bgm-pro-upgrade-card > button{width:100%;min-height:38px;}",
+      "body.is-mobile .bangumi-help-github-card,body.is-mobile .bangumi-help-community-card{padding:13px 14px !important;}",
+      "body.is-mobile .bangumi-help-info-col{min-width:0 !important;flex:1 1 100% !important;}",
+      "body.is-mobile .bangumi-help-qr-col{margin:0 auto;}",
+      "body.is-mobile .bgm-guide-demo-summary{font-size:12.4px;padding:9px 11px;}",
+      "body.is-mobile .bgm-guide-video-bar{flex-wrap:wrap;gap:6px;}",
+      /* 简略说明模式：隐藏冗长文字说明、显著缩短滑程，同时保留完整 DOM 搜索索引与单条轻点展开 */
+      ".bgm-settings-lazy-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px;}",
+      ".bgm-settings-lazy-head h2{margin:0 !important;}",
+      ".bgm-brief-toggle-btn{cursor:pointer;display:inline-flex !important;align-items:center;gap:4px;padding:3px 10px !important;height:auto !important;min-height:26px !important;border-radius:999px !important;border:1px solid color-mix(in srgb, #8f683d 40%, var(--background-modifier-border)) !important;background:var(--background-secondary) !important;color:var(--text-muted) !important;font-size:12px !important;font-weight:600 !important;line-height:1.3 !important;box-shadow:none !important;white-space:nowrap;transition:background .14s ease,color .14s ease,border-color .14s ease;}",
+      ".bgm-brief-toggle-btn:hover{border-color:#8f683d !important;color:var(--text-normal) !important;}",
+      ".bgm-brief-toggle-btn.is-active{background:rgba(143,104,61,0.16) !important;border-color:#8f683d !important;color:#8f683d !important;font-weight:700 !important;}",
+      ".bgm-brief-info-btn{display:none !important;align-items:center;justify-content:center;width:22px !important;height:22px !important;min-width:22px !important;min-height:22px !important;padding:0 !important;margin:0 !important;border-radius:999px !important;border:1px solid color-mix(in srgb, #8f683d 42%, var(--background-modifier-border)) !important;background:color-mix(in srgb, #8f683d 9%, var(--background-secondary)) !important;color:#8f683d !important;font-size:12px !important;font-weight:700 !important;line-height:1 !important;box-shadow:none !important;cursor:pointer;flex:0 0 auto;vertical-align:middle;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .bgm-brief-info-btn{display:inline-flex !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item.is-bgm-desc-peeked .bgm-brief-info-btn{background:rgba(143,104,61,0.16) !important;border-color:#8f683d !important;color:#8f683d !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .bgm-settings-intro-p,.bgm-settings-root-container.is-bgm-brief-desc .bgm-guide-step-note,.bgm-settings-root-container.is-bgm-brief-desc .bgm-mobile-compat-banner{display:none !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item > .setting-item-info{display:flex !important;flex-wrap:wrap !important;align-items:center !important;gap:2px 6px !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item > .setting-item-info > .setting-item-name{flex:0 1 auto;max-width:calc(100% - 30px);}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item > .setting-item-info > .setting-item-description{display:none !important;flex:0 0 100% !important;width:100% !important;margin-top:4px !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item.is-bgm-desc-peeked > .setting-item-info > .setting-item-description,.bgm-settings-root-container.is-bgm-brief-desc .setting-item.is-bgm-search-match > .setting-item-info > .setting-item-description{display:block !important;}",
+      ".bgm-settings-root-container.is-bgm-brief-desc .setting-item.is-bgm-live-status:not(.is-bgm-desc-peeked) > .setting-item-info > .setting-item-description{display:-webkit-box !important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}",
+      "body.is-mobile .bgm-settings-root-container.is-bgm-brief-desc .setting-item{padding:9px 12px !important;margin-bottom:6px !important;gap:6px !important;}",
+      "body.is-mobile .bgm-settings-root-container.is-bgm-brief-desc h3{margin:14px 0 6px !important;}",
+      "@media (max-width: 720px){.bgm-settings-root-container .setting-item{flex-direction:column;align-items:stretch;gap:9px;}.bgm-settings-root-container .setting-item > .setting-item-info{flex:0 0 auto;flex-basis:auto;min-width:0;width:100%;}.bgm-settings-root-container .setting-item > .setting-item-control{width:100%;justify-content:flex-start;}.bgm-settings-compass-rail{flex-wrap:nowrap;overflow-x:auto;}.bgm-settings-compass-label{display:none;}.bgm-settings-spotlight-capsule{min-width:0;max-width:100%;flex:1 1 100%;}}"
     ].join("\n");
-    targetDoc.head.appendChild(styleEl);
   }
 
   const BangumiManagerSettingTab = class extends PluginSettingTab {
@@ -1017,25 +1083,156 @@ module.exports = function createSettingsTabClass({
     this._savedFocusSectionKey = "all";
     this._savedFocusOnlyMode = false;
   }
-  display() {
+  isBriefDescriptionsEnabled() {
+    const s = (this.plugin && this.plugin.settings) || {};
+    if (isMobileEnv()) {
+      return typeof s.settingsBriefDescMobile === "boolean" ? s.settingsBriefDescMobile : true;
+    }
+    return typeof s.settingsBriefDescDesktop === "boolean" ? s.settingsBriefDescDesktop : false;
+  }
+
+  async setBriefDescriptionsEnabled(nextVal, container) {
+    const enabled = Boolean(nextVal);
+    if (this.plugin && this.plugin.settings) {
+      if (isMobileEnv()) {
+        this.plugin.settings.settingsBriefDescMobile = enabled;
+      } else {
+        this.plugin.settings.settingsBriefDescDesktop = enabled;
+      }
+      await this.plugin.saveSettings().catch(() => {});
+    }
+    const root = container || this.containerEl;
+    if (root) {
+      root.classList.toggle("is-bgm-brief-desc", enabled);
+      root.querySelectorAll(".bgm-brief-toggle-btn").forEach((btn) => {
+        btn.classList.toggle("is-active", enabled);
+        btn.textContent = enabled ? "简略说明：开" : "简略说明：关";
+        btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+      });
+    }
+  }
+
+  createBriefToggleButton(parentEl, container) {
+    const enabled = this.isBriefDescriptionsEnabled();
+    const btn = parentEl.createEl("button", {
+      cls: `bgm-brief-toggle-btn${enabled ? " is-active" : ""}`,
+      text: enabled ? "简略说明：开" : "简略说明：关"
+    });
+    btn.type = "button";
+    btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+    btn.title = "收起或展开各项详细文字说明以大幅缩短下滑距离（开启后点击单条旁的 ⓘ 仍可查看该项完整说明，且不影响顶部搜索）";
+    btn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.setBriefDescriptionsEnabled(!this.isBriefDescriptionsEnabled(), container);
+    };
+    return btn;
+  }
+
+  enhanceBriefDescriptions(container) {
+    if (!container) return;
+    container.classList.toggle("is-bgm-brief-desc", this.isBriefDescriptionsEnabled());
+    container.querySelectorAll(".setting-item").forEach((item) => {
+      const infoEl = item.querySelector(":scope > .setting-item-info");
+      const nameEl = infoEl && infoEl.querySelector(":scope > .setting-item-name");
+      const descEl = infoEl && infoEl.querySelector(":scope > .setting-item-description");
+      if (!infoEl || !nameEl || !descEl) return;
+      const descText = (descEl.textContent || "").trim();
+      if (!descText) return;
+      if (/^(?:当前状态：|正在检测|已自动识别)/.test(descText)) {
+        item.classList.add("is-bgm-live-status");
+      }
+      if (infoEl.querySelector(":scope > .bgm-brief-info-btn")) return;
+      const docRef = container.ownerDocument || document;
+      const infoBtn = docRef.createElement("button");
+      infoBtn.type = "button";
+      infoBtn.className = "bgm-brief-info-btn";
+      infoBtn.textContent = "i";
+      infoBtn.setAttribute("aria-label", "查看完整说明");
+      infoBtn.title = "展开 / 收起本项详细说明";
+      infoBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const open = item.classList.toggle("is-bgm-desc-peeked");
+        infoBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+      nameEl.insertAdjacentElement("afterend", infoBtn);
+    });
+  }
+
+  display(opts = {}) {
+    if (this.plugin && typeof this.plugin.ensureScoreDashboardStyles === "function") {
+      this.plugin.ensureScoreDashboardStyles();
+    }
     ensureSettingsSpotlightStyles(this.containerEl?.ownerDocument || (typeof document !== "undefined" ? document : null));
     const container = this.containerEl;
+    const preserveScroll = !(opts && opts.scrollToTop === true);
+    const savedScrolls = [];
+    if (preserveScroll && container) {
+      const seen = new Set();
+      const candidates = [
+        container,
+        container.parentElement,
+        typeof container.closest === "function" ? container.closest(".vertical-tab-content") : null,
+        typeof container.closest === "function" ? container.closest(".modal-content") : null
+      ];
+      for (const hostEl of candidates) {
+        if (hostEl && !seen.has(hostEl)) {
+          seen.add(hostEl);
+          const top = Number(hostEl.scrollTop) || 0;
+          if (top > 0) savedScrolls.push({ el: hostEl, top });
+        }
+      }
+    }
+
     container.empty();
     container.addClass("bgm-settings-root-container");
+    container.classList.toggle("is-bgm-brief-desc", this.isBriefDescriptionsEnabled());
     const topHudMount = container.createDiv("bgm-settings-top-hud-mount");
     if (this.plugin.settings.mode === "lazy") {
-      topHudMount.createEl("h2", {
+      const lazyHead = topHudMount.createDiv("bgm-settings-lazy-head");
+      lazyHead.createEl("h2", {
         text: "Bangumi \u8FFD\u756A\u7BA1\u7406\u5668"
       });
+      this.createBriefToggleButton(lazyHead, container);
       this.displayLazyMode(container);
     } else {
       this.displayProfessionalMode(container, topHudMount);
+    }
+
+    // 必须在聚光灯完成全文 DOM 索引后再挂载单条 ⓘ 展开按钮，保证搜索索引 100% 完整
+    this.enhanceBriefDescriptions(container);
+
+    if (savedScrolls.length > 0) {
+      const restore = () => {
+        for (const item of savedScrolls) {
+          if (item.el && item.el.isConnected) {
+            item.el.scrollTop = item.top;
+          }
+        }
+      };
+      restore();
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          restore();
+          requestAnimationFrame(restore);
+        });
+      }
+      setTimeout(restore, 50);
+    } else if (opts && opts.scrollToTop === true && container) {
+      container.scrollTop = 0;
+      const scroller =
+        (typeof container.closest === "function" &&
+          (container.closest(".vertical-tab-content") || container.closest(".modal-content"))) ||
+        container.parentElement;
+      if (scroller) scroller.scrollTop = 0;
     }
   }
   addIntroDescription(container, text) {
     const description = container.createEl(
       "p",
       {
+        cls: "bgm-settings-intro-p",
         text
       }
     );
@@ -1515,6 +1712,65 @@ module.exports = function createSettingsTabClass({
         button.onClick(() => {
           new PathMigrationStatusModal(this.app, this.plugin).open();
         });
+      });
+  }
+
+  addAutoDetectVaultFoldersSetting(container) {
+    new Setting(container)
+      .setName("一键自动识别仓库目录与重建典藏")
+      .setDesc(
+        "跨设备同步（如同步了笔记与附件，但未同步插件配置文件）或使用自定义嵌套目录时，点击即可自动扫描仓库内的动画、角色、游戏笔记及封面、画册、音声目录，并重建典藏列表，不会修改或覆盖已有笔记。"
+      )
+      .addButton((button) => {
+        button
+          .setButtonText("自动识别目录")
+          .setCta()
+          .onClick(async () => {
+            button.setDisabled(true);
+            button.setButtonText("正在识别…");
+            try {
+              const detectRes =
+                typeof this.plugin?.autoDetectVaultFoldersIfNeeded === "function"
+                  ? await this.plugin.autoDetectVaultFoldersIfNeeded({
+                      force: true,
+                      silent: true
+                    })
+                  : { changed: false, updated: [] };
+              const gameRes =
+                typeof reconcileGameCollectionWithNotes === "function"
+                  ? await reconcileGameCollectionWithNotes(this.plugin)
+                  : { added: 0 };
+              const voiceRes =
+                typeof reconcileVoiceCollectionWithVault === "function"
+                  ? await reconcileVoiceCollectionWithVault(this.plugin)
+                  : { added: 0 };
+              if (typeof this.plugin?.refreshOpenDashboardViews === "function") {
+                await this.plugin.refreshOpenDashboardViews();
+              }
+              const parts = [];
+              if (detectRes && Array.isArray(detectRes.updated) && detectRes.updated.length > 0) {
+                parts.push(`更新目录 ${detectRes.updated.length} 项（${detectRes.updated.slice(0, 3).join("；")}）`);
+              }
+              if (gameRes && gameRes.added > 0) {
+                parts.push(`补回游戏典藏 ${gameRes.added} 部`);
+              }
+              if (voiceRes && voiceRes.added > 0) {
+                parts.push(`补回音声 ${voiceRes.added} 条`);
+              }
+              new Notice(
+                parts.length > 0
+                  ? `仓库自动识别完成：${parts.join("，")}。`
+                  : "已扫描仓库目录，当前路径与典藏索引均已对齐。",
+                6000
+              );
+              this.display();
+            } catch (err) {
+              console.error("[BangumiAutoDetect] manual scan failed:", err);
+              new Notice(`自动识别目录失败：${err?.message || err}`, 5000);
+              button.setDisabled(false);
+              button.setButtonText("自动识别目录");
+            }
+          });
       });
   }
 
@@ -2147,7 +2403,7 @@ module.exports = function createSettingsTabClass({
         dropdown.onChange(async (value) => {
           this.plugin.settings.mode = value;
           await this.plugin.saveSettings();
-          this.display();
+          this.display({ scrollToTop: true });
         });
       });
 
@@ -2196,6 +2452,7 @@ module.exports = function createSettingsTabClass({
     });
 
     // 二、相关路径
+    const isMobile = isMobileEnv();
     container.createEl("h3", {
       text: "二、相关路径"
     });
@@ -2204,12 +2461,14 @@ module.exports = function createSettingsTabClass({
       "插件已为您预设好清晰合理的仓库目录结构，通常保持默认即可直接使用。日后若修改仓库内的笔记或附件目录，离开输入框后插件会在后台自动迁移已有文件并同步更新引用。"
     );
 
-    this.addLocalAnimeRootSetting(
-      container,
-      isDesktopNodeAvailable()
-        ? "电脑端存放本地番剧视频的总文件夹路径，用于识别本地话数更新、创建下载子目录与限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
-        : "用于桌面端识别本地番剧视频文件夹（当前为移动端环境，会自动保持跨端只读兼容，不会改动电脑端已有路径）。"
-    );
+    this.addAutoDetectVaultFoldersSetting(container);
+
+    if (!isMobile) {
+      this.addLocalAnimeRootSetting(
+        container,
+        "电脑端存放本地番剧视频的总文件夹路径，用于识别本地话数更新、创建下载子目录与限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
+      );
+    }
 
     this.addNoteRootSetting(
       container,
@@ -2233,6 +2492,13 @@ module.exports = function createSettingsTabClass({
     );
 
     this.addPathMigrationStatusSetting(container);
+
+    if (isMobile) {
+      container.createDiv({
+        cls: "bgm-mobile-compat-banner",
+        text: "移动端精简提示：桌面端专属设置（本地视频目录、本地播放器、FFmpeg、qBittorrent 联动与桌面游戏侧边手札胶囊）已自动隐藏；电脑端已有配置会安全保留，不会受任何影响。"
+      });
+    }
 
     new Setting(container)
       .setName("初始化缺失文件")
@@ -2315,24 +2581,31 @@ module.exports = function createSettingsTabClass({
           });
       });
 
-    this.addGameCapsuleSettings(container, true);
+    if (!isMobile) {
+      this.addGameCapsuleSettings(container, true);
+    }
 
+    const demoGuideItems = [
+      {
+        fileName: "guide-archive-hall.gif",
+        caption: "番剧档案馆与 3D 原画展厅一键切换，抽起实体档案夹查看详情与笔记纸页。"
+      },
+      {
+        fileName: "guide-3d-subview.gif",
+        caption: "三维「状态与收藏轨」常驻立式分栏导视牌，支持在「开架回廊」与「折屏展架」双视图间自由切换。"
+      }
+    ];
+    if (!isMobile) {
+      demoGuideItems.push({
+        fileName: "guide-game-capsule.gif",
+        caption: "启动已收录游戏后手札面板自动收拢至屏幕旁侧化作半透明窄条，全屏游戏内移近边缘即可展开记录并实时同步。"
+      });
+    }
     this.addGuideDemoDrawer(container, {
-      title: "番剧档案馆、3D 原画展厅与游戏侧边手札实机导览",
-      items: [
-        {
-          fileName: "guide-archive-hall.gif",
-          caption: "番剧档案馆与 3D 原画展厅一键切换，抽起实体档案夹查看详情与笔记纸页。"
-        },
-        {
-          fileName: "guide-3d-subview.gif",
-          caption: "三维「状态与收藏轨」常驻立式分栏导视牌，支持在「开架回廊」与「折屏展架」双视图间自由切换。"
-        },
-        {
-          fileName: "guide-game-capsule.gif",
-          caption: "启动已收录游戏后手札面板自动收拢至屏幕旁侧化作半透明窄条，全屏游戏内移近边缘即可展开记录并实时同步。"
-        }
-      ]
+      title: isMobile
+        ? "番剧档案馆与 3D 原画展厅实机导览"
+        : "番剧档案馆、3D 原画展厅与游戏侧边手札实机导览",
+      items: demoGuideItems
     });
 
     // 底部：专业模式进阶引导卡
@@ -2344,7 +2617,9 @@ module.exports = function createSettingsTabClass({
     });
     proInfo.createDiv({
       cls: "bgm-pro-upgrade-desc",
-      text: "熟悉基础追番管理后，切换到「专业模式」可进一步配置：本地视频播放器与观片手札帧级时间点空降、单集唯一 RSS 与 qBittorrent 自动下载查重、画册 Pixiv 在线搜图与分级筛选、Netaba 评分趋势对比、个人片单与智能筛选分组，以及看板娘角色与台词工坊。"
+      text: isMobile
+        ? "熟悉基础追番管理后，切换到「专业模式」可进一步配置：各典藏目录细分路径、评分精度与自动同步、追番磁力资源检索、画册 Pixiv 分级筛选、Netaba 评分图、个人片单与智能筛选分组，以及看板娘角色与台词工坊。"
+        : "熟悉基础追番管理后，切换到「专业模式」可进一步配置：本地视频播放器与观片手札帧级时间点空降、单集唯一 RSS 与 qBittorrent 自动下载查重、画册 Pixiv 在线搜图与分级筛选、Netaba 评分趋势对比、个人片单与智能筛选分组，以及看板娘角色与台词工坊。"
     });
     const proBtn = proCard.createEl("button", {
       cls: "mod-cta",
@@ -2353,7 +2628,7 @@ module.exports = function createSettingsTabClass({
     proBtn.onclick = async () => {
       this.plugin.settings.mode = "professional";
       await this.plugin.saveSettings();
-      this.display();
+      this.display({ scrollToTop: true });
       container.scrollTo?.({ top: 0, behavior: "smooth" });
     };
 
@@ -2361,9 +2636,12 @@ module.exports = function createSettingsTabClass({
   }
 
   displayProfessionalMode(container, topHudMount) {
+    const isMobile = isMobileEnv();
     this.addIntroDescription(
       container,
-      "专业模式展示完整设置。路径、评分监测、番剧档案馆（含 3D 原画展厅）、季度视图、笔记显示、Netaba 和全部管理操作均可在这里调整。切换模式只改变展示，不会修改已有配置。"
+      isMobile
+        ? "专业模式展示移动端可用的完整设置。桌面端专属配置（本地播放器、qBittorrent、FFmpeg、桌面侧边游戏手札胶囊）已自动隐藏，电脑端原有路径会被安全保留。"
+        : "专业模式展示完整设置。路径、评分监测、番剧档案馆（含 3D 原画展厅）、季度视图、笔记显示、Netaba 和全部管理操作均可在这里调整。切换模式只改变展示，不会修改已有配置。"
     );
 
     new Setting(container)
@@ -2383,13 +2661,15 @@ module.exports = function createSettingsTabClass({
           this.plugin.settings.mode = value;
 
           await this.plugin.saveSettings();
-          this.display();
+          this.display({ scrollToTop: true });
         });
       });
 
     container.createEl("h3", {
       text: "路径设置"
     });
+
+    this.addAutoDetectVaultFoldersSetting(container);
 
     this.addNoteRootSetting(
       container,
@@ -2420,7 +2700,9 @@ module.exports = function createSettingsTabClass({
       container,
       "观片手札图片目录",
       "reviewImageFolder",
-      "观片手札粘贴截图（Ctrl+V）、时间轴打点截图与上传附图保存的仓库目录（默认：附件/观片手札图片；修改后自动迁移）。"
+      isMobile
+        ? "观片手札附图与截屏图片保存的仓库目录（默认：附件/观片手札图片；修改后自动迁移）。"
+        : "观片手札粘贴截图（Ctrl+V）、时间轴打点截图与上传附图保存的仓库目录（默认：附件/观片手札图片；修改后自动迁移）。"
     );
 
     this.addPathSetting(
@@ -2446,21 +2728,30 @@ module.exports = function createSettingsTabClass({
 
     this.addPathMigrationStatusSetting(container);
 
-    this.addLocalAnimeRootSetting(
-      container,
-      "用于提示和创建本地动画文件夹、限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
-    );
+    if (!isMobile) {
+      this.addLocalAnimeRootSetting(
+        container,
+        "用于提示和创建本地动画文件夹、限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
+      );
 
-    this.addFfmpegSetting(container);
+      this.addFfmpegSetting(container);
+    } else {
+      container.createDiv({
+        cls: "bgm-mobile-compat-banner",
+        text: "移动端精简提示：桌面端专属路径与联动（本地动画视频根目录、FFmpeg、本地播放器、qBittorrent 与桌面侧边游戏手札胶囊）已自动隐藏；电脑端已有配置不会被改动。"
+      });
+    }
 
     this.addBangumiUserSetting(container);
     this.addBangumiSettings(container);
 
     container.createEl("h3", {
-      text: "检查与视图"
+      text: isMobile ? "视图与季度" : "检查与视图"
     });
 
-    this.addCheckSettings(container);
+    if (!isMobile) {
+      this.addCheckSettings(container);
+    }
     this.addSeasonSettings(container);
     this.addDisplaySettings(container);
 
@@ -2493,6 +2784,7 @@ module.exports = function createSettingsTabClass({
 
   mountProfessionalSettingsSpotlightHud(container, topHudMount) {
     if (!container) return;
+    const isMobile = isMobileEnv();
     const hostMount = topHudMount || container.createDiv("bgm-settings-top-hud-mount");
     hostMount.empty();
 
@@ -2506,8 +2798,9 @@ module.exports = function createSettingsTabClass({
     });
     brandWrap.createSpan({
       cls: "bgm-settings-hud-mode-badge",
-      text: "✦ 专业模式全景台"
+      text: isMobile ? "✦ 专业模式 · 移动版" : "✦ 专业模式全景台"
     });
+    this.createBriefToggleButton(brandWrap, container);
 
     // 右侧：Spotlight 模糊搜索胶囊框
     const searchCapsule = topRow.createDiv("bgm-settings-spotlight-capsule");
@@ -2518,7 +2811,9 @@ module.exports = function createSettingsTabClass({
     const searchInput = searchCapsule.createEl("input", {
       type: "text",
       cls: "bgm-settings-spotlight-input",
-      placeholder: "模糊搜索设置项 / 功能词 / 拼音缩写（如：播放器、蜜柑、身高、lqx）…"
+      placeholder: isMobile
+        ? "搜索设置（如：目录、评分、洛琪希）"
+        : "模糊搜索设置项 / 功能词 / 拼音缩写（如：播放器、蜜柑、身高、lqx）…"
     });
     searchInput.value = this._savedSpotlightQuery || "";
 
@@ -2631,17 +2926,28 @@ module.exports = function createSettingsTabClass({
     });
     emptyStateBox.createDiv({
       cls: "bgm-settings-empty-sub",
-      text: "可尝试输入更短的关键词、功能俗称（如：播放器、蜜柑、抠图、身高、看板娘）或点击下方高频分类直接定位："
+      text: isMobile
+        ? "可尝试输入更短的关键词（如：目录、评分、画册、角色、洛琪希）或点击下方高频分类直接定位："
+        : "可尝试输入更短的关键词、功能俗称（如：播放器、蜜柑、抠图、身高、看板娘）或点击下方高频分类直接定位："
     });
     const emptySugRow = emptyStateBox.createDiv("bgm-settings-empty-suggestions");
-    [
-      { label: "本地播放器联动", q: "播放器" },
-      { label: "蜜柑 RSS 与追番下载", q: "下载" },
-      { label: "角色典藏目录", q: "角色" },
-      { label: "洛琪希记录员", q: "洛琪希" },
-      { label: "番剧档案馆", q: "番剧档案馆" },
-      { label: "路径与封面目录", q: "目录" }
-    ].forEach((sug) => {
+    const suggestions = isMobile
+      ? [
+          { label: "追番磁力下载", q: "下载" },
+          { label: "角色典藏目录", q: "角色" },
+          { label: "洛琪希记录员", q: "洛琪希" },
+          { label: "番剧档案馆", q: "番剧档案馆" },
+          { label: "路径与封面目录", q: "目录" }
+        ]
+      : [
+          { label: "本地播放器联动", q: "播放器" },
+          { label: "蜜柑 RSS 与追番下载", q: "下载" },
+          { label: "角色典藏目录", q: "角色" },
+          { label: "洛琪希记录员", q: "洛琪希" },
+          { label: "番剧档案馆", q: "番剧档案馆" },
+          { label: "路径与封面目录", q: "目录" }
+        ];
+    suggestions.forEach((sug) => {
       const sb = emptySugRow.createEl("button", {
         cls: "bgm-settings-compass-chip",
         text: sug.label
@@ -2814,11 +3120,19 @@ module.exports = function createSettingsTabClass({
       });
 
       if (isSearchActive) {
-        countBadge.setText(`命中 ${visibleItemCount} / ${indexedItems.length} 项`);
+        countBadge.setText(
+          isMobile
+            ? `${visibleItemCount}/${indexedItems.length}`
+            : `命中 ${visibleItemCount} / ${indexedItems.length} 项`
+        );
       } else if (activeSecKey !== "all") {
-        countBadge.setText(`当前章 ${visibleItemCount} 项`);
+        countBadge.setText(
+          isMobile ? `本章 ${visibleItemCount}` : `当前章 ${visibleItemCount} 项`
+        );
       } else {
-        countBadge.setText(`共 ${indexedItems.length} 项设置`);
+        countBadge.setText(
+          isMobile ? `共 ${indexedItems.length} 项` : `共 ${indexedItems.length} 项设置`
+        );
       }
 
       emptyStateBox.toggleClass("is-visible", visibleItemCount === 0);
@@ -2852,6 +3166,7 @@ module.exports = function createSettingsTabClass({
   }
 
   addReviewAndPlayerSettings(container, compact) {
+    if (isMobileEnv()) return;
     let playerInfo = null;
     try {
       playerInfo = reviewStudioService.detectInstalledVideoPlayers(this.plugin);
@@ -3074,22 +3389,17 @@ module.exports = function createSettingsTabClass({
 
     this.addAtelier3DPackSettings(container, false);
 
-    this.addGameCapsuleSettings(container, false);
-
-    if (!isDesktopNodeAvailable()) {
-      const mobileNote = container.createDiv({
-        cls: "setting-item-description",
-        text: "当前运行于移动端环境：桌面端专属的本地播放器、FFmpeg 截取与 qBittorrent 路径配置已自动切换为跨端只读兼容模式，不会修改笔记中原有的电脑路径。"
-      });
-      mobileNote.style.padding = "8px 12px";
-      mobileNote.style.marginBottom = "10px";
-      mobileNote.style.borderRadius = "8px";
-      mobileNote.style.background = "var(--background-secondary)";
+    if (!isMobileEnv()) {
+      this.addGameCapsuleSettings(container, false);
     }
 
     if (compact) {
       return;
     }
+
+    container.createEl("h3", {
+      text: "档案馆布局、记录员与扩展"
+    });
 
     new Setting(container)
       .setName("打开番剧档案馆")
@@ -3353,10 +3663,13 @@ module.exports = function createSettingsTabClass({
         });
       });
 
+    const isMobile = isMobileEnv();
     new Setting(container)
       .setName("洛琪希智能操作提示")
       .setDesc(
-        "根据您的实际使用记忆提供个性化操作引导（如长按或右键卡片查看关联收藏）：仅在首次尚未使用过或间隔较久未使用时轻声提醒，日常高频或规律使用时保持安静不打扰。"
+        isMobile
+          ? "根据您的实际使用记忆提供个性化操作引导（如长按卡片查看关联收藏）：仅在首次尚未使用过或间隔较久未使用时轻声提醒，日常高频或规律使用时保持安静不打扰。"
+          : "根据您的实际使用记忆提供个性化操作引导（如长按或右键卡片查看关联收藏）：仅在首次尚未使用过或间隔较久未使用时轻声提醒，日常高频或规律使用时保持安静不打扰。"
       )
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.roxySmartGestureHints !== false);
@@ -3433,7 +3746,11 @@ module.exports = function createSettingsTabClass({
               stateDefs.forEach((st) => {
                 new Setting(contentEl)
                   .setName(st.label)
-                  .setDesc("支持本地绝对路径（如 D:/pics/char_guide.png）、仓库内相对路径或 https 图片链接")
+                  .setDesc(
+                    isMobile
+                      ? "支持仓库内相对路径、点击「浏览」从手机相册导入，或 https 图片链接"
+                      : "支持本地绝对路径（如 D:/pics/char_guide.png）、仓库内相对路径或 https 图片链接"
+                  )
                   .addText((text) => {
                     text
                       .setPlaceholder("留空使用内置洛琪希形象")
@@ -3447,7 +3764,7 @@ module.exports = function createSettingsTabClass({
                         }
                         await this.saveAndRefreshDashboard();
                       });
-                    text.inputEl.style.width = "240px";
+                    text.inputEl.style.width = isMobile ? "100%" : "240px";
                   })
                   .addButton((btn) => {
                     btn.setButtonText("浏览...").onClick(() => {
@@ -3539,6 +3856,8 @@ module.exports = function createSettingsTabClass({
 
               const footer = contentEl.createDiv();
               footer.style.display = "flex";
+              footer.style.flexWrap = "wrap";
+              footer.style.gap = "8px";
               footer.style.justifyContent = "space-between";
               footer.style.marginTop = "16px";
 
@@ -3559,9 +3878,11 @@ module.exports = function createSettingsTabClass({
       });
 
     new Setting(container)
-      .setName("启用追番下载与单集 RSS 助手")
+      .setName(isMobile ? "启用追番资源检索与磁力复制助手" : "启用追番下载与单集 RSS 助手")
       .setDesc(
-        "在番剧档案馆「追番」、封面视图与列表视图中显示「⬇ 下载/RSS」按钮，支持在 Obsidian 内直接选择发布源、核验每集唯一 RSS 并启动下载。"
+        isMobile
+          ? "在番剧档案馆「追番」、封面视图与列表视图中显示「⬇ 下载」按钮，支持在手机端检索剧集磁力链接、一键复制磁力或直接唤起手机下载 App（迅雷 / 夸克 / 115 / Flud 等）。"
+          : "在番剧档案馆「追番」、封面视图与列表视图中显示「⬇ 下载/RSS」按钮，支持在 Obsidian 内直接选择发布源、核验每集唯一 RSS 并启动下载。"
       )
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.enableDownloadAssistant !== false);
@@ -3575,9 +3896,15 @@ module.exports = function createSettingsTabClass({
 
     if (this.plugin.settings.enableDownloadAssistant !== false) {
       new Setting(container)
-        .setName("启用漫猫动漫 (www.comicat.org) 搜索与单集 RSS 解析")
+        .setName(
+          isMobile
+            ? "启用漫猫动漫 (www.comicat.org) 磁力检索"
+            : "启用漫猫动漫 (www.comicat.org) 搜索与单集 RSS 解析"
+        )
         .setDesc(
-          "开启后可在弹窗内自动检索 comicat.org 动画资源、按字幕组划分发布源并生成每集唯一的专属 RSS。若您不使用 comicat.org，可关闭此项。"
+          isMobile
+            ? "开启后可在弹窗内自动检索 comicat.org 动画资源并按字幕组列出各话磁力链接。若您不使用 comicat.org，可关闭此项。"
+            : "开启后可在弹窗内自动检索 comicat.org 动画资源、按字幕组划分发布源并生成每集唯一的专属 RSS。若您不使用 comicat.org，可关闭此项。"
         )
         .addToggle((toggle) => {
           toggle.setValue(this.plugin.settings.enableComicatIntegration !== false);
@@ -3588,68 +3915,70 @@ module.exports = function createSettingsTabClass({
           });
         });
 
-      new Setting(container)
-        .setName("启用 qBittorrent 客户端联动下载")
-        .setDesc(
-          "开启后自动检测本机 qBittorrent（未启动时可自动唤起，未安装时提示下载链接），并将剧集直接下载到该动画笔记的本地文件夹。若您不使用 qBittorrent，可关闭此项以使用纯磁力/种子自行下载。"
-        )
-        .addToggle((toggle) => {
-          toggle.setValue(this.plugin.settings.enableQbittorrentIntegration !== false);
-          toggle.onChange(async (value) => {
-            this.plugin.settings.enableQbittorrentIntegration = value;
-            await this.plugin.saveSettings();
-            this.display();
-          });
-        });
-
-      if (this.plugin.settings.enableQbittorrentIntegration !== false) {
-        const qbPathSetting = new Setting(container)
-          .setName("qBittorrent 程序路径（可选）")
-          .setDesc(
-            "留空将自动探测本机各盘符、注册表及系统应用目录中的 qBittorrent；如安装在自定义目录可点右侧浏览指定。"
-          )
-          .addText((text) => {
-            text.setPlaceholder("留空自动检测，或点击右侧浏览选择");
-            text.setValue(String(this.plugin.settings.qbittorrentExecutablePath || ""));
-            text.onChange(async (value) => {
-              this.plugin.settings.qbittorrentExecutablePath = value.trim();
-              await this.plugin.saveSettings();
-            });
-          });
-        if (isDesktopNodeAvailable()) {
-          qbPathSetting.addButton((btn) => {
-            btn.setButtonText("浏览...").onClick(() => {
-              const fInput = document.createElement("input");
-              fInput.type = "file";
-              if (typeof process !== "undefined" && process.platform === "win32") {
-                fInput.accept = ".exe,.lnk";
-              }
-              fInput.onchange = async () => {
-                const file = fInput.files && fInput.files[0];
-                const picked = getNativeFilePathCrossPlatform(file);
-                if (picked) {
-                  this.plugin.settings.qbittorrentExecutablePath = picked;
-                  await this.plugin.saveSettings();
-                  this.display();
-                }
-              };
-              fInput.click();
-            });
-          });
-        }
-
+      if (!isMobile) {
         new Setting(container)
-          .setName("投递到 qBittorrent 时跳过添加确认框")
+          .setName("启用 qBittorrent 客户端联动下载")
           .setDesc(
-            "开启后直接将剧集保存到动画笔记对应的本地文件夹（--skip-dialog=true）；关闭后会在 qBittorrent 中弹出添加种子确认窗口。"
+            "开启后自动检测本机 qBittorrent（未启动时可自动唤起，未安装时提示下载链接），并将剧集直接下载到该动画笔记的本地文件夹。若您不使用 qBittorrent，可关闭此项以使用纯磁力/种子自行下载。"
           )
           .addToggle((toggle) => {
-            toggle.setValue(this.plugin.settings.qbittorrentSkipDialog !== false);
+            toggle.setValue(this.plugin.settings.enableQbittorrentIntegration !== false);
             toggle.onChange(async (value) => {
-              this.plugin.settings.qbittorrentSkipDialog = value;
+              this.plugin.settings.enableQbittorrentIntegration = value;
               await this.plugin.saveSettings();
+              this.display();
             });
           });
+
+        if (this.plugin.settings.enableQbittorrentIntegration !== false) {
+          const qbPathSetting = new Setting(container)
+            .setName("qBittorrent 程序路径（可选）")
+            .setDesc(
+              "留空将自动探测本机各盘符、注册表及系统应用目录中的 qBittorrent；如安装在自定义目录可点右侧浏览指定。"
+            )
+            .addText((text) => {
+              text.setPlaceholder("留空自动检测，或点击右侧浏览选择");
+              text.setValue(String(this.plugin.settings.qbittorrentExecutablePath || ""));
+              text.onChange(async (value) => {
+                this.plugin.settings.qbittorrentExecutablePath = value.trim();
+                await this.plugin.saveSettings();
+              });
+            });
+          if (isDesktopNodeAvailable()) {
+            qbPathSetting.addButton((btn) => {
+              btn.setButtonText("浏览...").onClick(() => {
+                const fInput = document.createElement("input");
+                fInput.type = "file";
+                if (typeof process !== "undefined" && process.platform === "win32") {
+                  fInput.accept = ".exe,.lnk";
+                }
+                fInput.onchange = async () => {
+                  const file = fInput.files && fInput.files[0];
+                  const picked = getNativeFilePathCrossPlatform(file);
+                  if (picked) {
+                    this.plugin.settings.qbittorrentExecutablePath = picked;
+                    await this.plugin.saveSettings();
+                    this.display();
+                  }
+                };
+                fInput.click();
+              });
+            });
+          }
+
+          new Setting(container)
+            .setName("投递到 qBittorrent 时跳过添加确认框")
+            .setDesc(
+              "开启后直接将剧集保存到动画笔记对应的本地文件夹（--skip-dialog=true）；关闭后会在 qBittorrent 中弹出添加种子确认窗口。"
+            )
+            .addToggle((toggle) => {
+              toggle.setValue(this.plugin.settings.qbittorrentSkipDialog !== false);
+              toggle.onChange(async (value) => {
+                this.plugin.settings.qbittorrentSkipDialog = value;
+                await this.plugin.saveSettings();
+              });
+            });
+        }
       }
 
       new Setting(container)
@@ -4130,6 +4459,22 @@ module.exports = function createSettingsTabClass({
             bilibiliLiveService.triggerTestLiveNotification(this.plugin);
           });
         });
+    } else {
+      new Setting(container)
+        .setName("手机 / 平板点击直播间打开方式")
+        .setDesc("手机端默认优先唤起哔哩哔哩客户端，平板端自动优先适配哔哩哔哩 HD；首次授权等待期间不会误弹浏览器，未安装时可一键转网页版。")
+        .addDropdown((dropdown) => {
+          dropdown
+            .addOption("auto", "优先客户端（平板适配 B站 HD）")
+            .addOption("ask", "每次点击弹窗自选")
+            .addOption("app_hd", "始终优先哔哩哔哩 HD")
+            .addOption("web", "始终在浏览器打开网页版")
+            .setValue(bilibiliLiveService.normalizeMobileLiveOpenMode(this.plugin.settings.bilibiliLiveMobileOpenMode))
+            .onChange(async (value) => {
+              this.plugin.settings.bilibiliLiveMobileOpenMode = bilibiliLiveService.normalizeMobileLiveOpenMode(value);
+              await this.plugin.saveSettings();
+            });
+        });
     }
   }
 
@@ -4564,11 +4909,12 @@ await this.saveAndSynchronizeNoteScores();
     });
   }
   addGameCapsuleSettings(container, compact = false) {
+    const gameCapsuleService = getSettingsCapsuleService();
     container.createEl("h3", {
       text: "游戏典藏 · 桌面侧边手札胶囊"
     });
 
-    if (!gameCapsuleService.isDesktopCapsuleSupported()) {
+    if (!gameCapsuleService || !gameCapsuleService.isDesktopCapsuleSupported()) {
       const note = container.createDiv({
         cls: "setting-item-description",
         text: "跨显示器侧边半透明胶囊与全屏手札浮窗依赖桌面端操作系统窗口层，当前移动端环境下仅保留馆内游戏手札面板，不会影响原有笔记同步。"
@@ -5165,7 +5511,7 @@ await this.saveAndSynchronizeNoteScores();
 
     const infoCol = helpCard.createDiv({ cls: "bangumi-help-info-col" });
     infoCol.style.flex = "1 1 320px";
-    infoCol.style.minWidth = "260px";
+    infoCol.style.minWidth = "min(260px, 100%)";
 
     const titleEl = infoCol.createDiv({
       text: `插件官方 QQ 交流群：${QQ_GROUP_ID}`
@@ -5285,10 +5631,13 @@ await this.saveAndSynchronizeNoteScores();
   }
 
   addProfessionalActions(container) {
+    const isMobile = isMobileEnv();
     this.addAction(
       container,
-      "\u5BFC\u5165\u5355\u4E2A\u52A8\u753B",
-      "\u641C\u7D22 Bangumi \u5E76\u521B\u5EFA\u52A8\u753B\u7B14\u8BB0\uFF1B\u5C01\u9762\u4FDD\u5B58\u76EE\u5F55\u548C\u672C\u5730\u52A8\u753B\u6839\u76EE\u5F55\u4F7F\u7528\u4E0A\u65B9\u8BBE\u7F6E\u3002",
+      "导入单个动画",
+      isMobile
+        ? "搜索 Bangumi 并创建动画笔记；封面保存目录使用上方设置。"
+        : "搜索 Bangumi 并创建动画笔记；封面保存目录和本地动画根目录使用上方设置。",
       async () => {
         await openSingleAnimeImport(
           this.app,
@@ -5316,14 +5665,16 @@ await this.saveAndSynchronizeNoteScores();
       }
     );
     this.addLegacyNoteUpgradeSetting(container);
-    this.addAction(
-      container,
-      "\u7ACB\u5373\u68C0\u67E5\u5168\u90E8\u672C\u5730\u72B6\u6001",
-      "\u7ACB\u5373\u626B\u63CF\u5168\u90E8\u76EE\u6807\u7B14\u8BB0\uFF0C\u5C06\u89C6\u9891\u6570\u91CF\u4E0E\u5DF2\u89C2\u770B\u96C6\u6570\u6BD4\u8F83\uFF0C\u5E76\u5199\u5165\u672C\u5730\u66F4\u65B0\u72B6\u6001\u3002",
-      async () => {
-        await this.plugin.checkAllLocalStatus(true);
-      }
-    );
+    if (!isMobile) {
+      this.addAction(
+        container,
+        "\u7ACB\u5373\u68C0\u67E5\u5168\u90E8\u672C\u5730\u72B6\u6001",
+        "\u7ACB\u5373\u626B\u63CF\u5168\u90E8\u76EE\u6807\u7B14\u8BB0\uFF0C\u5C06\u89C6\u9891\u6570\u91CF\u4E0E\u5DF2\u89C2\u770B\u96C6\u6570\u6BD4\u8F83\uFF0C\u5E76\u5199\u5165\u672C\u5730\u66F4\u65B0\u72B6\u6001\u3002",
+        async () => {
+          await this.plugin.checkAllLocalStatus(true);
+        }
+      );
+    }
     this.addAction(
       container,
       "\u8865\u9F50\u5168\u90E8\u7F3A\u5931\u5B63\u5EA6\u89C6\u56FE",
@@ -5339,12 +5690,12 @@ await this.saveAndSynchronizeNoteScores();
     );
     this.addAction(
       container,
-      "\u751F\u6210\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE",
-      "\u6309\u7167\u7535\u8111\u5F53\u524D\u65E5\u671F\u5224\u65AD\u5B63\u5EA6\uFF0C\u53EA\u65B0\u589E\u5F53\u524D\u5B63\u5EA6\u89C6\u56FE\u3002",
+      "生成当前季度视图",
+      "按照当前日期判断季度，只新增当前季度视图。",
       async () => {
-await this.plugin.runTemporarySeasonMode(
-  "current"
-);
+        await this.plugin.runTemporarySeasonMode(
+          "current"
+        );
       }
     );
     this.addAction(

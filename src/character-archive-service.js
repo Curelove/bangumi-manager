@@ -7,6 +7,7 @@ const { paperSlipSwap, withPreservedScroll } = require("./v08-motion-and-lens.js
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
+  isMobileEnv,
   writeVaultBinaryFile
 } = require("./platform-env.js");
 
@@ -6305,8 +6306,13 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
     });
 
     const saveBtn = submitRow.createEl("button", {
-      cls: "curator-btn is-primary",
+      cls: "curator-btn is-primary is-save-ready-pulse",
       text: "✦ 收入角色典藏"
+    });
+    requestAnimationFrame(() => {
+      if (editorCard.isConnected && typeof editorCard.scrollIntoView === "function") {
+        editorCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
     });
     saveBtn.onclick = async (ev) => {
       ev.preventDefault();
@@ -6424,7 +6430,36 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
         return;
       }
       const grid = resultsArea.createDiv("curator-char-search-grid");
-      for (const item of list) {
+      const foldHost = resultsArea.createDiv("curator-char-search-fold-host");
+      const searchCards = [];
+      let pickedCardIdx = -1;
+      let isResultsFolded = false;
+
+      const syncCharFoldView = () => {
+        foldHost.empty();
+        searchCards.forEach((cardEl, i) => {
+          const isPicked = i === pickedCardIdx;
+          cardEl.classList.toggle("is-picked", isPicked);
+          cardEl.style.display = isResultsFolded && pickedCardIdx >= 0 && !isPicked ? "none" : "";
+        });
+        grid.classList.toggle("is-folded", isResultsFolded && pickedCardIdx >= 0);
+        if (pickedCardIdx >= 0 && searchCards.length > 1) {
+          const restN = searchCards.length - 1;
+          const toggleBtn = foldHost.createEl("button", {
+            cls: "bm7-gsrc-stack-handle",
+            text: isResultsFolded
+              ? `已折叠其余 ${restN} 位候选角色 · 展开重选 ▾`
+              : `收起其余 ${restN} 位候选角色 ▴`
+          });
+          toggleBtn.type = "button";
+          toggleBtn.onclick = () => {
+            isResultsFolded = !isResultsFolded;
+            syncCharFoldView();
+          };
+        }
+      };
+
+      list.forEach((item, idx) => {
         const similarInVault = findSimilarCharactersInCollection(
           { bgmId: item.id, name: item.name, nameJp: item.nameJp },
           plugin.settings.characterCollection || []
@@ -6432,6 +6467,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
         const card = grid.createDiv(
           `curator-char-search-card ${similarInVault.length > 0 ? "is-already-collected" : ""}`
         );
+        searchCards.push(card);
 
         const ava = card.createDiv("curator-char-search-ava");
         const candAvaSrc = resolveCharacterAvatarSrc(plugin, {
@@ -6489,13 +6525,16 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
           pickBtn.textContent = "寻访中…";
           try {
             const draft = await fetchDualSourceCharacterProfile(item.id, item.name);
+            pickedCardIdx = idx;
+            isResultsFolded = searchCards.length > 1;
+            syncCharFoldView();
             await handleCandidatePickWithDupeCheck(draft);
           } finally {
             pickBtn.disabled = false;
             pickBtn.textContent = "+ 收录";
           }
         };
-      }
+      });
     } finally {
       searchBtn.disabled = false;
       searchBtn.textContent = "搜索 Bangumi 角色";
@@ -6631,8 +6670,12 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
     ...filteredTraits.map((t) => (uiState.rankSortMode === "weighted" ? t.weightedScore : t.count))
   );
 
-  const topList = filteredTraits.slice(0, options.compactAlmanacMode ? 6 : 10);
-  const restPills = filteredTraits.slice(options.compactAlmanacMode ? 6 : 10, 36);
+  const isMobileLayout =
+    isMobileEnv() || (typeof window !== "undefined" && window.innerWidth <= 600);
+  const mobileCollapsed = isMobileLayout && !uiState.rankExpandedMobile;
+  const maxTopBars = mobileCollapsed ? 4 : options.compactAlmanacMode ? 6 : 10;
+  const topList = filteredTraits.slice(0, maxTopBars);
+  const restPills = mobileCollapsed ? [] : filteredTraits.slice(maxTopBars, 36);
 
   const barsGrid = rankSection.createDiv("curator-char-rank-bars-grid");
   topList.forEach((trait, idx) => {
@@ -6715,6 +6758,22 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
         onRefresh("trait");
       };
     });
+  }
+
+  if (isMobileLayout && filteredTraits.length > 4) {
+    const expandWrap = rankSection.createDiv();
+    expandWrap.style.cssText = "display:flex;justify-content:center;margin-top:10px;";
+    const toggleBtn = expandWrap.createEl("button", {
+      cls: "curator-dl-mini-btn",
+      text: uiState.rankExpandedMobile
+        ? "收起萌点排行 ▴"
+        : `展开全部 ${filteredTraits.length} 项萌点排行 ▾`
+    });
+    toggleBtn.onclick = (e) => {
+      e.preventDefault();
+      uiState.rankExpandedMobile = !uiState.rankExpandedMobile;
+      onRefresh("rank-expand");
+    };
   }
 }
 

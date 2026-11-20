@@ -160,6 +160,10 @@ class Dashboard3DSpace {
     this.isSamplePreviewSession = this.items.some((it) => Boolean(it?.isSamplePreviewItem));
 
     this.isDestroyed = false;
+    this.isMobileDevice = isMobileEnv();
+    this.userPortraitOverride = false;
+    this.keyboardPausedLandscape = false;
+    this.isVirtualLandscape = false;
     this.spaceState = "boot";
     this.noteSheetState = "closed"; // "closed" | "pending" | "extracting" | "open" | "retracting"
     this.noteSheetProgress = spring(0);
@@ -262,6 +266,7 @@ class Dashboard3DSpace {
     inject3DScopedStyles();
     this.makeLanes();
     this.initDom();
+    this.syncMobileOrientationLayout();
     this.initThree();
     if (this.webglUnavailable) {
       return;
@@ -720,11 +725,50 @@ class Dashboard3DSpace {
       () => this.setStatusSubView("easel"),
       "atelier-subview-btn"
     );
-    this.lensButton = this.action(topActions, "lens", "✦ 高分精选", () => this.toggleLensMode());
-    this.searchButton = this.action(topActions, "search", "⌕ 档案检索 [/]", () => this.openSearch());
-    this.audioButton = this.action(topActions, "audio", "♪ 环境音景 · 已静音", () => this.toggleAudio());
-    this.settingsButton = this.action(topActions, "settings", "◷ 空间设置", () => this.openSettings());
-    this.exitButton = this.action(topActions, "exit", "← 返回档案馆", () => this.onExit3D?.());
+    this.lensButton = this.action(
+      topActions,
+      "lens",
+      this.isMobileDevice ? "✦ 高分" : "✦ 高分精选",
+      () => this.toggleLensMode()
+    );
+    this.searchButton = this.action(
+      topActions,
+      "search",
+      this.isMobileDevice ? "⌕ 检索" : "⌕ 档案检索 [/]",
+      () => this.openSearch()
+    );
+    this.audioButton = this.action(
+      topActions,
+      "audio",
+      this.isMobileDevice ? "♪ 静音" : "♪ 环境音景 · 已静音",
+      () => this.toggleAudio()
+    );
+    this.settingsButton = this.action(
+      topActions,
+      "settings",
+      this.isMobileDevice ? "◷ 设置" : "◷ 空间设置",
+      () => this.openSettings()
+    );
+    if (this.isMobileDevice) {
+      this.topPinned = this.el(top, "div", "atelier-top-pinned");
+      this.orientButton = this.action(
+        this.topPinned,
+        "toggle-orientation",
+        "↻ 切竖屏",
+        () => this.toggleMobileOrientation(),
+        "atelier-btn atelier-orient-btn"
+      );
+      this.exitButton = this.action(
+        this.topPinned,
+        "exit",
+        "← 返回档案馆",
+        () => this.onExit3D?.(),
+        "atelier-btn atelier-exit-btn"
+      );
+    } else {
+      this.orientButton = null;
+      this.exitButton = this.action(topActions, "exit", "← 返回档案馆", () => this.onExit3D?.());
+    }
 
     this.curationBanner = this.el(this.ui, "div", "atelier-curation-banner");
     this.curationBanner.dataset.ui = "curation-banner";
@@ -2194,12 +2238,111 @@ class Dashboard3DSpace {
     });
   }
 
+  mapClientToViewportLocal(clientX, clientY) {
+    if (!this.viewport) return null;
+    const r = this.viewport.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    if (this.isVirtualLandscape) {
+      // 90° clockwise CSS rotation: local +X maps to screen +Y, local +Y maps to screen -X
+      return {
+        x: clientY - r.top,
+        y: r.right - clientX,
+        width: r.height,
+        height: r.width
+      };
+    }
+    return {
+      x: clientX - r.left,
+      y: clientY - r.top,
+      width: r.width,
+      height: r.height
+    };
+  }
+
+  mapClientDeltaToLocal(dx, dy) {
+    if (this.isVirtualLandscape) {
+      return { dx: dy, dy: -dx };
+    }
+    return { dx, dy };
+  }
+
+  syncMobileOrientationLayout() {
+    if (!this.root || this.isDestroyed) return;
+    const vw = window.innerWidth || document.documentElement?.clientWidth || 360;
+    const vh = window.innerHeight || document.documentElement?.clientHeight || 640;
+    const isPhysicalPortrait = vh > vw;
+    const shouldVirtualLandscape =
+      Boolean(this.isMobileDevice) &&
+      isPhysicalPortrait &&
+      !this.userPortraitOverride &&
+      !this.keyboardPausedLandscape;
+
+    this.isVirtualLandscape = shouldVirtualLandscape;
+    this.root.classList.toggle("is-mobile-3d", Boolean(this.isMobileDevice));
+    this.root.classList.toggle("is-virtual-landscape", shouldVirtualLandscape);
+    this.root.classList.toggle("is-mobile-portrait", Boolean(this.isMobileDevice) && !shouldVirtualLandscape);
+    this.root.dataset.virtualLandscape = shouldVirtualLandscape ? "true" : "false";
+
+    if (shouldVirtualLandscape) {
+      this.root.style.position = "fixed";
+      this.root.style.left = "50%";
+      this.root.style.top = "50%";
+      this.root.style.width = `${vh}px`;
+      this.root.style.height = `${vw}px`;
+      this.root.style.minHeight = "0px";
+      this.root.style.transform = "translate(-50%, -50%) rotate(90deg)";
+      this.root.style.transformOrigin = "center center";
+    } else {
+      this.root.style.position = "";
+      this.root.style.left = "";
+      this.root.style.top = "";
+      this.root.style.width = "";
+      this.root.style.height = "";
+      this.root.style.minHeight = this.isMobileDevice ? "0px" : "";
+      this.root.style.transform = "";
+      this.root.style.transformOrigin = "";
+    }
+
+    if (this.orientButton) {
+      if (!isPhysicalPortrait) {
+        this.orientButton.style.display = "none";
+      } else {
+        this.orientButton.style.display = "";
+        this.orientButton.textContent = shouldVirtualLandscape ? "↻ 切竖屏" : "↻ 切横屏";
+        this.orientButton.title = shouldVirtualLandscape
+          ? "临时切换为竖屏浏览"
+          : "切换为全屏横屏观展";
+      }
+    }
+
+    if (this.camera && this.renderer) {
+      this.resize();
+    }
+    if (this.activeViewer && typeof this.activeViewer.onResize === "function") {
+      this.activeViewer.onResize();
+    }
+  }
+
+  toggleMobileOrientation() {
+    if (!this.isMobileDevice) return;
+    this.userPortraitOverride = !this.userPortraitOverride;
+    this.keyboardPausedLandscape = false;
+    this.syncMobileOrientationLayout();
+    this.audio.cue("tick");
+    this.wake();
+  }
+
+  handleResize() {
+    this.syncMobileOrientationLayout();
+    this.wake();
+  }
+
   bindEvents() {
     this.updatePointer = (e) => {
-      const r = this.viewport.getBoundingClientRect();
-      if (!r.width || !r.height) return false;
-      this.pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
-      this.pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+      const pt = this.mapClientToViewportLocal(e.clientX, e.clientY);
+      if (!pt || !pt.width || !pt.height) return false;
+      this.pointer.x = (pt.x / pt.width) * 2 - 1;
+      this.pointer.y = -(pt.y / pt.height) * 2 + 1;
       return true;
     };
 
@@ -2207,10 +2350,14 @@ class Dashboard3DSpace {
       if (!this.updatePointer(event)) return;
 
       if (this.pointerDown && this.spaceState === "detail" && this.detailFolio) {
-        const delta = event.clientX - this.dragStartX;
-        if (Math.abs(delta) > 2) {
+        const mapped = this.mapClientDeltaToLocal(
+          event.clientX - this.dragStartX,
+          event.clientY - (this.dragStartY ?? event.clientY)
+        );
+        if (Math.abs(mapped.dx) > 2) {
           this.dragStartX = event.clientX;
-          this.dragVelocity = delta * 0.0065;
+          this.dragStartY = event.clientY;
+          this.dragVelocity = mapped.dx * 0.0065;
           this.targetDetailAngle = clamp(this.targetDetailAngle + this.dragVelocity, -0.85, 0.85);
           this.pointerMoved = true;
           this.wake();
@@ -2351,11 +2498,11 @@ class Dashboard3DSpace {
 
       if (this.spaceState === "detail" && this.detailFolio) {
         if (event.cancelable) event.preventDefault();
-        const dx = t.clientX - g.lastX;
+        const mapped = this.mapClientDeltaToLocal(t.clientX - g.lastX, t.clientY - g.lastY);
         g.lastX = t.clientX;
         g.lastY = t.clientY;
-        if (Math.abs(dx) > 1.5) {
-          this.dragVelocity = dx * 0.007;
+        if (Math.abs(mapped.dx) > 1.5) {
+          this.dragVelocity = mapped.dx * 0.007;
           this.targetDetailAngle = clamp(this.targetDetailAngle + this.dragVelocity, -0.85, 0.85);
           this.wake();
         }
@@ -2368,8 +2515,9 @@ class Dashboard3DSpace {
 
       if (this.spaceState === "array") {
         if (event.cancelable) event.preventDefault();
-        const dx = t.clientX - g.lastX;
-        const dy = t.clientY - g.lastY;
+        const mapped = this.mapClientDeltaToLocal(t.clientX - g.lastX, t.clientY - g.lastY);
+        const dx = mapped.dx;
+        const dy = mapped.dy;
         g.lastX = t.clientX;
         g.lastY = t.clientY;
         g.accumX += dx;
@@ -2498,7 +2646,11 @@ class Dashboard3DSpace {
     };
 
     this.onResize = () => {
-      this.resize();
+      if (this.isMobileDevice) {
+        this.syncMobileOrientationLayout();
+      } else {
+        this.resize();
+      }
       this.wake();
     };
 
@@ -2512,6 +2664,7 @@ class Dashboard3DSpace {
     window.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("resize", this.onResize);
+    window.addEventListener("orientationchange", this.onResize);
     document.addEventListener("visibilitychange", this.onVisibility);
 
     this.resizeObserver = new ResizeObserver(this.onResize);
@@ -3580,7 +3733,7 @@ class Dashboard3DSpace {
     const back = this.action(
       this.detailElement,
       "detail-back",
-      "← 返回档案阵列 [ESC]",
+      this.isMobileDevice ? "← 返回档案阵列" : "← 返回档案阵列 [ESC]",
       () => this.leaveDetail(),
       "atelier-back-lead"
     );
@@ -3656,7 +3809,9 @@ class Dashboard3DSpace {
 
     progress.onclick = async (event) => {
       const rect = progress.getBoundingClientRect();
-      const increment = event.clientX > rect.left + rect.width / 2 ? 1 : -1;
+      const increment = this.isVirtualLandscape
+        ? (event.clientY > rect.top + rect.height / 2 ? 1 : -1)
+        : (event.clientX > rect.left + rect.width / 2 ? 1 : -1);
       const next = Math.max(0, Number(item.watchedEpisodes || 0) + increment);
 
       if (item.isSamplePreviewItem) {
@@ -3829,7 +3984,11 @@ class Dashboard3DSpace {
           timestamp: ""
         });
       } else if (item.file?.path) {
-        this.app?.workspace?.openLinkText(item.file.path, "", false);
+        const targetPath = item.file.path;
+        if (this.isMobileDevice && typeof this.onExit3D === "function") {
+          this.onExit3D();
+        }
+        this.app?.workspace?.openLinkText(targetPath, "", false);
       }
     };
 
@@ -3871,7 +4030,9 @@ class Dashboard3DSpace {
   updateToolbar() {
     if (this.lensButton) {
       const isHigh = this.lensMode === "highscore";
-      this.lensButton.textContent = isHigh ? "◫ 状态与收藏轨" : "✦ 高分精选";
+      this.lensButton.textContent = this.isMobileDevice
+        ? (isHigh ? "◫ 收藏轨" : "✦ 高分")
+        : (isHigh ? "◫ 状态与收藏轨" : "✦ 高分精选");
       this.lensButton.dataset.lensMode = this.lensMode;
       this.lensButton.classList.toggle("is-active", isHigh);
     }
@@ -3893,11 +4054,13 @@ class Dashboard3DSpace {
 
     const active = Boolean(this.settings.audio && this.audio.context?.state === "running");
 
-    this.audioButton.textContent = active
-      ? "● ♪ 环境音景 · 播放中"
-      : this.settings.audio
-        ? "◐ ♪ 环境音景 · 点击唤醒"
-        : "♪ 环境音景 · 已静音";
+    this.audioButton.textContent = this.isMobileDevice
+      ? (active ? "● ♪ 音景" : "♪ 静音")
+      : (active
+        ? "● ♪ 环境音景 · 播放中"
+        : this.settings.audio
+          ? "◐ ♪ 环境音景 · 点击唤醒"
+          : "♪ 环境音景 · 已静音");
 
     this.audioButton.dataset.audioState = active ? "on" : "off";
     this.audioButton.classList.toggle("is-active", active);
@@ -3992,6 +4155,10 @@ class Dashboard3DSpace {
 
   openSettings() {
     if (this.modal) this.closeModal();
+    if (this.isMobileDevice) {
+      this.keyboardPausedLandscape = true;
+      this.syncMobileOrientationLayout();
+    }
 
     this.modal = this.el(this.root, "section", "atelier-modal");
     this.modal.onclick = (e) => {
@@ -4002,7 +4169,7 @@ class Dashboard3DSpace {
     const headerRow = this.el(panel, "div", "atelier-row");
     headerRow.style.justifyContent = "space-between";
     this.el(headerRow, "h2", "", "空间设置与分栏管理");
-    this.action(headerRow, "close-settings", "关闭设置 [ESC]", () => this.closeModal());
+    this.action(headerRow, "close-settings", this.isMobileDevice ? "✕ 关闭" : "关闭设置 [ESC]", () => this.closeModal());
 
     // 实体档案装帧风格 & 双风格精装模型扩展包管理卡片（首帧同步渲染防闪白，随后异步校验磁盘状态）
     const packBox = this.el(panel, "div", "atelier-pack-section");
@@ -4379,11 +4546,19 @@ class Dashboard3DSpace {
   closeModal() {
     this.modal?.remove();
     this.modal = null;
+    if (this.isMobileDevice && this.keyboardPausedLandscape) {
+      this.keyboardPausedLandscape = false;
+      this.syncMobileOrientationLayout();
+    }
     this.wake();
   }
 
   openSearch() {
     if (this.modal) this.closeModal();
+    if (this.isMobileDevice) {
+      this.keyboardPausedLandscape = true;
+      this.syncMobileOrientationLayout();
+    }
 
     this.modal = this.el(this.root, "section", "atelier-modal");
     this.modal.onclick = (e) => {
@@ -4394,7 +4569,7 @@ class Dashboard3DSpace {
     const headerRow = this.el(panel, "div", "atelier-row");
     headerRow.style.justifyContent = "space-between";
     this.el(headerRow, "h2", "", "档案检索 / ARCHIVE SEARCH");
-    this.action(headerRow, "close-search", "关闭检索 [ESC]", () => this.closeModal());
+    this.action(headerRow, "close-search", this.isMobileDevice ? "✕ 关闭" : "关闭检索 [ESC]", () => this.closeModal());
 
     const input = this.el(panel, "input", "");
     input.type = "search";
@@ -5580,7 +5755,11 @@ class Dashboard3DSpace {
     window.removeEventListener("pointerup", this.onPointerUp);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("resize", this.onResize);
+    window.removeEventListener("orientationchange", this.onResize);
     document.removeEventListener("visibilitychange", this.onVisibility);
+    if (typeof document !== "undefined" && document.body) {
+      document.body.classList.remove("bangumi-3d-mobile-active");
+    }
 
     this.textureCache.forEach((texture) => texture.dispose());
     this.textureCache.clear();
@@ -5685,8 +5864,17 @@ class ModelViewer {
         return;
       }
       if (!this.dragging) return;
-      this.angle += (event.clientX - this.lastX) * 0.008;
-      this.tiltX = clamp(this.tiltX + (event.clientY - (this.lastY ?? event.clientY)) * 0.004, -0.45, 0.45);
+      const mapped = typeof this.space?.mapClientDeltaToLocal === "function"
+        ? this.space.mapClientDeltaToLocal(
+            event.clientX - this.lastX,
+            event.clientY - (this.lastY ?? event.clientY)
+          )
+        : {
+            dx: event.clientX - this.lastX,
+            dy: event.clientY - (this.lastY ?? event.clientY)
+          };
+      this.angle += mapped.dx * 0.008;
+      this.tiltX = clamp(this.tiltX + mapped.dy * 0.004, -0.45, 0.45);
       this.lastX = event.clientX;
       this.lastY = event.clientY;
     };
@@ -5774,7 +5962,7 @@ class ModelViewer {
     this.root.remove();
     this.root = null;
     if (this.space && !this.space.isDestroyed && (typeof document === "undefined" || !document.hidden)) {
-      this.space.startLoop();
+      this.space.wake();
     }
 
     this.root = null;

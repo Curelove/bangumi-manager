@@ -1179,6 +1179,9 @@ a:hover .bm8-jump-cue {
   border: 1px solid var(--bm7-border, var(--background-modifier-border));
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 .bm8-liner-head {
   flex: none;
@@ -1195,9 +1198,11 @@ a:hover .bm8-jump-cue {
   align-items: center;
   gap: 4px;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
   -ms-overflow-style: none;
   min-width: 0;
+  max-width: 100%;
   flex: 1 1 auto;
 }
 .bm8-liner-rail::-webkit-scrollbar {
@@ -1784,7 +1789,12 @@ a:hover .bm8-jump-cue {
 
 @container bmdesk (max-width: 560px) {
   div.curator-desk-root .curator-workspace-mode-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+  div.curator-desk-root .curator-workspace-mode-btn {
+    min-height: 38px !important;
+    height: 38px !important;
+    padding: 0 5px !important;
   }
   div.curator-desk-root .curator-workspace-mode-btn .curator-ws-mode-icon {
     display: none !important;

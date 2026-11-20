@@ -22,7 +22,14 @@ const reviewStudioService = require("./review-studio-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
 const gameMultisourceApi = require("./game-multisource-api.js");
 const gameStatsService = require("./game-stats-and-groups-service.js");
-const gameCapsuleService = require("./game-floating-capsule-service.js");
+let _cachedCapsuleSvc = null;
+function getDesktopCapsuleService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedCapsuleSvc) {
+    _cachedCapsuleSvc = require("./game-floating-capsule-service.js");
+  }
+  return _cachedCapsuleSvc;
+}
 
 function getAppearance(plugin) {
   const s = (plugin && plugin.settings) || {};
@@ -44,7 +51,8 @@ async function saveAppearance(plugin, next) {
   plugin.settings.archiveVisualTheme = norm.theme === "follow" ? "obsidian" : norm.theme;
   plugin.settings.archiveDynamicThemeMotion = norm.motion !== false;
   await plugin.saveSettings();
-  gameCapsuleService.broadcastToCapsuleWindow(plugin);
+  const cap = getDesktopCapsuleService();
+  if (cap) cap.broadcastToCapsuleWindow(plugin);
 }
 
 function itemKey(it) {
@@ -98,6 +106,7 @@ function createLiveRoomProvider(plugin) {
       return {
         monitor: cfg.monitorEnabled,
         notify: cfg.systemNotifyEnabled,
+        mobileOpenMode: cfg.mobileOpenMode || "auto",
         lastCheckedAt: store.lastRefreshedAt || 0
       };
     },
@@ -129,12 +138,22 @@ function createLiveRoomProvider(plugin) {
       } else if (key === "notify") {
         plugin.settings.bilibiliLiveSystemNotifyEnabled = Boolean(value);
         await plugin.saveSettings();
+      } else if (key === "mobileOpenMode") {
+        plugin.settings.bilibiliLiveMobileOpenMode = bilibiliLiveService.normalizeMobileLiveOpenMode(value);
+        await plugin.saveSettings();
       }
     },
-    openRoom: (room) => {
+    openRoom: (room, targetOverride) => {
       const targetUrl =
         (room && room.url) ||
         bilibiliLiveService.getLiveRoomWebUrl(room && room.roomId);
+      if (isMobileEnv()) {
+        const mode =
+          targetOverride ||
+          bilibiliLiveService.normalizeMobileLiveOpenMode(plugin?.settings?.bilibiliLiveMobileOpenMode);
+        bilibiliLiveService.openLiveRoomByTarget(room && room.roomId, mode, targetUrl);
+        return;
+      }
       openExternal(targetUrl);
     },
     subscribe: (fn) => bilibiliLiveService.subscribeBilibiliLiveUpdates(plugin, () => fn())
@@ -677,28 +696,38 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
   if (typeof plugin._v07GameStageUnreg === "function") {
     plugin._v07GameStageUnreg();
   }
-  plugin._v07GameStageUnreg = gameCapsuleService.registerGameStageRefreshHook(plugin, refresh);
+  const capSvc = getDesktopCapsuleService();
+  plugin._v07GameStageUnreg = capSvc
+    ? capSvc.registerGameStageRefreshHook(plugin, refresh)
+    : null;
 
-  const capsuleBridge = {
-    supported: gameCapsuleService.isDesktopCapsuleSupported(),
-    getSettings: () => gameCapsuleService.ensureGameCapsuleSettings(plugin),
-    updateSettings: async (patch, opts = {}) => {
-      const cfg = gameCapsuleService.ensureGameCapsuleSettings(plugin);
-      const turningOn = patch && patch.enabled === true && !cfg.enabled;
-      Object.assign(cfg, patch || {});
-      gameCapsuleService.ensureGameCapsuleSettings(plugin);
-      await save();
-      gameCapsuleService.refreshGameCapsuleLifecycle(plugin);
-      gameCapsuleService.broadcastToCapsuleWindow(plugin);
-      if (turningOn && cfg.taskbarPolicy === "ask" && opts.promptTaskbar !== false) {
-        gameCapsuleService.promptTaskbarPolicyIfNeeded(plugin, () => {
-          refresh();
-        });
+  const capsuleBridge = capSvc
+    ? {
+        supported: capSvc.isDesktopCapsuleSupported(),
+        getSettings: () => capSvc.ensureGameCapsuleSettings(plugin),
+        updateSettings: async (patch, opts = {}) => {
+          const cfg = capSvc.ensureGameCapsuleSettings(plugin);
+          const turningOn = patch && patch.enabled === true && !cfg.enabled;
+          Object.assign(cfg, patch || {});
+          capSvc.ensureGameCapsuleSettings(plugin);
+          await save();
+          capSvc.refreshGameCapsuleLifecycle(plugin);
+          capSvc.broadcastToCapsuleWindow(plugin);
+          if (turningOn && cfg.taskbarPolicy === "ask" && opts.promptTaskbar !== false) {
+            capSvc.promptTaskbarPolicyIfNeeded(plugin, () => {
+              refresh();
+            });
+          }
+          return cfg;
+        },
+        preview: (g) => capSvc.openCapsulePreview(plugin, g)
       }
-      return cfg;
-    },
-    preview: (g) => gameCapsuleService.openCapsulePreview(plugin, g)
-  };
+    : {
+        supported: false,
+        getSettings: () => ({ enabled: false }),
+        updateSettings: async () => ({ enabled: false }),
+        preview: () => {}
+      };
   const getCover = (g) => {
     try {
       return typeof mh.resolveLocalOrVaultImageUrl === "function"
@@ -746,7 +775,10 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
     getCover,
     getEvents: () => deriveGameEvents(games, getCover),
     actions: {
-      canLaunch: (g) => !isMobileEnv() && Boolean(String(g.exePath || "").trim()),
+      canLaunch: (g) =>
+        isMobileEnv()
+          ? Boolean(String((g && g.mobileLaunchUrl) || "").trim())
+          : Boolean(String((g && g.exePath) || "").trim()),
       launch: (g) => typeof mh.launchLocalGameProcess === "function" && mh.launchLocalGameProcess(plugin, g, refresh),
       openJournal: (g) => typeof mh.openGameDetailAndNotesModal === "function" && mh.openGameDetailAndNotesModal(plugin, g, refresh),
       editMeta: (g) => typeof mh.openGameEditMetadataModal === "function" && mh.openGameEditMetadataModal(plugin, g, refresh),

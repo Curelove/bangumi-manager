@@ -2082,7 +2082,64 @@ function inject3DScopedStyles() {
   .atelier-style-picker-grid{grid-template-columns:1fr}
   .atelier-setting{flex-direction:column;align-items:flex-start;gap:8px}
   .atelier-viewer-tools{bottom:18px;width:calc(100% - 24px);justify-content:center;flex-wrap:wrap;gap:8px}
-}`;
+}
+/* 移动端全屏沉浸式 3D 原画展厅（自动虚拟 90° 横屏 + 手动切竖屏 + 键盘安全态） */
+.bangumi-3d-wrapper.is-mobile-3d-fullscreen{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;min-height:0!important;z-index:9990!important;overflow:hidden!important;background:#eae5e1!important}
+body.bangumi-3d-mobile-active .modal-container{z-index:10050!important}
+body.bangumi-3d-mobile-active .notice-container{z-index:10080!important}
+.atelier-top-pinned{display:inline-flex;align-items:center;gap:6px;flex-shrink:0;pointer-events:auto}
+.bangumi-3d-root.is-mobile-3d button.atelier-orient-btn{min-height:30px;padding:4px 9px;border-radius:6px;border:1px solid rgba(155,114,71,.48);background:rgba(250,246,238,.94);color:var(--cel-ink);font-size:11.5px;font-weight:600;white-space:nowrap}
+.bangumi-3d-root.is-mobile-3d button.atelier-exit-btn{min-height:30px;padding:4px 10px;border-radius:6px;border:1px solid #8f683d;background:#8f683d;color:#fffdf9!important;font-size:11.5px;font-weight:700;white-space:nowrap}
+.bangumi-3d-root.is-mobile-3d button.atelier-exit-btn:hover{background:#78552f;color:#fffdf9!important;border-bottom-color:#78552f}
+.bangumi-3d-root.is-mobile-3d .atelier-modal{padding:max(34px,env(safe-area-inset-top)) 14px max(24px,env(safe-area-inset-bottom))}
+.bangumi-3d-root.is-mobile-3d .atelier-modal h2{margin:0 0 12px;font-size:17px}
+/* 虚拟 90° 顺时针横屏态：覆盖窄屏 media query，发挥 ~840×390 横屏宽画幅（物理顶栏/挖孔安全区映射至逻辑左缘，手势条安全区映射至逻辑右缘） */
+.bangumi-3d-root.is-virtual-landscape{min-height:0!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-top{top:10px!important;left:max(34px,env(safe-area-inset-top))!important;right:max(18px,env(safe-area-inset-bottom))!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;gap:8px!important;flex-wrap:nowrap!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-mark{flex-shrink:0;font-size:12.5px;letter-spacing:.6px;white-space:nowrap;padding:4px 8px;background:rgba(242,239,233,.86);border:1px solid rgba(198,190,178,.5);border-radius:6px}
+.bangumi-3d-root.is-virtual-landscape .atelier-mark small{display:none!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-actions{flex:1 1 auto;min-width:0;max-width:none!important;justify-content:flex-start!important;gap:5px!important;overflow-x:auto!important;flex-wrap:nowrap!important;padding:0!important;-webkit-overflow-scrolling:touch}
+.bangumi-3d-root.is-virtual-landscape .atelier-actions::-webkit-scrollbar{display:none}
+.bangumi-3d-root.is-virtual-landscape .atelier-subview-switch{flex-shrink:0;border-radius:6px}
+.bangumi-3d-root.is-virtual-landscape button.atelier-subview-btn{min-height:26px;padding:2px 8px;font-size:11px}
+.bangumi-3d-root.is-virtual-landscape button.atelier-btn:not(.atelier-exit-btn):not(.atelier-orient-btn){min-height:28px;padding:3px 8px;border-radius:6px;font-size:11px;background:rgba(246,242,234,.9);border:1px solid rgba(198,190,178,.58);white-space:nowrap;flex-shrink:0}
+.bangumi-3d-root.is-virtual-landscape .atelier-curation-banner,.bangumi-3d-root.is-virtual-landscape .atelier-sample-banner{top:48px!important;left:max(34px,env(safe-area-inset-top))!important;right:max(18px,env(safe-area-inset-bottom))!important;flex-wrap:nowrap!important;overflow-x:auto!important;padding:4px 10px!important;gap:6px!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-curation-banner::-webkit-scrollbar{display:none}
+.bangumi-3d-root.is-virtual-landscape button.atelier-curation-pill{white-space:nowrap;flex-shrink:0}
+.bangumi-3d-root.is-virtual-landscape .atelier-bottom{left:max(34px,env(safe-area-inset-top))!important;right:max(18px,env(safe-area-inset-bottom))!important;bottom:8px!important;flex-direction:row!important;align-items:flex-end!important;justify-content:space-between!important;gap:8px!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-counter-box{padding:4px 9px!important;border-radius:6px;flex-shrink:0;display:flex;align-items:center;gap:8px}
+.bangumi-3d-root.is-virtual-landscape .atelier-counter-box .atelier-row{gap:5px;flex-wrap:nowrap}
+.bangumi-3d-root.is-virtual-landscape .atelier-lane-eyebrow{font-size:10px;white-space:nowrap}
+.bangumi-3d-root.is-virtual-landscape .atelier-number{font-size:20px!important;min-width:22px!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-counter-sep,.bangumi-3d-root.is-virtual-landscape .atelier-total{font-size:13px!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-callout-box{flex:1 1 auto;min-width:0;max-width:420px!important;padding:5px 10px!important;flex-direction:row!important;align-items:center!important;justify-content:space-between!important;gap:10px!important;border-radius:6px}
+.bangumi-3d-root.is-virtual-landscape .atelier-callout-line{display:none!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-meta{display:none!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-title{flex:1 1 auto;min-width:0;font-size:13.5px!important;line-height:1.25;max-width:none!important;-webkit-line-clamp:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bangumi-3d-root.is-virtual-landscape .atelier-callout-box button[data-action="read-detail"]{flex-shrink:0!important;padding:3px 10px!important;background:#8f683d!important;color:#fffdf9!important;border-color:#8f683d!important;font-weight:700!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-bottom-right{padding:4px 8px!important;gap:5px!important;border-radius:6px;flex-shrink:0;justify-content:flex-end!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-bottom-right button[data-action="replay-boot"]{display:none!important}
+.bangumi-3d-root.is-virtual-landscape .file-ticks{height:14px;gap:3px}
+.bangumi-3d-root.is-virtual-landscape .atelier-hover{display:none!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-detail{top:48px!important;right:max(18px,env(safe-area-inset-bottom))!important;bottom:10px!important;left:auto!important;width:min(410px,50%)!important;max-height:calc(100% - 58px)!important;padding:12px 15px!important;border:1px solid var(--cel-line);border-top:2px solid var(--cel-accent);transform:translateX(16px)}
+.bangumi-3d-root.is-virtual-landscape .atelier-detail.is-visible{transform:translateX(0)}
+.bangumi-3d-root.is-virtual-landscape .atelier-detail h1{font-size:16.5px;margin:2px 0 4px}
+.bangumi-3d-root.is-virtual-landscape .atelier-data-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:6px 12px!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-note-sheet{top:48px!important;bottom:10px!important;left:max(34px,env(safe-area-inset-top))!important;right:auto!important;width:min(420px,52%)!important;max-height:calc(100% - 58px)!important}
+.bangumi-3d-root.is-virtual-landscape .boot-skip{top:14px!important;right:max(18px,env(safe-area-inset-bottom))!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-viewer{padding:14px max(18px,env(safe-area-inset-bottom)) 14px max(34px,env(safe-area-inset-top))!important}
+.bangumi-3d-root.is-virtual-landscape .atelier-viewer-tools{bottom:14px!important;width:auto!important}
+/* 移动端竖屏覆盖态（用户主动点击「切竖屏」或搜索/设置安全态） */
+.bangumi-3d-root.is-mobile-portrait{width:100%!important;height:100%!important;min-height:0!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-top{top:max(34px,env(safe-area-inset-top))!important;left:12px!important;right:12px!important;flex-direction:row!important;flex-wrap:wrap!important;align-items:center!important;justify-content:space-between!important;gap:6px!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-mark{order:1;font-size:13px}
+.bangumi-3d-root.is-mobile-portrait .atelier-mark small{display:none!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-top-pinned{order:2;margin-left:auto}
+.bangumi-3d-root.is-mobile-portrait .atelier-actions{order:3;flex-basis:100%;max-width:100%!important;gap:5px!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-bottom{bottom:max(16px,env(safe-area-inset-bottom))!important;left:12px!important;right:12px!important;gap:6px!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-curation-banner,.bangumi-3d-root.is-mobile-portrait .atelier-sample-banner{top:calc(max(34px,env(safe-area-inset-top)) + 78px)!important}
+.bangumi-3d-root.is-mobile-portrait .atelier-detail{bottom:max(12px,env(safe-area-inset-bottom))!important;max-height:60%!important}
+.bangumi-3d-root.is-mobile-portrait .boot-skip{top:max(34px,env(safe-area-inset-top))!important;right:14px!important}`;
 
   let style = document.getElementById("atelier-cel-style");
 

@@ -34,6 +34,7 @@ const {
 const { applyTheme, setGlowBackdrop } = require("./v07-themes.js");
 const { renderRoxyHandbookCard } = require("./v07-roxy-art.js");
 const { mountRoxyPanelRig } = require("./v08-roxy-live-rig.js");
+const { isMobileEnv } = require("./platform-env.js");
 const { renderFeed, normalizeEvents } = require("./v07-history.js");
 const { renderRandomPicker } = require("./v07-random-pick.js");
 const { renderLiveRooms } = require("./v07-live-rooms.js");
@@ -928,6 +929,17 @@ function renderAnimeStage(host, ctx) {
           );
         }
 
+        if (!desktop && actions.openDownload) {
+          box.appendChild(
+            menuItem("download", "磁力搜索与追番下载助手", () => {
+              close();
+              actions.openDownload(item, () => {
+                if (onUpdated) onUpdated();
+              });
+            })
+          );
+        }
+
         if (desktop && item.downloadPath && item.downloadPath !== "无" && actions.openFolder) {
           box.appendChild(
             menuItem("folder", "打开本地番剧文件夹", () => {
@@ -1314,10 +1326,12 @@ function renderAnimeStage(host, ctx) {
         pScore !== null ? "is-active" : ""
       );
 
-      const dlBtn = desktop && actions.openDownload
+      const dlBtn = actions.openDownload
         ? iconButton(
             "download",
-            local && local.newCount > 0 ? `下载与自动追更（本地待看 ${local.newCount} 集）` : "下载与自动追更",
+            desktop
+              ? (local && local.newCount > 0 ? `下载与自动追更（本地待看 ${local.newCount} 集）` : "下载与自动追更")
+              : "磁力搜索与追番下载助手",
             () => actions.openDownload(item, () => applyItemMutation(item, {}))
           )
         : null;
@@ -1686,7 +1700,7 @@ function renderAnimeStage(host, ctx) {
     host._roxyRigCtrl = null;
   }
   let roxyPanelRigCtrl = null;
-  if (themeRoot.getAttribute("data-bm7-theme") === "roxy" && appearance.roxyArt !== false) {
+  if (!isMobileEnv() && themeRoot.getAttribute("data-bm7-theme") === "roxy" && appearance.roxyArt !== false) {
     const topSidePanel = side.firstElementChild;
     if (topSidePanel) {
       roxyPanelRigCtrl = mountRoxyPanelRig(topSidePanel, {

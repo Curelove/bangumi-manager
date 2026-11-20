@@ -33,6 +33,289 @@ function isMobileEnv() {
   return !tryRequireNode("fs");
 }
 
+function isIosEnv() {
+  if (Platform && (Platform.isIosApp || Platform.isSafari)) {
+    if (Platform.isIosApp) return true;
+  }
+  if (typeof navigator !== "undefined") {
+    const ua = String(navigator.userAgent || "");
+    if (/iPad|iPhone|iPod/i.test(ua)) return true;
+    if (/Macintosh/i.test(ua) && Number(navigator.maxTouchPoints || 0) > 1) return true;
+  }
+  return false;
+}
+
+function isAndroidEnv() {
+  if (Platform && Platform.isAndroidApp) return true;
+  if (typeof navigator !== "undefined" && /Android/i.test(String(navigator.userAgent || ""))) {
+    return true;
+  }
+  return false;
+}
+
+function isTabletEnv() {
+  if (!isMobileEnv()) return false;
+  if (Platform && Platform.isTablet) return true;
+  if (typeof document !== "undefined" && document.body && document.body.classList.contains("is-tablet")) {
+    return true;
+  }
+  if (typeof window !== "undefined") {
+    const minDim = Math.min(window.innerWidth || 0, window.innerHeight || 0);
+    if (minDim >= 680) return true;
+  }
+  return false;
+}
+
+function isPhoneEnv() {
+  return isMobileEnv() && !isTabletEnv();
+}
+
+/**
+ * 移动端安全唤起外部 App 协议链（按序尝试 schemeUrls；若页面未失焦/未切入后台则自动回落至网页版）
+/**
+ * 移动端尝试通过标准 custom scheme 唤起外部 App，并采用「防系统授权弹窗冲突」的温和回退机制：
+ * - 不在计时器到期时强行自动再触发浏览器/次级 Scheme（避免 OriginOS/MIUI/ColorOS/iOS 首次弹出
+ *   “此应用请求打开某某应用”确认框时，用户还没来得及点“始终允许”就被后续浏览器弹窗打断）；
+ * - 若页面失去焦点（hasFocus === false，说明系统确认框正覆盖其上），静默等待用户授权结果；
+ * - 若超过延迟仍停留在应用内，通过 onFallback 给出应用内一键回退按钮，并持续监听切走事件，
+ *   一旦用户随后点击“始终允许”切出应用，自动回调清理并收起提示。
+ *
+ * 注：已通过安卓真机验证，Obsidian WebView 原生支持 custom scheme（如 bilibili://、bilibilihd://、shortcuts://），
+ * 但不支持 Chrome 专有 intent://#Intent;... 语法。
+ */
+function openExternalSchemeWithFallback(schemeUrls, fallbackWebUrl = "", opts = {}) {
+  const queue = (Array.isArray(schemeUrls) ? schemeUrls : [schemeUrls])
+    .map((u) => String(u || "").trim())
+    .filter(Boolean);
+  const webUrl = String(fallbackWebUrl || "").trim();
+  const stepDelayMs = Math.max(600, Number(opts.stepDelayMs) || 1500);
+  const autoOpenFallbackWeb = opts.autoOpenFallbackWeb === true;
+  const autoChainSchemes = opts.autoChainSchemes === true;
+  const watchAfterFallbackMs = Math.max(4000, Number(opts.watchAfterFallbackMs) || 20000);
+  const onFallback = typeof opts.onFallback === "function" ? opts.onFallback : null;
+  const onAttempt = typeof opts.onAttempt === "function" ? opts.onAttempt : null;
+  const onLeftApp = typeof opts.onLeftApp === "function" ? opts.onLeftApp : null;
+
+  if (queue.length === 0) {
+    if (webUrl) {
+      try {
+        window.open(webUrl, "_blank", "noopener,noreferrer");
+      } catch (_) {}
+      if (onFallback) onFallback(webUrl, { autoOpenedWeb: true, remainingSchemes: [], primaryScheme: "" });
+    }
+    return;
+  }
+
+  let settled = false;
+  let fallbackTriggered = false;
+  let sawWindowBlurOrUnfocused = false;
+  let blurStartedAt = 0;
+  let timer = null;
+  let watchTimer = null;
+  let focusRecheckTimer = null;
+  let fallbackCleanup = null;
+
+  const invokeFallbackCleanup = () => {
+    if (typeof fallbackCleanup === "function") {
+      const fn = fallbackCleanup;
+      fallbackCleanup = null;
+      try {
+        fn();
+      } catch (_) {}
+    }
+  };
+
+  const cleanupListeners = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (watchTimer) {
+      clearTimeout(watchTimer);
+      watchTimer = null;
+    }
+    if (focusRecheckTimer) {
+      clearTimeout(focusRecheckTimer);
+      focusRecheckTimer = null;
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("freeze", onLeftEvent);
+    }
+    if (typeof window !== "undefined") {
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("focus", onWindowFocus);
+      window.removeEventListener("pagehide", onLeftEvent);
+    }
+  };
+
+  const markLeftApp = () => {
+    if (settled) return;
+    settled = true;
+    invokeFallbackCleanup();
+    cleanupListeners();
+    if (onLeftApp) {
+      try {
+        onLeftApp();
+      } catch (_) {}
+    }
+  };
+
+  const triggerFallback = (currentIdx) => {
+    if (settled || fallbackTriggered) return;
+    fallbackTriggered = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const remainingSchemes = queue.slice(currentIdx);
+    const primaryScheme = queue[0] || "";
+    const openWeb = () => {
+      markLeftApp();
+      if (webUrl) {
+        try {
+          window.open(webUrl, "_blank", "noopener,noreferrer");
+        } catch (_) {}
+      }
+    };
+    const openNextScheme = (overrideScheme) => {
+      const nextScheme = String(overrideScheme || remainingSchemes[0] || "").trim();
+      invokeFallbackCleanup();
+      if (!nextScheme) return;
+      try {
+        window.open(nextScheme, "_blank", "noopener,noreferrer");
+      } catch (_) {}
+    };
+
+    if (autoOpenFallbackWeb && webUrl) {
+      cleanupListeners();
+      settled = true;
+      try {
+        window.open(webUrl, "_blank", "noopener,noreferrer");
+      } catch (_) {}
+      if (onFallback) {
+        onFallback(webUrl, {
+          autoOpenedWeb: true,
+          openWeb,
+          openNextScheme,
+          remainingSchemes,
+          primaryScheme
+        });
+      }
+      return;
+    }
+
+    if (onFallback) {
+      const ret = onFallback(webUrl, {
+        autoOpenedWeb: false,
+        openWeb,
+        openNextScheme,
+        remainingSchemes,
+        primaryScheme
+      });
+      if (typeof ret === "function") {
+        fallbackCleanup = ret;
+      }
+    }
+    // 保持监听最多 watchAfterFallbackMs：用户随后在系统弹窗点“始终允许”切出应用时，立即自动收起提示
+    watchTimer = setTimeout(() => {
+      cleanupListeners();
+    }, watchAfterFallbackMs);
+  };
+
+  const onLeftEvent = () => {
+    markLeftApp();
+  };
+
+  const onVisibilityChange = () => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      markLeftApp();
+    }
+  };
+
+  const onWindowBlur = () => {
+    sawWindowBlurOrUnfocused = true;
+    if (!blurStartedAt) blurStartedAt = Date.now();
+    // 一旦失焦（可能是目标 App 正在切入，也可能是系统授权弹窗夺走了焦点），立即取消倒计时避免弹窗叠加
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (fallbackTriggered) {
+      // 用户在看到温和提示后点击了系统弹窗中的允许并离开当前界面
+      markLeftApp();
+    }
+  };
+
+  const onWindowFocus = () => {
+    if (settled || fallbackTriggered || !sawWindowBlurOrUnfocused) return;
+    // 若失焦持续超过 18 秒才回到页面，大概率是从目标 App 切回而非取消了授权弹窗，直接静默收尾
+    if (blurStartedAt && Date.now() - blurStartedAt > 18000) {
+      markLeftApp();
+      return;
+    }
+    // 系统授权弹窗关闭后焦点回到 Obsidian（例如用户点了“拒绝/取消”），稍等确认未跳转后再温和提示
+    if (focusRecheckTimer) clearTimeout(focusRecheckTimer);
+    focusRecheckTimer = setTimeout(() => {
+      if (settled || fallbackTriggered) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        markLeftApp();
+        return;
+      }
+      triggerFallback(idx);
+    }, 360);
+  };
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("freeze", onLeftEvent);
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("focus", onWindowFocus);
+    window.addEventListener("pagehide", onLeftEvent);
+  }
+
+  let idx = 0;
+  const tryNext = () => {
+    if (settled) return;
+    if (idx < queue.length) {
+      const target = queue[idx++];
+      if (onAttempt) onAttempt(target, idx - 1);
+      try {
+        window.open(target, "_blank", "noopener,noreferrer");
+      } catch (_) {}
+      const shouldChainNext = autoChainSchemes && idx < queue.length;
+      const hasFallbackAction = shouldChainNext || Boolean(onFallback) || (autoOpenFallbackWeb && Boolean(webUrl));
+      if (hasFallbackAction) {
+        timer = setTimeout(() => {
+          if (settled) return;
+          if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+            markLeftApp();
+            return;
+          }
+          // 若此时文档已失焦（系统“请求打开应用”弹窗正获得焦点），绝不提前弹窗打断，交由 visibility/focus 后续处理
+          if (typeof document !== "undefined" && typeof document.hasFocus === "function" && !document.hasFocus()) {
+            sawWindowBlurOrUnfocused = true;
+            return;
+          }
+          if (shouldChainNext) {
+            tryNext();
+          } else {
+            triggerFallback(idx);
+          }
+        }, shouldChainNext ? Math.min(stepDelayMs, 950) : stepDelayMs);
+      } else {
+        watchTimer = setTimeout(cleanupListeners, 2200);
+      }
+      return;
+    }
+    triggerFallback(idx);
+  };
+
+  tryNext();
+}
+
 function isDesktopNodeAvailable() {
   return !isMobileEnv() && Boolean(tryRequireNode("fs"));
 }
@@ -761,6 +1044,11 @@ module.exports = {
   isForcedMobileTestEnv,
   tryRequireNode,
   isMobileEnv,
+  isIosEnv,
+  isAndroidEnv,
+  isTabletEnv,
+  isPhoneEnv,
+  openExternalSchemeWithFallback,
   isDesktopNodeAvailable,
   normalizeUnicodeNfc,
   toPosixPath,

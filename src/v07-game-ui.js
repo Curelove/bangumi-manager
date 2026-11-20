@@ -142,10 +142,9 @@ function gameCover(game, ctx, defaultAspect) {
 }
 
 function renderGameCard(game, ctx, opts) {
-  const { desktop } = platformInfo();
   const st = gameStats(game);
   const { frame, ar } = gameCover(game, ctx, opts.defaultAspect);
-  const canLaunch = desktop && ctx.actions.canLaunch && ctx.actions.canLaunch(game);
+  const canLaunch = Boolean(ctx.actions.canLaunch && ctx.actions.canLaunch(game));
   const card = h("article.bm7-gcard", {
     style: { "--ar": ar.toFixed(4) },
     dataset: { id: game.id },
@@ -264,9 +263,8 @@ function openCoverEditor(anchor, game, ctx, defaultAspect, onDone) {
 
 /* ============================== 详情与统计抽屉 ============================== */
 
-function renderGameStatsPanel(container, game, ctx, onChange) {
+function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
   clear(container);
-  const { desktop } = platformInfo();
   const st = gameStats(game);
   const url = ctx.getCover ? ctx.getCover(game) : game.coverUrl;
   const state = { period: "week", chart: "days" };
@@ -283,9 +281,15 @@ function renderGameStatsPanel(container, game, ctx, onChange) {
         h("h2.bm7-gs-title", { text: game.title }),
         h("div.bm7-gs-total", [h("span.bm7-gs-total-label", { text: "总时长" }), h("span.bm7-gs-total-val", { text: formatMinutes(st.total) })]),
         h("div.bm7-gs-actions", [
-          desktop && ctx.actions.canLaunch && ctx.actions.canLaunch(game) ? button("启动游戏", { icon: "play", variant: "primary", onClick: () => ctx.actions.launch(game) }) : null,
-          timerButton(game, ctx, () => renderGameStatsPanel(container, game, ctx, onChange)),
-          button("手札", { icon: "pen", onClick: () => ctx.actions.openJournal && ctx.actions.openJournal(game) })
+          ctx.actions.canLaunch && ctx.actions.canLaunch(game) ? button("启动游戏", { icon: "play", variant: "primary", onClick: () => ctx.actions.launch(game) }) : null,
+          timerButton(game, ctx, () => renderGameStatsPanel(container, game, ctx, onChange, closeDrawer)),
+          button("手札", {
+            icon: "pen",
+            onClick: () => {
+              if (typeof closeDrawer === "function") closeDrawer(true);
+              if (ctx.actions.openJournal) ctx.actions.openJournal(game);
+            }
+          })
         ])
       ])
     ])
@@ -431,17 +435,21 @@ function openGameStatsPanel(game, ctx, hostRoot, onChange) {
     }
   });
   const sheet = h("div.bm7-drawer-sheet");
-  const close = () => {
-    drawer.classList.add("is-leaving");
+  const close = (immediate = false) => {
     document.removeEventListener("keydown", onKey, true);
+    if (immediate) {
+      drawer.remove();
+      return;
+    }
+    drawer.classList.add("is-leaving");
     setTimeout(() => drawer.remove(), 200);
   };
   const onKey = (e) => e.key === "Escape" && close();
-  drawer.append(h("div.bm7-drawer-scrim", { on: { click: close } }), sheet);
-  sheet.appendChild(iconButton("close", "关闭", close, "bm7-drawer-close"));
+  drawer.append(h("div.bm7-drawer-scrim", { on: { click: () => close(false) } }), sheet);
+  sheet.appendChild(iconButton("close", "关闭", () => close(false), "bm7-drawer-close"));
   const body = h("div.bm7-drawer-body");
   sheet.appendChild(body);
-  renderGameStatsPanel(body, game, ctx, onChange);
+  renderGameStatsPanel(body, game, ctx, onChange, close);
   host.appendChild(drawer);
   document.addEventListener("keydown", onKey, true);
   return { close };
@@ -460,21 +468,130 @@ const SOURCE_NAME = { bangumi: "Bangumi", vndb: "VNDB", steam: "Steam", ymgal: "
 
 /**
  * opts = { initialQuery, source, search(source, q) -> Promise<[{ source, status: "ok"|"timeout"|"error"|"empty", items: Cand[] }]>,
- *          onPickFull(cand), onPickCover(cand) }
+ *          onPickFull(cand), onPickCover(cand), foldOnPick?: boolean }
  * Cand = { source, id, title, subtitle, cover, developer, year, score, url }
  */
 function renderGameSourceSearch(host, opts) {
   clear(host);
-  const state = { source: opts.source || "all", q: opts.initialQuery || "", seq: 0 };
+  const state = {
+    source: opts.source || "all",
+    q: opts.initialQuery || "",
+    seq: 0,
+    allItems: [],
+    pickedIndex: -1,
+    pickedKind: "",
+    folded: false
+  };
   const input = h("input.bm7-input.bm7-gsrc-input", { attr: { type: "search", placeholder: "输入游戏名称，例如：千恋＊万花", "aria-label": "搜索游戏词条" } });
   input.value = state.q;
   const statusLine = h("div.bm7-gsrc-status");
   const results = h("div.bm7-gsrc-results");
+  const foldControlHost = h("div.bm7-gsrc-fold-host");
+
+  const paintResults = () => {
+    clear(results);
+    clear(foldControlHost);
+    const all = state.allItems || [];
+    if (!all.length) {
+      results.classList.remove("is-folded");
+      results.appendChild(emptyState("没有找到匹配的词条，换个写法或切换数据源试试。"));
+      return;
+    }
+
+    const canFold = opts.foldOnPick !== false && state.pickedIndex >= 0 && all.length > 1;
+    const isFolded = canFold && state.folded;
+    results.classList.toggle("is-folded", isFolded);
+
+    if (canFold && !isFolded) {
+      const pickedItem = all[state.pickedIndex];
+      results.appendChild(
+        h("div.bm7-gsrc-collapse-bar", [
+          h("span", { text: `当前已套用《${pickedItem.title}》 · 共 ${all.length} 条候选` }),
+          button("收起其余候选 ▴", {
+            variant: "ghost",
+            onClick: () => {
+              state.folded = true;
+              paintResults();
+            }
+          })
+        ])
+      );
+    }
+
+    all.forEach((c, idx) => {
+      const isPicked = idx === state.pickedIndex;
+      const pickedLabel = state.pickedKind === "cover" ? "已用封面" : "已套用";
+      results.appendChild(
+        h("article.bm7-gsrc-card", { cls: isPicked ? "is-picked" : "" }, [
+          h("div.bm7-gsrc-cover", [coverEl(c.cover, c.title)]),
+          h("div.bm7-gsrc-info", [
+            h("div.bm7-gsrc-title", { text: c.title, title: c.title }),
+            c.subtitle ? h("div.bm7-gsrc-sub", { text: c.subtitle }) : null,
+            h("div.bm7-gsrc-meta", [
+              h("span.bm7-gsrc-src", { dataset: { src: c.source }, text: SOURCE_NAME[c.source] || c.source }),
+              c.developer ? h("span", { text: c.developer }) : null,
+              c.year ? h("span", { text: String(c.year) }) : null,
+              c.score ? h("span", { text: `★${Number(c.score).toFixed(1)}` }) : null,
+              isPicked ? h("span.bm7-gsrc-picked-tag", { text: `✓ ${pickedLabel}` }) : null
+            ]),
+            h("div.bm7-gsrc-actions", [
+              button(isPicked && state.pickedKind === "full" ? "已套用词条" : "套用词条", {
+                variant: "primary",
+                onClick: async () => {
+                  state.pickedIndex = idx;
+                  state.pickedKind = "full";
+                  state.folded = all.length > 1 && opts.foldOnPick !== false;
+                  paintResults();
+                  if (opts.onPickFull) await opts.onPickFull(c);
+                }
+              }),
+              button(isPicked && state.pickedKind === "cover" ? "已选用封面" : "只用封面", {
+                onClick: async () => {
+                  state.pickedIndex = idx;
+                  state.pickedKind = "cover";
+                  state.folded = all.length > 1 && opts.foldOnPick !== false;
+                  paintResults();
+                  if (opts.onPickCover) await opts.onPickCover(c);
+                }
+              })
+            ])
+          ])
+        ])
+      );
+    });
+
+    if (isFolded) {
+      const restCount = all.length - 1;
+      const handleBtn = h(
+        "button.bm7-gsrc-stack-handle",
+        {
+          attr: { type: "button" },
+          on: {
+            click: () => {
+              state.folded = false;
+              paintResults();
+            }
+          }
+        },
+        [
+          h("span", { text: `其余 ${restCount} 条候选已收纳` }),
+          h("span.bm7-gsrc-stack-handle-action", { text: "展开重选 ▾" })
+        ]
+      );
+      foldControlHost.appendChild(handleBtn);
+    }
+  };
+
   const run = async () => {
     const q = input.value.trim();
     if (!q) return;
     const seq = ++state.seq;
+    state.allItems = [];
+    state.pickedIndex = -1;
+    state.pickedKind = "";
+    state.folded = false;
     clear(results);
+    clear(foldControlHost);
     clear(statusLine);
     const targets = state.source === "all" ? ["bangumi", "vndb", "steam", "ymgal"] : [state.source];
     targets.forEach((s) => statusLine.appendChild(h("span.bm7-gsrc-pill.is-loading", { dataset: { src: s }, text: `${SOURCE_NAME[s]} 搜索中` })));
@@ -493,28 +610,8 @@ function renderGameSourceSearch(host, opts) {
     const norm = (s) => String(s || "").toLowerCase().replace(/[\s~～\-—:：!！*＊・·]/g, "");
     const nq = norm(q);
     all.sort((a, b) => (norm(b.title) === nq) - (norm(a.title) === nq));
-    if (!all.length) { results.appendChild(emptyState("没有找到匹配的词条，换个写法或切换数据源试试。")); return; }
-    all.forEach((c) => {
-      results.appendChild(
-        h("article.bm7-gsrc-card", [
-          h("div.bm7-gsrc-cover", [coverEl(c.cover, c.title)]),
-          h("div.bm7-gsrc-info", [
-            h("div.bm7-gsrc-title", { text: c.title, title: c.title }),
-            c.subtitle ? h("div.bm7-gsrc-sub", { text: c.subtitle }) : null,
-            h("div.bm7-gsrc-meta", [
-              h("span.bm7-gsrc-src", { dataset: { src: c.source }, text: SOURCE_NAME[c.source] || c.source }),
-              c.developer ? h("span", { text: c.developer }) : null,
-              c.year ? h("span", { text: String(c.year) }) : null,
-              c.score ? h("span", { text: `★${Number(c.score).toFixed(1)}` }) : null
-            ]),
-            h("div.bm7-gsrc-actions", [
-              button("套用词条", { variant: "primary", onClick: () => opts.onPickFull && opts.onPickFull(c) }),
-              button("只用封面", { onClick: () => opts.onPickCover && opts.onPickCover(c) })
-            ])
-          ])
-        ])
-      );
-    });
+    state.allItems = all;
+    paintResults();
   };
   input.addEventListener("keydown", (e) => e.key === "Enter" && run());
   host.appendChild(
@@ -522,7 +619,8 @@ function renderGameSourceSearch(host, opts) {
       h("div.bm7-gsrc-bar", [input, button("搜索", { icon: "eye", variant: "primary", onClick: run })]),
       segmented(SOURCES, state.source, (v) => { state.source = v; if (input.value.trim()) run(); }, "is-small is-scroll"),
       statusLine,
-      results
+      results,
+      foldControlHost
     ])
   );
   if (state.q) run();
@@ -577,7 +675,7 @@ function renderGameStage(host, ctx) {
     const plate = h("div.bm7-hero-plate.bm7-ghero-plate", [gameCover(current, ctx, ui.defaultAspect).frame]);
     plate.style.setProperty("--ar", String(aspectValue(current.coverAspect, aspectValue(ui.defaultAspect))));
     plate.addEventListener("click", () => openStats(current));
-    const canLaunch = desktop && ctx.actions.canLaunch && ctx.actions.canLaunch(current);
+    const canLaunch = Boolean(ctx.actions.canLaunch && ctx.actions.canLaunch(current));
     hero.appendChild(
       h("div.bm7-hero-main", [
         plate,
@@ -592,7 +690,7 @@ function renderGameStage(host, ctx) {
             fig("游玩次数", st.count ? `${st.count} 次` : "—")
           ]),
           h("div.bm7-hero-actions", [
-            canLaunch ? button(current.launchMode === "emulator" ? "用模拟器启动" : "启动游戏", { icon: "play", variant: "primary", onClick: () => ctx.actions.launch(current) }) : null,
+            canLaunch ? button(desktop && current.launchMode === "emulator" ? "用模拟器启动" : "启动游戏", { icon: "play", variant: "primary", onClick: () => ctx.actions.launch(current) }) : null,
             timerButton(current, ctx, repaintAll),
             button("详情与统计", { icon: "clock", variant: canLaunch ? "" : "primary", onClick: () => openStats(current) }),
             iconButton("pen", "手札", () => ctx.actions.openJournal && ctx.actions.openJournal(current))
@@ -636,7 +734,7 @@ function renderGameStage(host, ctx) {
       };
     },
     actions: (g) => [
-      { label: "启动", icon: "play", variant: "primary", hidden: !(desktop && ctx.actions.canLaunch && ctx.actions.canLaunch(g)), onClick: () => ctx.actions.launch(g) },
+      { label: "启动", icon: "play", variant: "primary", hidden: !(ctx.actions.canLaunch && ctx.actions.canLaunch(g)), onClick: () => ctx.actions.launch(g) },
       { label: "详情", icon: "clock", onClick: () => openStats(g) }
     ],
     emptyText: "这个范围里没有游戏，换个范围试试。"

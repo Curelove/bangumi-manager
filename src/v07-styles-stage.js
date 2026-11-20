@@ -51,8 +51,8 @@ module.exports = String.raw`
 .theme-dark .bm7-hero-backdrop,.bm7-root[data-bm7-theme="cinema"] .bm7-hero-backdrop{opacity:.42;}
 .bm7-hero-shade{position:absolute;inset:0;z-index:-1;border-radius:var(--bm7-hero-r);
   background:
-    radial-gradient(90% 120% at 0% 100%,color-mix(in srgb,var(--bm7-ambient) 22%,transparent) 0,transparent 60%),
-    linear-gradient(100deg,color-mix(in srgb,var(--bm7-surface) 82%,transparent) 0%,color-mix(in srgb,var(--bm7-surface) 56%,transparent) 50%,color-mix(in srgb,var(--bm7-surface) 30%,transparent) 100%);}
+    radial-gradient(90% 120% at 0% 100%,color-mix(in srgb,var(--bm7-ambient) 20%,transparent) 0,transparent 60%),
+    linear-gradient(100deg,color-mix(in srgb,var(--bm7-surface) 88%,transparent) 0%,color-mix(in srgb,var(--bm7-surface) 74%,transparent) 52%,color-mix(in srgb,var(--bm7-surface) 58%,transparent) 100%);}
 .bm7-hero.is-entering .bm7-hero-main{animation:bm7-hero-in .46s cubic-bezier(.2,.8,.2,1);}
 .bm7-hero.is-entering .bm7-hero-backdrop{animation:bm7-fade-in .65s ease;}
 .bm7-hero-main{position:relative;z-index:3;display:grid;grid-template-columns:auto minmax(0,1fr);gap:26px;padding:0 24px 22px 24px;min-width:0;align-items:start;}
@@ -149,12 +149,19 @@ module.exports = String.raw`
   .bm7-ep{min-width:23px;height:22px;font-size:12px;}
 }
 @container bm7stage (max-width: 480px){
-  .bm7-hero-main{grid-template-columns:minmax(0,1fr);gap:12px;}
-  .bm7-hero-plate{position:relative;top:auto;right:auto;width:108px;margin-top:-14px;}
-  .bm7-hero-info{padding-top:2px;padding-right:0;}
-  .bm7-hero-actions{display:flex;flex-wrap:wrap;}
-  .bm7-hero-actions > .bm7-btn.is-primary{flex:1 1 100%;}
-  .bm7-hero-actions > .bm7-btn:not(.is-icon):not(.is-primary){flex:1 1 auto;}
+  .bm7-hero-main{grid-template-columns:92px minmax(0,1fr);gap:10px 12px;padding:0 12px 12px;}
+  .bm7-hero-plate{position:relative;top:auto;right:auto;width:92px;margin-top:-12px;padding:4px;}
+  .bm7-hero-score{right:4px;bottom:6px;min-width:30px;height:20px;padding:0 5px;font-size:11px;border-radius:5px;}
+  .bm7-hero-myscore{left:4px;top:6px;height:20px;padding:0 5px;font-size:11px;border-radius:5px;}
+  .bm7-hero-info{padding-top:10px;padding-right:0;gap:7px;}
+  .bm7-hero-tabs{max-width:100%;overflow-x:auto;scrollbar-width:none;gap:2px;padding:2px;}
+  .bm7-hero-tabs::-webkit-scrollbar{display:none;}
+  .bm7-hero-tabs .bm7-seg-btn{padding:0 7px !important;font-size:11.5px !important;gap:3px !important;height:28px !important;}
+  .bm7-hero-title{font-size:17px;}
+  .bm7-hero-actions{display:flex;flex-wrap:wrap;gap:6px;}
+  .bm7-hero-actions .bm7-btn{height:34px;padding:0 10px;font-size:12px;}
+  .bm7-hero-tools .bm7-btn.is-icon{width:34px;height:34px;}
+  .bm7-hero-rail{padding:0 12px 12px;}
 }
 
 /* ====================== 洛琪希手记 · 巫师帽与羽毛笔手写批注卡 ====================== */
@@ -355,6 +362,26 @@ module.exports = String.raw`
   .bm7-live-thumb{display:none;}
   .bm7-live-room{grid-template-columns:40px minmax(0,1fr) auto;padding:10px 6px;}
 }
+.bm7-live-mode-box{display:flex;flex-direction:column;gap:7px;padding:10px 0 4px;border-top:1px dashed var(--bm7-line);}
+.bm7-live-mode-seg{display:flex;flex-wrap:wrap;}
+.bm7-live-mode-seg .bm7-seg{width:100%;display:flex;}
+.bm7-live-mode-seg .bm7-seg-item{flex:1;justify-content:center;padding:5px 6px !important;font-size:12px !important;}
+.bm7-live-sheet-overlay{position:fixed;inset:0;z-index:10060;background:rgba(12,14,20,0.44);display:flex;align-items:flex-end;justify-content:center;padding:12px 12px calc(14px + env(safe-area-inset-bottom, 0px));opacity:0;transition:opacity .16s ease;}
+.bm7-live-sheet-overlay.is-open{opacity:1;}
+.bm7-live-sheet{width:min(440px,100%);display:flex;flex-direction:column;gap:8px;padding:10px 14px 14px;border-radius:18px;border:1px solid var(--background-modifier-border);background:var(--background-primary);box-shadow:0 18px 46px rgba(0,0,0,0.28);transform:translateY(22px);transition:transform .2s cubic-bezier(0.22,1,0.36,1);}
+.bm7-live-sheet-overlay.is-open .bm7-live-sheet{transform:translateY(0);}
+.bm7-live-sheet-grab{width:36px;height:4px;border-radius:999px;background:var(--background-modifier-border);margin:0 auto 2px;}
+.bm7-live-sheet-head{display:flex;flex-direction:column;gap:2px;padding:2px 4px 6px;border-bottom:1px solid var(--background-modifier-border);}
+.bm7-live-sheet-title{font-size:15px;font-weight:750;color:var(--text-normal);line-height:1.35;}
+.bm7-live-sheet-sub{font-size:12px;color:var(--text-muted);line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bm7-live-sheet-actions{display:flex;flex-direction:column;gap:7px;}
+.bm7-live-sheet-btn{width:100% !important;height:auto !important;min-height:46px !important;display:flex !important;flex-direction:column !important;align-items:flex-start !important;justify-content:center !important;gap:2px;padding:10px 14px !important;border-radius:12px !important;border:1px solid var(--background-modifier-border) !important;background:var(--background-secondary) !important;color:var(--text-normal) !important;box-shadow:none !important;outline:none !important;text-align:left !important;cursor:pointer;}
+.bm7-live-sheet-btn:focus,.bm7-live-sheet-btn:focus-visible{outline:none !important;box-shadow:none !important;}
+.bm7-live-sheet-btn.is-highlight{border-color:color-mix(in srgb,var(--interactive-accent) 46%,var(--background-modifier-border)) !important;background:color-mix(in srgb,var(--interactive-accent) 10%,var(--background-secondary)) !important;}
+.bm7-live-sheet-btn-main{font-size:14px;font-weight:700;color:var(--text-normal);line-height:1.3;}
+.bm7-live-sheet-btn.is-highlight .bm7-live-sheet-btn-main{color:var(--interactive-accent);}
+.bm7-live-sheet-btn-sub{font-size:12px;color:var(--text-muted);line-height:1.35;}
+.bm7-live-sheet-cancel{width:100% !important;height:42px !important;margin-top:2px;border-radius:12px !important;border:1px solid var(--background-modifier-border) !important;background:transparent !important;color:var(--text-muted) !important;font-size:14px !important;font-weight:600 !important;box-shadow:none !important;cursor:pointer;}
 
 /* ====================== 洛琪希探头（仅桌面三栏侧边栏顶置态展示，EDGE_Y=220 严丝合缝贴合上沿） ====================== */
 .bm7-area-side.has-roxy{padding-top:138px;}

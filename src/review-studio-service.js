@@ -5,6 +5,7 @@ const v07Core = require("./v07-core.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
+  isMobileEnv,
   crossPlatformPath: path,
   crossPlatformFs: fs
 } = require("./platform-env.js");
@@ -826,8 +827,10 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
 
     async onOpen() {
       this.modalEl.addClass("curator-review-studio-modal-shell");
-      this.modalEl.style.width = "min(920px, 94vw)";
-      this.modalEl.style.maxWidth = "94vw";
+      if (!isMobileEnv()) {
+        this.modalEl.style.width = "min(920px, 94vw)";
+        this.modalEl.style.maxWidth = "94vw";
+      }
       this.plugin._activeReviewStudioModal = this;
 
       await this.reloadReviewsFromNote();

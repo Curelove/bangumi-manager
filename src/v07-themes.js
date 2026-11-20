@@ -16,6 +16,7 @@ const { h, clear, svgEl, icon, segmented, toggleRow, applyAmbient } = require(".
 const { roxyLineArtMarkup } = require("./v07-roxy-art.js");
 const { createRoxyMiniPreviewEl } = require("./v08-roxy-live-rig.js");
 const { attachCoverGlowMotion } = require("./v08-motion-and-lens.js");
+const { isMobileEnv } = require("./platform-env.js");
 
 const DEFAULT_THEME_MOTION = {
   follow: false,
@@ -65,7 +66,9 @@ const THEMES = [
     id: "glow",
     name: "封面柔光",
     desc: "焦点封面化作多层呼吸柔光，磨砂面板随光标轻移",
+    mobileDesc: "焦点封面化作多层呼吸柔光，配柔和磨砂卡片质感",
     motionHint: "开启后，焦点封面柔光随光标流动，磨砂边框折射高光，面板内按左右方向清爽滑移切换",
+    mobileMotionHint: "开启后，焦点封面泛起多层呼吸柔光，面板内按左右方向清爽滑移切换",
     defaultMotion: true,
     swatch: ["#e9dfe6", "#b9a3c4", "#5d6fb3"]
   },
@@ -81,7 +84,9 @@ const THEMES = [
     id: "roxy",
     name: "洛琪希手记",
     desc: "羊皮纸与钢笔淡彩，附洛琪希探头交互与手写批注",
+    mobileDesc: "羊皮纸星轨底纹与钢笔淡彩，附洛琪希手写批注",
     motionHint: "开启后，启用阅读器平实书页滑阅、批注水系魔导褪去、星轨微光及洛琪希呼吸/视线交互",
+    mobileMotionHint: "开启后，启用平实书页滑阅、批注水系微光褪去与星轨淡彩动效",
     defaultMotion: true,
     swatch: ["#f6f0e3", "#d9c7a6", "#3f56b0"]
   },
@@ -356,6 +361,7 @@ function celFrameMarksEl() {
  */
 function renderAppearancePicker(host, opts = {}) {
   clear(host);
+  const mobile = isMobileEnv();
   let a = normalizeAppearance(opts.appearance);
   const wrap = h("div.bm7-appearance", { cls: opts.compact ? "is-compact" : "" });
   const grid = h("div.bm7-theme-grid", { attr: { role: "radiogroup", "aria-label": "外观主题" } });
@@ -380,8 +386,10 @@ function renderAppearancePicker(host, opts = {}) {
   ]);
 
   const artRow = toggleRow({
-    label: "显示洛琪希插画与批注",
-    hint: "在「洛琪希手记」下展示侧栏探头小人与手写批注卡（轻点小人可切换脱帽呆毛与巫师帽）",
+    label: mobile ? "显示洛琪希手写批注" : "显示洛琪希插画与批注",
+    hint: mobile
+      ? "在「洛琪希手记」主题下显示手写批注卡片"
+      : "在「洛琪希手记」下展示侧栏探头小人与手写批注卡（轻点小人可切换脱帽呆毛与巫师帽）",
     checked: a.roxyArt,
     onChange: (v) => commit({ roxyArt: v })
   });
@@ -450,7 +458,7 @@ function renderAppearancePicker(host, opts = {}) {
               h("span.bm7-theme-name-text", { text: t.name }),
               tagText ? h("span.bm7-theme-tag", { cls: lv === "lite" ? "is-lite" : "", text: tagText }) : null
             ]),
-            h("span.bm7-theme-desc", { text: t.desc })
+            h("span.bm7-theme-desc", { text: (mobile && t.mobileDesc) || t.desc })
           ]),
           t.id === a.theme ? h("span.bm7-theme-check", [icon("check", 14)]) : null
         ]
@@ -460,9 +468,14 @@ function renderAppearancePicker(host, opts = {}) {
 
     motionTierLabel.textContent = `当前外观动效强度（${curThemeObj.name}）`;
     if (a.motionLevel === "full") {
-      motionTierHint.textContent = curThemeObj.motionHint || "完整启用纸页转场、画卷伸缩与当前外观环境动效";
+      motionTierHint.textContent =
+        (mobile && curThemeObj.mobileMotionHint) ||
+        curThemeObj.motionHint ||
+        "完整启用纸页转场、画卷伸缩与当前外观环境动效";
     } else if (a.motionLevel === "lite") {
-      motionTierHint.textContent = "保留顺滑的面板切换与收拢过渡，暂停持续背景动画、光标追光与滤镜以节省显存";
+      motionTierHint.textContent = mobile
+        ? "保留顺滑的面板切换与收拢过渡，暂停持续背景动画与滤镜以省电减耗"
+        : "保留顺滑的面板切换与收拢过渡，暂停持续背景动画、光标追光与滤镜以节省显存";
     } else {
       motionTierHint.textContent = "已停用界面转场与背景装饰动画，保持即时切换";
     }
@@ -524,7 +537,7 @@ function renderAppearancePicker(host, opts = {}) {
     }
 
     gazeInput.checked = Boolean(a.roxyGaze);
-    gazeRow.style.display = a.theme === "roxy" ? "" : "none";
+    gazeRow.style.display = !mobile && a.theme === "roxy" ? "" : "none";
     const gazeDisabled = a.motionLevel !== "full" || !a.roxyArt;
     gazeInput.disabled = gazeDisabled;
     gazeRow.classList.toggle("is-disabled", gazeDisabled);

@@ -78,7 +78,7 @@ const CSS_ROOM = String.raw`
 .bmgs-lamp{position:absolute;top:0;width:14px;height:11px;transform:translateX(-50%);border-radius:1px 1px 6px 6px;background:linear-gradient(180deg,#3b3733,#15130f);}
 .bmgs-lamp::after{content:"";position:absolute;left:3px;right:3px;bottom:-2px;height:3px;border-radius:50%;background:#ffe6b0;box-shadow:0 0 10px 3px rgba(255,220,150,.75);}
 .bmgs-hangs{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;justify-content:center;align-items:stretch;gap:var(--row-gap,36px);padding:10px 4% 22px;transform:translate3d(calc(var(--px,0)*-7px),calc(var(--py,0)*-4px),0);transition:transform .5s ease-out;}
-.bmgs-root[data-caption="always"] .bmgs-hangs{padding-bottom:62px;}
+.bmgs-root[data-caption="always"] .bmgs-hangs,.bmgs-root[data-caption-effective="always"] .bmgs-hangs{padding-bottom:68px;}
 .bmgs-row{display:flex;justify-content:center;align-items:center;gap:var(--col-gap,38px);min-width:0;}
 .bmgs-root[data-dir="next"] .bmgs-hangs{animation:bmgs-walk-next .62s cubic-bezier(.2,.8,.2,1);}
 .bmgs-root[data-dir="prev"] .bmgs-hangs{animation:bmgs-walk-prev .62s cubic-bezier(.2,.8,.2,1);}
@@ -170,8 +170,8 @@ const CSS_BOOK = String.raw`
 .bmgs-root .bmgs-tab:hover{width:calc(38px + var(--step,0)*4px);filter:brightness(1.05);}
 .bmgs-root .bmgs-tab[aria-pressed="true"]{width:50px;color:#2c241a;font-weight:600;z-index:2;}
 .bmgs-tab-txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-height:104px;}
-.bmgs-turn{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:12px;color:#efe6d4;}
-.bmgs-turn .bmgs-placard-txt{color:#efe6d4;}
+.bmgs-turn{display:flex;align-items:center;justify-content:center;gap:12px;width:fit-content;margin:12px auto 0;padding:5px 12px;border-radius:999px;background:rgba(32,23,16,.78);color:#f8f0e2;box-shadow:0 4px 12px rgba(0,0,0,.22);}
+.bmgs-turn .bmgs-placard-txt{color:#f8f0e2;font-weight:600;}
 .bmgs-root .bmgs-corner{position:absolute;bottom:0;width:13%;height:16%;z-index:3;}
 .bmgs-root .bmgs-corner.is-l{left:0;}
 .bmgs-root .bmgs-corner.is-r{right:0;}
@@ -186,7 +186,7 @@ const CSS_BOOK = String.raw`
 const CSS_WALL = String.raw`
 .bmgs-wallbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;min-width:0;}
 .bmgs-chips{display:flex;gap:4px 16px;flex-wrap:wrap;min-width:0;flex:1 1 300px;}
-.bmgs-root .bmgs-chip{position:relative;padding:3px 0 !important;font-size:13px;color:var(--bm7-ink-3,var(--text-faint));max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap !important;transition:color .2s;}
+.bmgs-root .bmgs-chip{position:relative;display:inline-block !important;text-align:left !important;padding:3px 0 !important;font-size:13px;color:var(--bm7-ink-3,var(--text-faint));max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap !important;transition:color .2s;flex:0 0 auto;}
 .bmgs-root .bmgs-chip:hover{color:var(--bm7-ink,var(--text-normal));}
 .bmgs-root .bmgs-chip[aria-pressed="true"]{color:var(--bm7-ink,var(--text-normal));font-weight:600;}
 .bmgs-root .bmgs-chip[aria-pressed="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;border-radius:1px;background:var(--bm7-gold,#c39a52);}
@@ -210,7 +210,7 @@ const CSS_WALL = String.raw`
 .bmgs-tile:hover .bmgs-unhang{opacity:1;transform:scale(1);}
 @media (hover:none),(pointer:coarse){
   .bmgs-root .bmgs-stroll{color:var(--bm7-ink-3,rgba(120,110,95,.65));}
-  .bmgs-root .bmgs-unhang{opacity:.9;transform:scale(.92);}
+  .bmgs-root .bmgs-unhang:not(.is-armed){opacity:0;pointer-events:none;}
   .bmgs-root[data-caption="hover"] .bmgs-cartel{opacity:1;transform:translate(-50%,0);}
   .bmgs-root[data-caption="hover"] .bmgs-plate-cap{opacity:1;}
   .bmgs-root[data-caption="hover"] .bmgs-tile-cap{opacity:1;}
@@ -223,31 +223,41 @@ const CSS_WALL = String.raw`
 .bmgs-root .bmgs-act{display:flex;align-items:center;gap:6px;padding:8px 16px !important;border-radius:999px;font-size:13px;color:var(--bm7-ink,var(--text-normal));box-shadow:inset 0 0 0 1px var(--bm7-line,rgba(0,0,0,.12)) !important;}
 .bmgs-root .bmgs-act.is-main{color:#3b2a12;background:linear-gradient(180deg,#f3dfae,#d4ae64) !important;box-shadow:0 3px 10px -4px rgba(120,80,20,.6) !important;}
 @container bmgssanc (max-width:660px){
-  .bmgs-room{--sw:18px;--ceil:8%;--floor:12%;}
-  .bmgs-root .bmgs-stroll{width:16%;}
-  .bmgs-desk{padding:52px 14px 18px;}
+  .bmgs-room{--sw:16px;--ceil:7%;--floor:11%;}
+  .bmgs-root .bmgs-stroll{width:15%;}
+  .bmgs-desk{padding:52px 12px 16px;}
   .bmgs-book{max-width:100%;}
   .bmgs-spread{grid-template-columns:1fr;aspect-ratio:auto;}
-  .bmgs-page{padding:28px 18px 30px;min-height:240px;gap:20px;}
+  .bmgs-page{padding:26px 14px 28px;min-height:220px;gap:18px;}
   .bmgs-page.is-l{border-radius:4px 4px 0 0;border-bottom:1px solid rgba(60,48,32,.14);box-shadow:inset 0 -10px 14px -10px rgba(0,0,0,.16);}
   .bmgs-page.is-r{border-radius:0 0 4px 4px;box-shadow:inset 0 10px 14px -10px rgba(0,0,0,.16);}
+  .bmgs-plate-row{flex:0 0 auto;width:100%;}
+  .bmgs-plate{width:100%;max-width:100% !important;}
   .bmgs-gutter{display:none;}
-  .bmgs-tabs{left:3%;right:3%;top:auto;bottom:calc(100% + 6px);width:auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;align-items:flex-end;height:42px;padding:0 2px;}
-  .bmgs-root .bmgs-tab{writing-mode:horizontal-tb;width:auto !important;min-height:0;height:calc(28px + var(--step,0)*2px) !important;max-width:126px;margin:0;border-radius:6px 6px 0 0;padding:4px 10px !important;background:linear-gradient(180deg,var(--tab-c) 80%,color-mix(in srgb,var(--tab-c) 72%,#000)) !important;}
+  .bmgs-tabs{left:2%;right:2%;top:auto;bottom:calc(100% + 6px);width:auto;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;align-items:flex-end;height:42px;padding:0 4px;}
+  .bmgs-root .bmgs-tab{writing-mode:horizontal-tb;width:auto !important;flex:0 0 auto;min-height:0;height:calc(28px + var(--step,0)*2px) !important;max-width:146px;margin:0;border-radius:6px 6px 0 0;padding:4px 10px !important;background:linear-gradient(180deg,var(--tab-c) 80%,color-mix(in srgb,var(--tab-c) 72%,#000)) !important;}
   .bmgs-root .bmgs-tab[aria-pressed="true"]{height:36px !important;}
   .bmgs-density input[type=range]{width:80px;}
+  .bmgs-wallbar{gap:8px 12px;}
+  .bmgs-chips{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;gap:14px;padding-bottom:4px;}
+  .bmgs-chips::-webkit-scrollbar{display:none;}
 }
-.bmgs-root.is-narrow .bmgs-room{--sw:18px;--ceil:8%;--floor:12%;}
-.bmgs-root.is-narrow .bmgs-stroll{width:16%;}
-.bmgs-root.is-narrow .bmgs-desk{padding:52px 14px 18px;}
+.bmgs-root.is-narrow .bmgs-wallbar{gap:8px 12px;}
+.bmgs-root.is-narrow .bmgs-chips{flex:1 1 100%;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;gap:14px;padding-bottom:4px;}
+.bmgs-root.is-narrow .bmgs-chips::-webkit-scrollbar{display:none;}
+.bmgs-root.is-narrow .bmgs-room{--sw:16px;--ceil:7%;--floor:11%;}
+.bmgs-root.is-narrow .bmgs-stroll{width:15%;}
+.bmgs-root.is-narrow .bmgs-desk{padding:52px 12px 16px;}
 .bmgs-root.is-narrow .bmgs-book{max-width:100%;}
 .bmgs-root.is-narrow .bmgs-spread{grid-template-columns:1fr;aspect-ratio:auto;}
-.bmgs-root.is-narrow .bmgs-page{padding:28px 18px 30px;min-height:240px;gap:20px;}
+.bmgs-root.is-narrow .bmgs-page{padding:26px 14px 28px;min-height:220px;gap:18px;}
 .bmgs-root.is-narrow .bmgs-page.is-l{border-radius:4px 4px 0 0;border-bottom:1px solid rgba(60,48,32,.14);box-shadow:inset 0 -10px 14px -10px rgba(0,0,0,.16);}
 .bmgs-root.is-narrow .bmgs-page.is-r{border-radius:0 0 4px 4px;box-shadow:inset 0 10px 14px -10px rgba(0,0,0,.16);}
+.bmgs-root.is-narrow .bmgs-plate-row{flex:0 0 auto;width:100%;}
+.bmgs-root.is-narrow .bmgs-plate{width:100%;max-width:100% !important;}
 .bmgs-root.is-narrow .bmgs-gutter{display:none;}
-.bmgs-root.is-narrow .bmgs-tabs{left:3%;right:3%;top:auto;bottom:calc(100% + 6px);width:auto;flex-direction:row;overflow-x:auto;overflow-y:hidden;align-items:flex-end;height:42px;padding:0 2px;}
-.bmgs-root.is-narrow .bmgs-tab{writing-mode:horizontal-tb;width:auto !important;min-height:0;height:calc(28px + var(--step,0)*2px) !important;max-width:126px;margin:0;border-radius:6px 6px 0 0;padding:4px 10px !important;background:linear-gradient(180deg,var(--tab-c) 80%,color-mix(in srgb,var(--tab-c) 72%,#000)) !important;}
+.bmgs-root.is-narrow .bmgs-tabs{left:2%;right:2%;top:auto;bottom:calc(100% + 6px);width:auto;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;align-items:flex-end;height:42px;padding:0 4px;}
+.bmgs-root.is-narrow .bmgs-tab{writing-mode:horizontal-tb;width:auto !important;flex:0 0 auto;min-height:0;height:calc(28px + var(--step,0)*2px) !important;max-width:146px;margin:0;border-radius:6px 6px 0 0;padding:4px 10px !important;background:linear-gradient(180deg,var(--tab-c) 80%,color-mix(in srgb,var(--tab-c) 72%,#000)) !important;}
 .bmgs-root.is-narrow .bmgs-tab[aria-pressed="true"]{height:36px !important;}
 .bmgs-root.is-narrow .bmgs-density input[type=range]{width:80px;}
 `;
@@ -493,7 +503,16 @@ function renderSalon(stage, env) {
   const placard = mk('div', 'bmgs-placard');
   stage.appendChild(placard);
 
-  const plan = planWalls(list, wall.clientWidth || hostW * 0.9, wall.clientHeight || 400, state.captionMode === 'always');
+  const coarseTouch = Boolean(
+    window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches
+  );
+  const captionAlways = state.captionMode === 'always' || coarseTouch;
+  const plan = planWalls(
+    list,
+    wall.clientWidth || hostW * 0.9,
+    wall.clientHeight || 400,
+    captionAlways
+  );
   const total = plan.walls.length;
   if (env.anchorId) {
     const at = plan.walls.findIndex((w) => w.some((r) => r.some((c) => c.ill.id === env.anchorId)));
@@ -654,7 +673,7 @@ function renderBook(stage, env) {
   }
   const stageW = stage.clientWidth || 800;
   const narrow = stageW <= 660;
-  const pages = planPages(list, stageW <= 430 ? 1 : 2);
+  const pages = planPages(list, stageW <= 540 ? 1 : 2);
   const spreads = Math.max(1, Math.ceil(pages.length / 2));
   state.bookPage = clamp(state.bookPage | 0, 0, spreads - 1);
   const folio = env.folios.find((f) => f.key === state.activeFolio);
@@ -672,8 +691,8 @@ function renderBook(stage, env) {
     const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
     const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
     const pw = page.clientWidth || 360;
-    const innerW = Math.max(110, pw - padX - 8);
-    const innerH = Math.max(150, narrow ? Math.min(340, innerW * 1.18) : ((page.clientHeight || pw * 1.32) - padY - 14));
+    const innerW = Math.max(140, pw - padX - 4);
+    const innerH = Math.max(180, (page.clientHeight || pw * 1.32) - padY - 14);
     const capH = state.captionMode === 'always' ? 30 : 12;
     const rowGapPx = Math.round(innerH * 0.055);
     const rowH = (innerH - (rows.length - 1) * rowGapPx) / rows.length - capH;
@@ -681,15 +700,19 @@ function renderBook(stage, env) {
       const row = mk('div', 'bmgs-plate-row');
       const sumA = cells.reduce((s, c) => s + aspectOf(c.ill), 0);
       const gap = Math.round(innerW * 0.06) * (cells.length - 1);
-      const h = Math.max(60, Math.min(rowH, (innerW - gap) / sumA));
+      const targetW = Math.max(120, innerW - gap);
+      const h = narrow
+        ? clamp(Math.round(targetW / sumA), 140, Math.round(innerW * 1.18))
+        : Math.max(60, Math.min(rowH, targetW / sumA));
       cells.forEach((c) => {
-        const wPx = Math.round(h * aspectOf(c.ill));
+        const wPx = Math.min(innerW, Math.round(h * aspectOf(c.ill)));
+        const hPx = narrow ? Math.round(wPx / aspectOf(c.ill)) : Math.round(h);
         const plate = mk('div', 'bmgs-plate');
-        plate.style.maxWidth = Math.max(96, wPx + 8) + 'px';
+        plate.style.maxWidth = narrow ? '100%' : Math.max(96, wPx + 8) + 'px';
         plate.dataset.mount = hash(c.ill.id) % 3 === 0 ? 'tape' : 'corner';
         const pic = mk('div', 'bmgs-plate-pic');
         pic.style.width = wPx + 'px';
-        pic.style.height = Math.round(h) + 'px';
+        pic.style.height = hPx + 'px';
         loadImg(pic, c.ill, ctx, env.onAspectShift);
         plate.appendChild(pic);
         plate.appendChild(mk('div', 'bmgs-plate-cap', c.ill.title || subLine(c.ill) || '无题'));
@@ -872,6 +895,11 @@ function renderGallerySanctuary(hostEl, ctx) {
   function draw(quiet, animHint) {
     root.dataset.mode = state.viewMode;
     root.dataset.caption = state.captionMode;
+    const coarseTouchNow = Boolean(
+      window.matchMedia && window.matchMedia('(hover: none), (pointer: coarse)').matches
+    );
+    root.dataset.captionEffective =
+      state.captionMode === 'always' || coarseTouchNow ? 'always' : 'hover';
     const curW = root.clientWidth || hostEl.clientWidth || 800;
     root.classList.toggle('is-narrow', curW <= 660);
     env.list = source.filter((ill) => match(ill, state.activeFolio));

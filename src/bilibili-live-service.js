@@ -1,5 +1,12 @@
 const { Notice, requestUrl } = require("obsidian");
-const { isMobileEnv, isDesktopNodeAvailable, tryRequireNode } = require("./platform-env.js");
+const {
+  isMobileEnv,
+  isDesktopNodeAvailable,
+  isTabletEnv,
+  isIosEnv,
+  openExternalSchemeWithFallback,
+  tryRequireNode
+} = require("./platform-env.js");
 
 const DEFAULT_BILIBILI_LIVE_ROOMS = [
   {
@@ -40,6 +47,133 @@ function getLiveRoomWebUrl(roomId) {
   return clean ? `https://live.bilibili.com/${clean}` : "https://live.bilibili.com/";
 }
 
+function getLiveRoomAppSchemes(roomId, preferHd = false) {
+  const clean = parseRoomIdInput(roomId);
+  if (!clean) return [];
+  const std = `bilibili://live/${clean}`;
+  const hd = `bilibilihd://live/${clean}`;
+  if (isIosEnv()) {
+    return [std];
+  }
+  return preferHd ? [hd, std] : [std];
+}
+
+function normalizeMobileLiveOpenMode(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  if (v === "ask" || v === "app_hd" || v === "web" || v === "auto") return v;
+  return "auto";
+}
+
+let _activeLiveFallbackNotice = null;
+
+function dismissActiveLiveFallbackNotice() {
+  if (_activeLiveFallbackNotice) {
+    try {
+      _activeLiveFallbackNotice.hide();
+    } catch (_) {}
+    _activeLiveFallbackNotice = null;
+  }
+}
+
+function showInteractiveLiveFallbackNotice({ cleanRoomId, webUrl, preferHd, hasStandardAppFallback }) {
+  dismissActiveLiveFallbackNotice();
+  if (typeof document === "undefined") {
+    const fallbackNotice = new Notice("未能自动跳转客户端，可在直播区设置切换网页版打开", 5200);
+    _activeLiveFallbackNotice = fallbackNotice;
+    return () => dismissActiveLiveFallbackNotice();
+  }
+  const frag = document.createDocumentFragment();
+  const wrap = document.createElement("div");
+  wrap.className = "bm7-live-fallback-notice";
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:8px;max-width:300px;";
+
+  const textEl = document.createElement("div");
+  textEl.style.cssText = "font-size:13px;line-height:1.45;";
+  textEl.textContent = preferHd
+    ? "正在等待系统打开哔哩哔哩 HD；若未安装或已取消跳转，可手动切换："
+    : "正在等待系统打开哔哩哔哩；若未安装或已取消跳转，可手动改用网页版：";
+  wrap.appendChild(textEl);
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;flex-wrap:wrap;gap:7px;align-items:center;";
+
+  let noticeRef = null;
+  const closeThis = () => {
+    if (noticeRef) {
+      try {
+        noticeRef.hide();
+      } catch (_) {}
+      if (_activeLiveFallbackNotice === noticeRef) {
+        _activeLiveFallbackNotice = null;
+      }
+      noticeRef = null;
+    }
+  };
+
+  if (hasStandardAppFallback && cleanRoomId) {
+    const stdBtn = document.createElement("button");
+    stdBtn.type = "button";
+    stdBtn.textContent = "改用普通 B 站";
+    stdBtn.style.cssText =
+      "padding:5px 11px;min-height:30px;border-radius:999px;font-size:12px;font-weight:600;line-height:1.2;" +
+      "border:1px solid var(--background-modifier-border);background:var(--background-secondary);color:var(--text-normal);cursor:pointer;box-shadow:none;";
+    stdBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeThis();
+      openLiveRoomByTarget(cleanRoomId, "app", webUrl);
+    });
+    actions.appendChild(stdBtn);
+  }
+
+  const webBtn = document.createElement("button");
+  webBtn.type = "button";
+  webBtn.textContent = "用网页版打开";
+  webBtn.style.cssText =
+    "padding:5px 12px;min-height:30px;border-radius:999px;font-size:12px;font-weight:600;line-height:1.2;" +
+    "border:none;background:var(--interactive-accent);color:var(--text-on-accent);cursor:pointer;box-shadow:none;";
+  webBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeThis();
+    openExternalUrlSafely(webUrl);
+  });
+  actions.appendChild(webBtn);
+
+  wrap.appendChild(actions);
+  frag.appendChild(wrap);
+  noticeRef = new Notice(frag, 9000);
+  _activeLiveFallbackNotice = noticeRef;
+  return closeThis;
+}
+
+function openLiveRoomByTarget(roomId, target = "auto", webFallbackUrl = "") {
+  const clean = parseRoomIdInput(roomId);
+  const webUrl = webFallbackUrl || getLiveRoomWebUrl(clean);
+  if (!clean) {
+    return openExternalUrlSafely(webUrl);
+  }
+  if (!isMobileEnv() || target === "web") {
+    return openExternalUrlSafely(webUrl);
+  }
+  const preferHd = target === "app_hd" || (target === "auto" && isTabletEnv() && !isIosEnv());
+  const schemes = target === "app" ? getLiveRoomAppSchemes(clean, false) : getLiveRoomAppSchemes(clean, preferHd);
+  openExternalSchemeWithFallback(schemes, webUrl, {
+    stepDelayMs: 1550,
+    autoOpenFallbackWeb: false,
+    autoChainSchemes: false,
+    watchAfterFallbackMs: 22000,
+    onFallback: (_url, helpers) =>
+      showInteractiveLiveFallbackNotice({
+        cleanRoomId: clean,
+        webUrl,
+        preferHd,
+        hasStandardAppFallback: Boolean(preferHd && helpers && helpers.remainingSchemes && helpers.remainingSchemes.length > 0)
+      })
+  });
+  return true;
+}
+
 function openExternalUrlSafely(url) {
   if (!url) return false;
   try {
@@ -72,6 +206,7 @@ function ensureBilibiliLiveSettings(plugin) {
       rooms: [],
       monitorEnabled: true,
       systemNotifyEnabled: !isMobileEnv(),
+      mobileOpenMode: "auto",
       pollIntervalSec: 120,
       notifiedSessionMap: {}
     };
@@ -92,6 +227,7 @@ function ensureBilibiliLiveSettings(plugin) {
   if (typeof s.bilibiliLiveSystemNotifyEnabled !== "boolean") {
     s.bilibiliLiveSystemNotifyEnabled = !isMobileEnv();
   }
+  s.bilibiliLiveMobileOpenMode = normalizeMobileLiveOpenMode(s.bilibiliLiveMobileOpenMode);
   const interval = Number(s.bilibiliLivePollIntervalSec);
   if (!Number.isFinite(interval) || interval < 45) {
     s.bilibiliLivePollIntervalSec = 120;
@@ -103,6 +239,7 @@ function ensureBilibiliLiveSettings(plugin) {
     rooms: s.bilibiliLiveRooms,
     monitorEnabled: s.bilibiliLiveMonitorEnabled,
     systemNotifyEnabled: s.bilibiliLiveSystemNotifyEnabled && !isMobileEnv(),
+    mobileOpenMode: s.bilibiliLiveMobileOpenMode,
     pollIntervalSec: s.bilibiliLivePollIntervalSec,
     notifiedSessionMap: s.bilibiliLiveNotifiedSessions
   };
@@ -552,6 +689,9 @@ module.exports = {
   DEFAULT_BILIBILI_LIVE_ROOMS,
   parseRoomIdInput,
   getLiveRoomWebUrl,
+  getLiveRoomAppSchemes,
+  normalizeMobileLiveOpenMode,
+  openLiveRoomByTarget,
   openExternalUrlSafely,
   formatLiveStatusLabel,
   ensureBilibiliLiveSettings,

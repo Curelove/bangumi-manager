@@ -5,7 +5,7 @@ if (!Modal || !Notice) {
   throw new Error("主插件没有传入 Modal 或 Notice。");
 }
 
-const { tryRequireNode, isDesktopNodeAvailable, joinPosixPath } = require("./platform-env.js");
+const { tryRequireNode, isDesktopNodeAvailable, isMobileEnv, joinPosixPath } = require("./platform-env.js");
 const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 var bangumiApi = require("./bangumi-api.js");
 var noteManager = require("./note-manager.js");
@@ -36,10 +36,12 @@ var SingleAnimeImportModal = class extends Modal {
       contentEl
     } = this;
     contentEl.empty();
-    this.modalEl.style.width = "min(760px, 90vw)";
-    this.modalEl.style.maxWidth = "90vw";
-    this.modalEl.style.maxHeight = "90vh";
-    this.modalEl.style.overflowY = "auto";
+    if (!isMobileEnv()) {
+      this.modalEl.style.width = "min(760px, 90vw)";
+      this.modalEl.style.maxWidth = "90vw";
+      this.modalEl.style.maxHeight = "90vh";
+      this.modalEl.style.overflowY = "auto";
+    }
     contentEl.style.width = "100%";
     contentEl.style.boxSizing = "border-box";
     contentEl.createEl(
@@ -108,10 +110,52 @@ var SingleAnimeImportModal = class extends Modal {
           );
           return;
         }
-        for (const result of this.results) {
-          const button = resultList.createEl(
-            "button"
-          );
+        const candidateRows = [];
+        const foldHandleWrap = resultList.createDiv();
+        foldHandleWrap.style.display = "none";
+        foldHandleWrap.style.marginTop = "4px";
+        const foldHandleBtn = foldHandleWrap.createEl("button", { text: "" });
+        foldHandleBtn.style.display = "flex";
+        foldHandleBtn.style.alignItems = "center";
+        foldHandleBtn.style.justifyContent = "space-between";
+        foldHandleBtn.style.width = "calc(100% - 12px)";
+        foldHandleBtn.style.margin = "-2px auto 8px";
+        foldHandleBtn.style.height = "auto";
+        foldHandleBtn.style.minHeight = "34px";
+        foldHandleBtn.style.padding = "7px 12px";
+        foldHandleBtn.style.fontSize = "12px";
+        foldHandleBtn.style.borderRadius = "0 0 10px 10px";
+        foldHandleBtn.style.boxShadow =
+          "0 4px 0 -2px var(--background-primary), 0 5px 0 -2px var(--background-modifier-border), 0 8px 0 -4px var(--background-secondary), 0 9px 0 -4px var(--background-modifier-border)";
+
+        let folded = false;
+        let pickedRowIdx = -1;
+        const applyListFoldState = () => {
+          const total = candidateRows.length;
+          candidateRows.forEach((btnEl, i) => {
+            const isPicked = i === pickedRowIdx;
+            btnEl.style.borderColor = isPicked ? "var(--interactive-accent)" : "";
+            btnEl.style.boxShadow = isPicked
+              ? "0 0 0 2px color-mix(in srgb, var(--interactive-accent) 24%, transparent)"
+              : "";
+            btnEl.style.display = folded && pickedRowIdx >= 0 && !isPicked ? "none" : "block";
+          });
+          if (pickedRowIdx >= 0 && total > 1) {
+            foldHandleWrap.style.display = "block";
+            foldHandleBtn.textContent = folded
+              ? `已折叠其余 ${total - 1} 条搜索结果 · 点击展开重选 ▾`
+              : `收起其余 ${total - 1} 条搜索结果 ▴`;
+          } else {
+            foldHandleWrap.style.display = "none";
+          }
+        };
+        foldHandleBtn.onclick = () => {
+          folded = !folded;
+          applyListFoldState();
+        };
+
+        this.results.forEach((result, idx) => {
+          const button = resultList.createEl("button");
           button.style.display = "block";
           button.style.width = "100%";
           button.style.height = "auto";
@@ -127,12 +171,14 @@ var SingleAnimeImportModal = class extends Modal {
           button.style.lineHeight = "1.45";
           button.textContent = result.title + (result.description ? "  " + result.description : "");
           button.onclick = async () => {
-            await this.selectResult(
-              result,
-              detailArea
-            );
+            pickedRowIdx = idx;
+            folded = this.results.length > 1;
+            applyListFoldState();
+            await this.selectResult(result, detailArea);
           };
-        }
+          candidateRows.push(button);
+        });
+        resultList.appendChild(foldHandleWrap);
       } catch (error) {
         console.error(
           "Bangumi \u641C\u7D22\u5931\u8D25:",
@@ -295,10 +341,16 @@ var SingleAnimeImportModal = class extends Modal {
     const createButton = detailArea.createEl(
       "button",
       {
+        cls: "mod-cta is-save-ready-pulse",
         text: "\u521B\u5EFA\u52A8\u753B\u7B14\u8BB0"
       }
     );
     createButton.style.marginTop = "14px";
+    requestAnimationFrame(() => {
+      if (createButton.isConnected && typeof createButton.scrollIntoView === "function") {
+        createButton.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
     createButton.onclick = async () => {
       createButton.disabled = true;
       createButton.textContent = "\u6B63\u5728\u521B\u5EFA\u2026\u2026";

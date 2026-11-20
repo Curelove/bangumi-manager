@@ -116,6 +116,7 @@ const ICON_PATHS = {
   timer: '<circle cx="12" cy="13" r="7"/><path d="M12 9.5V13l2.2 1.6M10 3.5h4"/>',
   crop: '<path d="M7 3.5V17h13.5"/><path d="M3.5 7H17v13.5"/>',
   reset: '<path d="M5 12a7 7 0 1 0 2.05-4.95"/><path d="M5 5v4h4"/>',
+  undo: '<path d="M5 12a7 7 0 1 0 2.05-4.95"/><path d="M5 5v4h4"/>',
   eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
   wand: '<path d="m4.5 19.5 10-10"/><path d="M17 3.5v3M15.5 5h3M19.5 9v2M18.5 10h2M13 2.8v1.6M12.2 3.6h1.6"/>',
   tv: '<rect x="3.5" y="6.5" width="17" height="12" rx="2.5"/><path d="m8.5 3.5 3.5 3 3.5-3M9.5 21h5"/>',
@@ -660,6 +661,25 @@ function popover(anchor, buildContent, opts = {}) {
   const narrow = vw < 560 || hostWidth < 520 || isMobileEnv();
   if (narrow) {
     pop.classList.add("is-sheet");
+    const sheetBar = h("div.bm7-sheet-bar", [
+      h("span.bm7-sheet-grab", { attr: { "aria-hidden": "true" } }),
+      opts.title ? h("span.bm7-sheet-title", { text: opts.title }) : null,
+      h(
+        "button.bm7-sheet-close",
+        {
+          attr: { type: "button", "aria-label": "关闭" },
+          on: {
+            click: (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              close();
+            }
+          }
+        },
+        [icon("close", 16)]
+      )
+    ]);
+    pop.insertBefore(sheetBar, inner);
   } else if (anchor) {
     const r = anchor.getBoundingClientRect();
     const pw = Math.min(opts.width || 320, vw - 16);

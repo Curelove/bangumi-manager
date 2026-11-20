@@ -8,11 +8,14 @@ const { renderGallerySanctuary } = require("./v08-gallery-sanctuary.js");
 const {
   tryRequireNode,
   isMobileEnv,
+  isIosEnv,
+  openExternalSchemeWithFallback,
   isDesktopNodeAvailable,
   toExternalLocalMediaUrl,
   crossPlatformPath: path,
   crossPlatformFs: fs,
   normalizeVaultRelPath,
+  posixBasename,
   toNodeBufferOrUint8,
   writeVaultBinaryFile
 } = require("./platform-env.js");
@@ -1388,36 +1391,91 @@ function collectAllGalleryIllustrations(plugin) {
     });
   }
 
-  // 4. 扫描本地画册目录中的未登记插画图片（大小写不敏感去重，自动缓存宽高比并提取角色线索）
+  // 4. 扫描画册目录中的未登记插画图片（优先跨平台 Vault API 兼容手机端与无 data.json 同步，桌面外部绝对路径再回退 Node fs）
   try {
+    const rawFolderSetting = String(plugin.settings?.illustrationGalleryFolder || "附件/画册典藏").trim() || "附件/画册典藏";
     const { raw: relFolder, absDir } = ensureDirectoryAbsolute(
       plugin,
-      plugin.settings?.illustrationGalleryFolder,
+      rawFolderSetting,
       "附件/画册典藏"
     );
-    if (absDir && fs.existsSync(absDir)) {
+    const subjectTitleById = new Map();
+    for (const a of vaultAnimeItems || []) {
+      const sid = String(a?.subjectId || "").trim();
+      if (sid && a?.title) subjectTitleById.set(sid, String(a.title));
+    }
+
+    const pushScannedIllust = (fileName, relPath, statSize, mtimeIso, absFile = "") => {
+      if (!/\.(png|jpe?g|webp|gif|avif)$/i.test(fileName)) return;
+      const lowerFile = fileName.toLowerCase();
+      if (
+        /^(bangumi-cover-|char-|character-|bgm-char-|review-|game-cover-|bgm\d+_ep)/i.test(fileName) ||
+        excludedFileNames.has(lowerFile)
+      ) {
+        return;
+      }
+      const normRel = normalizeVaultRelPathCaseInsensitive(plugin, relPath);
+      if (excludedAssetPaths.has(normRel) || excludedAssetPaths.has(relPath.toLowerCase())) return;
+      const normAbs = absFile ? absFile.replace(/\\/g, "/").toLowerCase() : "";
+      if (seenPathsLower.has(normRel) || (normAbs && seenPathsLower.has(normAbs))) return;
+      seenPathsLower.add(normRel);
+      if (normAbs) seenPathsLower.add(normAbs);
+
+      const baseName = fileName.replace(/\.[^.]+$/, "");
+      const parsedNameMatch = baseName.match(/^illust_(.+)_\d{5,8}$/i);
+      const inferredChar = parsedNameMatch ? parsedNameMatch[1].replace(/_/g, " ").trim() : "";
+      const kvMatch = baseName.match(/^keyvisual_(\d+)$/i);
+      const matchedAnimeTitle = kvMatch ? subjectTitleById.get(kvMatch[1]) || "" : "";
+      const displayTitle = matchedAnimeTitle ? `《${matchedAnimeTitle}》主视觉图` : baseName;
+      const aspectCacheKey = `${normRel}|${statSize}`;
+      const cachedAspect = plugin.__diskIllustAspectCache.get(aspectCacheKey);
+
+      const diskItem = {
+        id: `disk-illust-${fileName}`,
+        title: displayTitle,
+        characterName: inferredChar,
+        animeTitle: matchedAnimeTitle,
+        tags: matchedAnimeTitle ? ["主视觉图", "本地画册"] : ["本地画册"],
+        imageUrl: "",
+        localPath: relPath,
+        fileSizeBytes: statSize,
+        favoriteScore: 9.0,
+        sourceType: "disk",
+        createdAt: mtimeIso,
+        _aspectCacheKey: aspectCacheKey
+      };
+      if (cachedAspect && cachedAspect > 0) {
+        diskItem._naturalAspect = cachedAspect;
+      }
+      merged.push(diskItem);
+    };
+
+    let scannedViaVault = false;
+    const isAbsExternal = path.isAbsolute(rawFolderSetting);
+    if (!isAbsExternal && plugin?.app?.vault && typeof plugin.app.vault.getFiles === "function") {
+      const cleanRelPrefix = normalizeVaultRelPath(rawFolderSetting);
+      if (cleanRelPrefix) {
+        const prefixLower = `${cleanRelPrefix.toLowerCase()}/`;
+        const vaultFiles = plugin.app.vault.getFiles();
+        for (const vf of vaultFiles) {
+          const vp = String(vf?.path || "").replace(/\\/g, "/");
+          if (!vp.toLowerCase().startsWith(prefixLower)) continue;
+          scannedViaVault = true;
+          const fileName = vf.name || vp.split("/").pop() || "";
+          const statSize = Number(vf.stat?.size || 0);
+          const mtimeIso = vf.stat?.mtime ? new Date(vf.stat.mtime).toISOString() : new Date().toISOString();
+          pushScannedIllust(fileName, vp, statSize, mtimeIso, "");
+        }
+      }
+    }
+
+    if ((!scannedViaVault || isAbsExternal) && isDesktopNodeAvailable() && absDir && fs.existsSync(absDir)) {
       const files = fs.readdirSync(absDir);
       for (const f of files) {
-        if (!/\.(png|jpe?g|webp|gif|avif)$/i.test(f)) continue;
-        const lowerFile = f.toLowerCase();
-        if (
-          /^(bangumi-cover-|char-|character-|bgm-char-|review-|game-cover-|bgm\d+_ep)/i.test(f) ||
-          excludedFileNames.has(lowerFile)
-        ) {
-          continue;
-        }
         const relPath = path.isAbsolute(relFolder)
           ? path.join(absDir, f).replace(/\\/g, "/")
           : `${relFolder.replace(/\\/g, "/").replace(/\/$/, "")}/${f}`;
-        const normRel = normalizeVaultRelPathCaseInsensitive(plugin, relPath);
-        if (excludedAssetPaths.has(normRel) || excludedAssetPaths.has(relPath.toLowerCase())) continue;
-
         const absFile = path.join(absDir, f);
-        const normAbs = absFile.replace(/\\/g, "/").toLowerCase();
-        if (seenPathsLower.has(normRel) || seenPathsLower.has(normAbs)) continue;
-        seenPathsLower.add(normRel);
-        seenPathsLower.add(normAbs);
-
         let statSize = 0;
         let mtimeIso = new Date().toISOString();
         try {
@@ -1425,31 +1483,7 @@ function collectAllGalleryIllustrations(plugin) {
           statSize = st.size || 0;
           if (st.mtime) mtimeIso = st.mtime.toISOString();
         } catch (_) {}
-
-        const baseName = f.replace(/\.[^.]+$/, "");
-        const parsedNameMatch = baseName.match(/^illust_(.+)_\d{5,8}$/i);
-        const inferredChar = parsedNameMatch ? parsedNameMatch[1].replace(/_/g, " ").trim() : "";
-        const aspectCacheKey = `${normRel}|${statSize}`;
-        const cachedAspect = plugin.__diskIllustAspectCache.get(aspectCacheKey);
-
-        const diskItem = {
-          id: `disk-illust-${f}`,
-          title: baseName,
-          characterName: inferredChar,
-          animeTitle: "",
-          tags: ["本地画册"],
-          imageUrl: "",
-          localPath: relPath,
-          fileSizeBytes: statSize,
-          favoriteScore: 9.0,
-          sourceType: "disk",
-          createdAt: mtimeIso,
-          _aspectCacheKey: aspectCacheKey
-        };
-        if (cachedAspect && cachedAspect > 0) {
-          diskItem._naturalAspect = cachedAspect;
-        }
-        merged.push(diskItem);
+        pushScannedIllust(f, relPath, statSize, mtimeIso, absFile);
       }
     }
   } catch (e) {}
@@ -2812,15 +2846,47 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
 
   // 在线搜图与路径配置抽屉
   if (uiState.showOnlineDrawer) {
+    const mobileIllust = isMobileEnv();
     const drawer = container.createDiv("curator-char-add-drawer");
-    const pathBar = drawer.createDiv("curator-illust-path-config-row");
-    pathBar.createSpan({ text: "画册本地保存路径（修改后自动迁移已有画册文件）：" });
+
+    const sBar = drawer.createDiv("curator-char-add-searchbar");
+    const kwInput = sBar.createEl("input", {
+      type: "text",
+      cls: "curator-input curator-char-kw-input",
+      placeholder: mobileIllust
+        ? "输入角色名 / 作品名 / 标签（自动跨语种匹配）…"
+        : "输入角色名 / 作品名 / 标签（如：芙莉莲 / 洛琪希 / フリーレン，自动跨语种模糊匹配）..."
+    });
+    kwInput.value = uiState.onlineKeyword || "";
+
+    const doSearchBtn = sBar.createEl("button", {
+      cls: "curator-btn is-primary",
+      text: "在线检索插画"
+    });
+
+    // 移动端将路径、角色归属、匹配模式与分级等进阶项收入可展开折叠区，首屏直见搜索框与画作结果
+    let advHost = sBar;
+    let pathHost = drawer;
+    let filterFoldSummary = null;
+    if (mobileIllust) {
+      const fold = drawer.createEl("details", { cls: "curator-mobile-filter-fold" });
+      filterFoldSummary = fold.createEl("summary", { cls: "curator-mobile-filter-summary" });
+      const foldBody = fold.createDiv("curator-mobile-filter-body");
+      advHost = foldBody.createDiv("curator-char-add-searchbar");
+      pathHost = foldBody;
+    }
+
+    const pathBar = pathHost.createDiv("curator-illust-path-config-row");
+    if (!mobileIllust) {
+      drawer.insertBefore(pathBar, sBar);
+    }
+    pathBar.createSpan({ text: mobileIllust ? "保存路径：" : "画册本地保存路径（修改后自动迁移已有画册文件）：" });
     const pathInput = pathBar.createEl("input", {
       type: "text",
       cls: "curator-input",
       placeholder: "例如：附件/画册典藏"
     });
-    pathInput.style.width = "240px";
+    pathInput.style.width = mobileIllust ? "100%" : "240px";
     const oldFolderVal = String(plugin.settings.illustrationGalleryFolder || "附件/画册典藏").trim();
     pathInput.value = oldFolderVal;
 
@@ -2841,23 +2907,15 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
     };
     pathInput.onchange = commitIllustFolderChange;
 
-    const sBar = drawer.createDiv("curator-char-add-searchbar");
-    const kwInput = sBar.createEl("input", {
-      type: "text",
-      cls: "curator-input curator-char-kw-input",
-      placeholder: "输入角色名 / 作品名 / 标签（如：芙莉莲 / 洛琪希 / フリーレン，自动跨语种模糊匹配）..."
-    });
-    kwInput.value = uiState.onlineKeyword || "";
-
-    const charInput = sBar.createEl("input", {
+    const charInput = advHost.createEl("input", {
       type: "text",
       cls: "curator-input",
       placeholder: "归属角色名（可选）"
     });
-    charInput.style.maxWidth = "145px";
+    if (!mobileIllust) charInput.style.maxWidth = "145px";
 
     // 搜索匹配模式选择
-    const modeSelect = sBar.createEl("select", {
+    const modeSelect = advHost.createEl("select", {
       cls: "curator-sort-select curator-illust-mode-select"
     });
     modeSelect.title = "选择 Pixiv 搜索匹配范围（默认自动将中文角色名扩展为日文原名进行模糊检索，不局限于中文内容）";
@@ -2869,17 +2927,9 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
       const opt = modeSelect.createEl("option", { value: m.val, text: m.label });
       if (uiState.searchMode === m.val) opt.selected = true;
     });
-    modeSelect.onchange = async () => {
-      uiState.searchMode = modeSelect.value;
-      plugin.settings.illustSearchMode = modeSelect.value;
-      await plugin.saveSettings();
-      if (kwInput.value.trim() || uiState.onlineKeyword) {
-        triggerOnlineSearch();
-      }
-    };
 
     // 年龄阶段内容分级选择（对齐 Pixiv 官方全年龄 / 全部 / R-18 切换能力）
-    const ageSelect = sBar.createEl("select", {
+    const ageSelect = advHost.createEl("select", {
       cls: "curator-sort-select curator-illust-age-select"
     });
     ageSelect.title = "对齐 Pixiv 年龄分级筛选：默认仅展示全年龄内容（自动过滤 R-18），也可按需切换严选模式或包含 R-18";
@@ -2895,31 +2945,50 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
     });
 
     // 排除 AI 生成作品开关按钮
-    const excludeAiBtn = sBar.createEl("button", {
+    const excludeAiBtn = advHost.createEl("button", {
       cls: `curator-btn curator-illust-ai-toggle ${uiState.excludeAI ? "is-active" : ""}`,
       text: uiState.excludeAI ? "已排除 AI 作品" : "包含 AI 作品"
     });
     excludeAiBtn.title = "如同 Pixiv 搜索选项一样过滤掉 AI 生成插画（ai_type=1 & 标签过滤）";
-    excludeAiBtn.onclick = async (e) => {
-      e.preventDefault();
-      uiState.excludeAI = !uiState.excludeAI;
-      plugin.settings.illustExcludeAI = uiState.excludeAI;
-      excludeAiBtn.classList.toggle("is-active", uiState.excludeAI);
-      excludeAiBtn.textContent = uiState.excludeAI ? "已排除 AI 作品" : "包含 AI 作品";
+
+    const syncMobileFoldSummary = () => {
+      if (!filterFoldSummary) return;
+      const ageOpt = ageModeOptions.find((x) => x.val === uiState.ageMode) || ageModeOptions[0];
+      const aiText = uiState.excludeAI ? "排除 AI" : "含 AI";
+      filterFoldSummary.textContent = `更多筛选与保存路径（${ageOpt.label.split(" ")[0]} · ${aiText}）`;
+    };
+    syncMobileFoldSummary();
+
+    if (!mobileIllust) {
+      sBar.appendChild(doSearchBtn);
+    }
+
+    modeSelect.onchange = async () => {
+      uiState.searchMode = modeSelect.value;
+      plugin.settings.illustSearchMode = modeSelect.value;
       await plugin.saveSettings();
       if (kwInput.value.trim() || uiState.onlineKeyword) {
         triggerOnlineSearch();
       }
     };
 
-    const doSearchBtn = sBar.createEl("button", {
-      cls: "curator-btn is-primary",
-      text: "在线检索插画"
-    });
+    excludeAiBtn.onclick = async (e) => {
+      e.preventDefault();
+      uiState.excludeAI = !uiState.excludeAI;
+      plugin.settings.illustExcludeAI = uiState.excludeAI;
+      excludeAiBtn.classList.toggle("is-active", uiState.excludeAI);
+      excludeAiBtn.textContent = uiState.excludeAI ? "已排除 AI 作品" : "包含 AI 作品";
+      syncMobileFoldSummary();
+      await plugin.saveSettings();
+      if (kwInput.value.trim() || uiState.onlineKeyword) {
+        triggerOnlineSearch();
+      }
+    };
 
     ageSelect.onchange = async () => {
       uiState.ageMode = ageSelect.value;
       plugin.settings.illustAgeMode = ageSelect.value;
+      syncMobileFoldSummary();
       await plugin.saveSettings();
       if (kwInput.value.trim() || uiState.onlineKeyword) {
         triggerOnlineSearch();
@@ -5146,7 +5215,9 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     if (list.length === 0) {
       cardsHost.createDiv({
         cls: "curator-rs-empty",
-        text: "暂无匹配音声 · 可点击右上角「截取剧集音声」或「抽取名台词」充实典藏。"
+        text: isDesktopNodeAvailable()
+          ? "暂无匹配音声 · 可点击右上角「截取剧集音声」或「抽取名台词」充实典藏。"
+          : "暂无匹配音声 · 可点击上方「抽取名台词」或将音频文件同步至仓库音声目录。"
       });
       return;
     }
@@ -5471,6 +5542,11 @@ async function syncGameMarkdownNote(plugin, game) {
     const md = [
       "---",
       `title: "${game.title.replace(/"/g, '\\"')}"`,
+      game.id ? `game_id: "${String(game.id).replace(/"/g, '\\"')}"` : null,
+      game.developer ? `developer: "${String(game.developer).replace(/"/g, '\\"')}"` : null,
+      (game.coverLocalPath || game.coverUrl)
+        ? `cover: "${String(game.coverLocalPath || game.coverUrl).replace(/"/g, '\\"')}"`
+        : null,
       `status: "${game.status || "在玩"}"`,
       `personal_score: ${game.score ?? ""}`,
       `play_hours: ${game.playHours ?? 0}`,
@@ -5496,7 +5572,7 @@ async function syncGameMarkdownNote(plugin, game) {
       "## 时间/进度索引游记手札",
       notesMd,
       ""
-    ].join("\n");
+    ].filter((line) => line !== null).join("\n");
 
     const vault = plugin && plugin.app && plugin.app.vault;
     if (vault && typeof vault.getAbstractFileByPath === "function") {
@@ -5528,9 +5604,412 @@ async function syncGameMarkdownNote(plugin, game) {
   } catch (e) {}
 }
 
+/**
+ * 解析游戏典藏 Markdown 笔记（支持无 data.json 同步时在移动端 / 新设备完整重建游戏典藏列表）
+ */
+function parseGameNoteMarkdown(rawContent, fallbackTitle = "") {
+  const text = String(rawContent || "").replace(/\r\n/g, "\n");
+  const fmMatch = text.match(/^---\n([\s\S]*?)\n---/);
+  const fm = {};
+  if (fmMatch) {
+    for (const line of fmMatch[1].split("\n")) {
+      const m = line.match(/^([A-Za-z0-9_\u4e00-\u9fa5-]+)\s*:\s*(.*)$/);
+      if (!m) continue;
+      let val = m[2].trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1).replace(/\\"/g, '"');
+      }
+      fm[m[1].trim()] = val;
+    }
+  }
+
+  const h1Match = text.match(/^#\s+(.+)$/m);
+  const title = (fm.title || (h1Match ? h1Match[1].trim() : "") || fallbackTitle || "").trim();
+  if (!title) return null;
+
+  const scoreRaw = Number.parseFloat(String(fm.personal_score || "").trim());
+  const score = Number.isFinite(scoreRaw) && scoreRaw > 0 ? scoreRaw : null;
+  const playHoursRaw = Number.parseFloat(String(fm.play_hours || "0").trim());
+  const playHours = Number.isFinite(playHoursRaw) && playHoursRaw >= 0 ? playHoursRaw : 0;
+
+  const launchMatch = text.match(/\*\*启动路径\*\*[：:]\s*`([^`]*)`/);
+  const exeRaw = launchMatch ? launchMatch[1].trim() : "";
+  const exePath = exeRaw && exeRaw !== "未绑定" ? exeRaw : "";
+
+  const extractSection = (headingPattern) => {
+    const idxMatch = text.match(headingPattern);
+    if (!idxMatch || idxMatch.index == null) return "";
+    const after = text.slice(idxMatch.index + idxMatch[0].length);
+    const nextH2 = after.search(/\n##\s+/);
+    return (nextH2 >= 0 ? after.slice(0, nextH2) : after).trim();
+  };
+
+  const strategyUrls = [];
+  const guideSec = extractSection(/^##\s+攻略与资料站导航\s*$/m);
+  if (guideSec) {
+    for (const line of guideSec.split("\n")) {
+      const gm = line.match(/^\s*-\s+\[([^\]]+)\]\(([^)]+)\)(?:\s*—\s*\*备注(（含剧透）)?[：:](.*)\*)?/);
+      if (gm) {
+        strategyUrls.push({
+          id: `guide-${strategyUrls.length + 1}`,
+          title: gm[1].trim(),
+          url: gm[2].trim(),
+          spoiler: Boolean(gm[3]),
+          remark: (gm[4] || "").trim()
+        });
+      }
+    }
+  }
+
+  const todos = [];
+  const todoSec = extractSection(/^##\s+进度待办清单.*$/m);
+  if (todoSec) {
+    for (const line of todoSec.split("\n")) {
+      const tm = line.match(/^\s*-\s+\[([ xX])\]\s+(?:\*\*([^*]+)\*\*[：:])?\s*(.*?)(?:\s*\*\(记录于\s*([^)]*)\)\*)?\s*$/);
+      if (tm && tm[3] && !tm[3].includes("暂无待办")) {
+        todos.push({
+          id: `todo-${todos.length + 1}`,
+          done: tm[1].toLowerCase() === "x",
+          progressTag: (tm[2] || "待办").trim(),
+          text: tm[3].trim(),
+          timeLabel: (tm[4] || "").trim()
+        });
+      }
+    }
+  }
+
+  const playNotes = [];
+  const noteSec = extractSection(/^##\s+时间\/进度索引游记手札\s*$/m);
+  if (noteSec) {
+    for (const line of noteSec.split("\n")) {
+      const nm = line.match(/^\s*-\s+\*\*\[([^·\]]+?)(?:\s*·\s*([^\]]*))?\]\*\*\s*(.+)$/);
+      if (nm && nm[3] && !nm[3].includes("暂无游记")) {
+        playNotes.push({
+          id: `note-${playNotes.length + 1}`,
+          progressTag: (nm[1] || "游记").trim(),
+          timeLabel: (nm[2] || "").trim(),
+          text: nm[3].trim()
+        });
+      }
+    }
+  }
+
+  const coverVal = String(fm.cover || "").trim();
+  const isRemoteCover = /^https?:\/\//i.test(coverVal);
+
+  return {
+    id: String(fm.game_id || `game-md-${title.replace(/\s+/g, "_")}`),
+    title,
+    developer: String(fm.developer || "").trim(),
+    status: String(fm.status || "在玩").trim() || "在玩",
+    score,
+    playHours,
+    currentProgress: String(fm.current_progress || "").trim(),
+    launchMode: String(fm.launch_mode || "exe").trim() || "exe",
+    exePath,
+    coverUrl: isRemoteCover ? coverVal : "",
+    coverLocalPath: !isRemoteCover && coverVal ? coverVal : "",
+    strategyUrls,
+    todos,
+    playNotes
+  };
+}
+
+/**
+ * 跨平台扫描游戏典藏 Markdown 笔记并双向合并进 plugin.settings.gameCollection：
+ * - 支持手机端 / 新设备不同步 data.json 时直接从「游戏笔记」目录还原游戏典藏、待办、攻略与游记手札
+ * - 若已有记录则仅温和补充笔记中更新过的进度/手札，严禁清空电脑端原有的启动路径与本地封面
+ */
+async function reconcileGameCollectionWithNotes(plugin) {
+  const vault = plugin?.app?.vault;
+  if (!vault || typeof vault.getMarkdownFiles !== "function") return false;
+
+  const folder = normalizeVaultRelPath(
+    String(plugin.settings?.gameNoteFolder || "游戏笔记").trim() || "游戏笔记"
+  );
+  const folderPrefix = folder ? `${folder.toLowerCase()}/` : "";
+  const allMd = vault.getMarkdownFiles();
+  const gameFiles = allMd.filter((f) => {
+    const p = String(f?.path || "").replace(/\\/g, "/").toLowerCase();
+    if (folderPrefix && p.startsWith(folderPrefix)) return true;
+    const cache = plugin.app?.metadataCache?.getFileCache?.(f);
+    const tags = cache?.frontmatter?.tags;
+    const tagText = Array.isArray(tags) ? tags.join(",") : String(tags || "");
+    return tagText.includes("游戏典藏");
+  });
+  if (gameFiles.length === 0) return false;
+
+  // 预扫游戏封面文件夹以便旧笔记缺少 cover frontmatter 时尝试按文件名兜底匹配
+  const gameImgFolder = normalizeVaultRelPath(
+    String(plugin.settings?.gameImageFolder || "附件/游戏封面").trim() || "附件/游戏封面"
+  );
+  const gameImgFiles =
+    typeof vault.getFiles === "function"
+      ? vault.getFiles().filter((vf) => {
+          const p = String(vf?.path || "").replace(/\\/g, "/").toLowerCase();
+          return (
+            p.startsWith(`${gameImgFolder.toLowerCase()}/`) &&
+            /\.(png|jpe?g|webp|gif|avif)$/i.test(vf.name || "")
+          );
+        })
+      : [];
+
+  if (!Array.isArray(plugin.settings.gameCollection)) {
+    plugin.settings.gameCollection = [];
+  }
+  const list = plugin.settings.gameCollection;
+  let changed = false;
+
+  for (const file of gameFiles) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const content = await vault.read(file);
+      const parsed = parseGameNoteMarkdown(content, file.basename || "");
+      if (!parsed || !parsed.title) continue;
+
+      const titleNorm = parsed.title.toLowerCase();
+      const existing = list.find(
+        (g) =>
+          g &&
+          ((g.id && parsed.id && g.id === parsed.id) ||
+            String(g.title || "").trim().toLowerCase() === titleNorm)
+      );
+
+      if (!existing) {
+        if (!parsed.coverLocalPath && !parsed.coverUrl && gameImgFiles.length > 0) {
+          const safeKey = parsed.title.replace(/[\\/:*?"<>|\s]/g, "").toLowerCase();
+          const matchedImg = gameImgFiles.find((img) =>
+            String(img.basename || "")
+              .replace(/[\\/:*?"<>|\s]/g, "")
+              .toLowerCase()
+              .includes(safeKey)
+          );
+          if (matchedImg) parsed.coverLocalPath = matchedImg.path;
+        }
+        list.push(
+          Object.assign(
+            {
+              createdAt: file.stat?.ctime ? new Date(file.stat.ctime).toISOString() : new Date().toISOString(),
+              updatedAt: file.stat?.mtime ? new Date(file.stat.mtime).toISOString() : new Date().toISOString(),
+              notePath: file.path
+            },
+            parsed
+          )
+        );
+        changed = true;
+      } else {
+        // 仅在缺失或笔记里有新增手札/待办时温和合并，绝不破坏已有封面和本地电脑启动路径
+        if (!existing.notePath) {
+          existing.notePath = file.path;
+          changed = true;
+        }
+        if (!existing.coverLocalPath && parsed.coverLocalPath) {
+          existing.coverLocalPath = parsed.coverLocalPath;
+          changed = true;
+        }
+        if (!existing.coverUrl && parsed.coverUrl) {
+          existing.coverUrl = parsed.coverUrl;
+          changed = true;
+        }
+        if (!existing.developer && parsed.developer) {
+          existing.developer = parsed.developer;
+          changed = true;
+        }
+        if ((!Array.isArray(existing.playNotes) || existing.playNotes.length === 0) && parsed.playNotes.length > 0) {
+          existing.playNotes = parsed.playNotes;
+          changed = true;
+        }
+        if ((!Array.isArray(existing.todos) || existing.todos.length === 0) && parsed.todos.length > 0) {
+          existing.todos = parsed.todos;
+          changed = true;
+        }
+        if ((!Array.isArray(existing.strategyUrls) || existing.strategyUrls.length === 0) && parsed.strategyUrls.length > 0) {
+          existing.strategyUrls = parsed.strategyUrls;
+          changed = true;
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (changed && typeof plugin.saveData === "function") {
+    await plugin.saveData(plugin.settings).catch(() => {});
+  }
+  return changed;
+}
+
+/**
+ * 跨平台扫描仓库音声目录（兼容 附件/台词音声库 与 附件/音声典藏），
+ * 当手机端或新设备未同步 data.json 时，自动将仓库内已有音频文件还原至 voiceCollection
+ */
+async function reconcileVoiceCollectionWithVault(plugin) {
+  const vault = plugin?.app?.vault;
+  if (!vault || typeof vault.getFiles !== "function") return false;
+
+  const primaryDir = normalizeVaultRelPath(resolveDefaultVoiceArchiveFolder(plugin) || "附件/音声典藏");
+  const candidateDirs = Array.from(
+    new Set([primaryDir, "附件/台词音声库", "附件/音声典藏"].map(normalizeVaultRelPath).filter(Boolean))
+  );
+
+  const audioFiles = vault.getFiles().filter((vf) => {
+    const p = String(vf?.path || "").replace(/\\/g, "/").toLowerCase();
+    if (!/\.(mp3|wav|ogg|m4a|flac|aac|opus)$/i.test(vf.name || "")) return false;
+    return candidateDirs.some((d) => p.startsWith(`${d.toLowerCase()}/`));
+  });
+  if (audioFiles.length === 0) return false;
+
+  if (!Array.isArray(plugin.settings.voiceCollection)) {
+    plugin.settings.voiceCollection = [];
+  }
+  const list = plugin.settings.voiceCollection;
+  const seenPaths = new Set(
+    list
+      .map((v) => normalizeVaultRelPath(v?.audioPath || v?.localPath || "").toLowerCase())
+      .filter(Boolean)
+  );
+  const seenNames = new Set(
+    list
+      .map((v) => posixBasename(v?.audioPath || v?.localPath || "").toLowerCase())
+      .filter(Boolean)
+  );
+
+  let changed = false;
+  for (const af of audioFiles) {
+    const normPath = normalizeVaultRelPath(af.path);
+    const baseLower = String(af.name || "").toLowerCase();
+    if (seenPaths.has(normPath.toLowerCase()) || seenNames.has(baseLower)) continue;
+    seenPaths.add(normPath.toLowerCase());
+    seenNames.add(baseLower);
+
+    const stem = String(af.basename || af.name.replace(/\.[^.]+$/, "")).trim();
+    const parts = stem.split(/[_—–-]+/).map((s) => s.trim()).filter(Boolean);
+    const animeGuess = parts.length >= 2 ? parts[0] : "";
+    const quoteGuess = parts.length >= 2 ? parts.slice(1).join(" · ") : stem;
+
+    list.push({
+      id: `voice-vault-${stem}-${af.stat?.size || 0}`,
+      quoteText: quoteGuess || stem,
+      characterName: "",
+      animeTitle: animeGuess,
+      episodeLabel: "",
+      audioPath: normPath,
+      sourceType: "vault",
+      createdAt: af.stat?.mtime ? new Date(af.stat.mtime).toISOString() : new Date().toISOString()
+    });
+    changed = true;
+  }
+
+  if (changed && typeof plugin.saveData === "function") {
+    await plugin.saveData(plugin.settings).catch(() => {});
+  }
+  return changed;
+}
+
+const MOBILE_GAME_LAUNCH_PRESETS = [
+  { label: "— 选择常见手游协议参考（选填）—", url: "" },
+  { label: "原神 (genshinimpact://)", url: "genshinimpact://" },
+  { label: "崩坏：星穹铁道 (honkaistarrail://)", url: "honkaistarrail://" },
+  { label: "绝区零 (zenless://)", url: "zenless://" },
+  { label: "明日方舟 (arknights://)", url: "arknights://" },
+  { label: "鸣潮 (wutheringwaves://)", url: "wutheringwaves://" },
+  { label: "蔚蓝档案 (bluearchive://)", url: "bluearchive://" },
+  { label: "Steam 手机版 (steam://)", url: "steam://" },
+  { label: "TapTap (taptap://)", url: "taptap://" },
+  { label: "苹果快捷指令模板 (iOS 任意游戏)", url: "shortcuts://run-shortcut?name=" }
+];
+
+function renderMobileLaunchUrlField(parentEl, initialUrl = "", getGameTitle = () => "") {
+  const wrap = parentEl.createDiv("curator-mobile-launch-box");
+  wrap.createDiv({
+    cls: "curator-game-edit-label",
+    text: "手机端快捷启动链接（选填 · URL Scheme / 苹果快捷指令）"
+  });
+  const row = wrap.createDiv("curator-char-draft-row");
+  const urlIn = row.createEl("input", {
+    type: "text",
+    cls: "curator-input",
+    placeholder: isIosEnv()
+      ? "例如：genshinimpact:// 或 shortcuts://run-shortcut?name=原神"
+      : "例如：genshinimpact:// / honkaistarrail:// / arknights://"
+  });
+  urlIn.style.flex = "2";
+  urlIn.value = String(initialUrl || "");
+
+  const presetSel = row.createEl("select", { cls: "curator-sort-select" });
+  MOBILE_GAME_LAUNCH_PRESETS.forEach((p) => {
+    presetSel.createEl("option", { value: p.url, text: p.label });
+  });
+  presetSel.onchange = () => {
+    const val = presetSel.value;
+    if (!val) return;
+    if (val === "shortcuts://run-shortcut?name=") {
+      const title = String(getGameTitle() || "").trim();
+      urlIn.value = title ? `${val}${encodeURIComponent(title)}` : val;
+    } else {
+      urlIn.value = val;
+    }
+    presetSel.value = "";
+  };
+
+  wrap.createDiv({
+    cls: "curator-mobile-launch-hint",
+    text: isIosEnv()
+      ? "仅支持已公开协议的游戏，或先在 iOS「快捷指令」建一条「打开 App」指令后填入快捷指令链接；启动时自动开启计时，与电脑端 .exe 路径互不干扰。"
+      : "受安卓沙箱限制，仅支持已注册外部唤起协议的游戏（官服/B服/外服可能不同）；点击启动时会同步开启游玩计时，与电脑端 .exe 路径互不干扰。"
+  });
+  return { wrap, urlIn };
+}
+
 function launchLocalGameProcess(plugin, game, onSessionEnd) {
   if (isMobileEnv()) {
-    if (Notice) new Notice("手机端不支持启动本地 .exe 程序，可使用「开始计时」或「手动补录时长」记录游玩时间。");
+    const mobileUrl = String((game && game.mobileLaunchUrl) || "").trim();
+    if (!mobileUrl) {
+      if (Notice) {
+        new Notice("尚未填写手机端快捷启动链接，可在「编辑游戏资料」中配置 URL Scheme 或直接点「开始计时」。", 4500);
+      }
+      return;
+    }
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(mobileUrl)) {
+      if (Notice) {
+        new Notice("启动链接格式不正确，需以协议开头（例如 genshinimpact:// 或 shortcuts://...）", 4500);
+      }
+      return;
+    }
+    try {
+      const gs = require("./game-stats-and-groups-service.js");
+      if (!gs.getActiveGameTimer(plugin, game.id)) {
+        gs.startActiveGameTimer(plugin, game);
+      }
+    } catch (_) {}
+    if (typeof onSessionEnd === "function") onSessionEnd();
+
+    if (/^https?:\/\//i.test(mobileUrl)) {
+      try {
+        window.open(mobileUrl, "_blank", "noopener,noreferrer");
+      } catch (_) {}
+      if (Notice) new Notice(`已打开《${game.title}》链接，游玩计时已同步开启`);
+      return;
+    }
+    if (Notice) {
+      new Notice(`正在尝试唤起《${game.title}》，游玩计时已同步开启（切回后点「结束计时」即可记入时长）`, 4200);
+    }
+    const schemeHead = mobileUrl.split(":")[0];
+    openExternalSchemeWithFallback([mobileUrl], "", {
+      stepDelayMs: 2200,
+      autoOpenFallbackWeb: false,
+      watchAfterFallbackMs: 22000,
+      onFallback: () => {
+        if (!Notice) return null;
+        const tip = new Notice(
+          `正在等待系统唤起「${schemeHead}://」；若尚未安装或协议与渠道服不匹配，可在游戏编辑页核对唤起链接（计时已开启）。`,
+          6500
+        );
+        return () => {
+          try {
+            tip.hide();
+          } catch (_) {}
+        };
+      }
+    });
     return;
   }
   const mode = game.launchMode || "exe";
@@ -6029,13 +6508,35 @@ function openGameEditMetadataModal(plugin, game, onRefresh) {
     const pickerMount = contentEl.createDiv("curator-game-bgm-picker-mount bm7-root");
     pickerMount.style.display = "none";
 
+    const mobileEdit = isMobileEnv();
     const coverField = makeField("封面图片 URL 或本地路径", "https://... 或本地图片路径", game.coverUrl);
     const devField = makeField("开发商 / 社团（可选）", "例如：Yuzusoft / Riot Games", game.developer);
-    const exeField = makeField(
-      "启动程序路径 / Steam 链接（可选）",
-      ".exe / .lnk / steam://rungameid/...",
-      game.exePath
-    );
+    const exeField = mobileEdit
+      ? null
+      : makeField(
+          "启动程序路径 / Steam 链接（可选）",
+          ".exe / .lnk / steam://rungameid/...",
+          game.exePath
+        );
+    const mobileLaunchField = mobileEdit
+      ? renderMobileLaunchUrlField(contentEl, game.mobileLaunchUrl || "", () => titleField.inp.value || game.title)
+      : null;
+
+    const foot = contentEl.createDiv("curator-char-draft-actions");
+    const cancelBtn = foot.createEl("button", { cls: "curator-btn", text: "取消" });
+    cancelBtn.onclick = () => modal.close();
+    const saveBtn = foot.createEl("button", { cls: "curator-btn is-primary", text: "保存修改" });
+
+    const focusSaveCue = () => {
+      requestAnimationFrame(() => {
+        if (saveBtn.isConnected && typeof saveBtn.scrollIntoView === "function") {
+          saveBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        saveBtn.classList.remove("is-save-ready-pulse");
+        void saveBtn.offsetWidth;
+        saveBtn.classList.add("is-save-ready-pulse");
+      });
+    };
 
     fetchBtn.onclick = () => {
       const q = titleField.inp.value.trim() || game.title || "";
@@ -6053,32 +6554,33 @@ function openGameEditMetadataModal(plugin, game, onRefresh) {
           if ((enriched.developer || cand.developer) && !devField.inp.value.trim()) {
             devField.inp.value = enriched.developer || cand.developer;
           }
-          pickerMount.style.display = "none";
-          pickerMount.empty();
+          if (Notice) new Notice(`已选用《${cand.title}》的封面，确认后请点保存修改`);
+          focusSaveCue();
         },
         onPickFull: async (cand) => {
           const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
           if (cand.title) titleField.inp.value = cand.title;
           if (enriched.coverUrl || cand.cover) coverField.inp.value = enriched.coverUrl || cand.cover;
           if (enriched.developer || cand.developer) devField.inp.value = enriched.developer || cand.developer;
-          if (cand.source === "steam" && enriched.steamAppId && !exeField.inp.value.trim()) {
+          if (exeField && cand.source === "steam" && enriched.steamAppId && !exeField.inp.value.trim()) {
             exeField.inp.value = `steam://rungameid/${enriched.steamAppId}`;
           }
-          pickerMount.style.display = "none";
-          pickerMount.empty();
+          if (Notice) new Notice(`已套用《${cand.title}》的资料，确认后请点保存修改`);
+          focusSaveCue();
         }
       });
     };
 
-    const foot = contentEl.createDiv("curator-char-draft-actions");
-    const cancelBtn = foot.createEl("button", { cls: "curator-btn", text: "取消" });
-    cancelBtn.onclick = () => modal.close();
-    const saveBtn = foot.createEl("button", { cls: "curator-btn is-primary", text: "保存修改" });
     saveBtn.onclick = async () => {
       game.title = titleField.inp.value.trim() || game.title || "未命名游戏";
       game.coverUrl = coverField.inp.value.trim();
       game.developer = devField.inp.value.trim();
-      game.exePath = exeField.inp.value.trim();
+      if (exeField) {
+        game.exePath = exeField.inp.value.trim();
+      }
+      if (mobileLaunchField) {
+        game.mobileLaunchUrl = mobileLaunchField.urlIn.value.trim();
+      }
       await plugin.saveSettings();
       await syncGameMarkdownNote(plugin, game);
       modal.close();
@@ -6203,20 +6705,28 @@ function normalizeGuideUrl(raw) {
  */
 function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) {
   if (!game) return;
+  if (plugin && typeof plugin.ensureScoreDashboardStyles === "function") {
+    plugin.ensureScoreDashboardStyles();
+  }
   try {
     const v07Core = require("./v07-core.js");
     if (v07Core && typeof v07Core.closeAllPopovers === "function") {
       v07Core.closeAllPopovers();
     }
   } catch (_) {}
-  let capSvc = null;
   try {
-    capSvc = require("./game-floating-capsule-service.js");
-    if (!openOptions.forceInAppModal && capSvc.isCapsuleActiveForGame(plugin, game.id)) {
-      capSvc.expandActiveCapsuleForGame(plugin, game);
-      return;
-    }
+    document.querySelectorAll("body > .bm7-drawer").forEach((el) => el.remove());
   } catch (_) {}
+  let capSvc = null;
+  if (!isMobileEnv()) {
+    try {
+      capSvc = require("./game-floating-capsule-service.js");
+      if (!openOptions.forceInAppModal && capSvc.isCapsuleActiveForGame(plugin, game.id)) {
+        capSvc.expandActiveCapsuleForGame(plugin, game);
+        return;
+      }
+    } catch (_) {}
+  }
   if (!Array.isArray(game.todos)) game.todos = [];
   if (!Array.isArray(game.playNotes)) game.playNotes = [];
   if (!Array.isArray(game.strategyUrls)) game.strategyUrls = [];
@@ -6978,7 +7488,7 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
     renderTodos();
     renderGuides();
     refreshCounts();
-    window.requestAnimationFrame(() => autoGrow(noteInput));
+    autoGrow(noteInput);
 
     if (capSvc && typeof capSvc.registerOpenJournalModalHook === "function") {
       modal._unregisterCapHook = capSvc.registerOpenJournalModalHook(plugin, game.id, {
@@ -7048,6 +7558,13 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
     }
   };
 
+  if (modal.modalEl) {
+    modal.modalEl.addClass("curator-gj-shell");
+  }
+  if (modal.contentEl) {
+    modal.contentEl.addClass("curator-gj");
+    modal.contentEl.dataset.tab = activeTab;
+  }
   modal.open();
 }
 
@@ -7212,32 +7729,12 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
     scoreIn.style.width = "100px";
     scoreIn.value = "";
 
-    let pickedSteamAspect = "";
-    v07Game.renderGameSourceSearch(gsrcMount, {
-      initialQuery: "",
-      source: "all",
-      search: v07Adapters.searchGameSourcesAdapter,
-      onPickCover: async (cand) => {
-        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
-        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
-        if ((enriched.developer || cand.developer) && !devIn.value.trim()) {
-          devIn.value = enriched.developer || cand.developer;
-        }
-        if (Notice) new Notice(`已选用《${cand.title}》的封面`);
-      },
-      onPickFull: async (cand) => {
-        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
-        if (cand.title) titleIn.value = cand.title;
-        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
-        if (enriched.developer || cand.developer) devIn.value = enriched.developer || cand.developer;
-        if (cand.score && !scoreIn.value) scoreIn.value = String(cand.score);
-        if (cand.source === "steam" && enriched.steamAppId && !exeIn.value.trim()) {
-          exeIn.value = `steam://rungameid/${enriched.steamAppId}`;
-        }
-        pickedSteamAspect = "";
-        if (Notice) new Notice(`已套用词条：《${cand.title}》`);
-      }
-    });
+    const mobileLaunchField = mobile
+      ? renderMobileLaunchUrlField(drawer, "", () => titleIn.value)
+      : null;
+
+    const readyBanner = drawer.createDiv("curator-game-pick-ready-cue");
+    readyBanner.style.display = "none";
 
     const submitRow = drawer.createDiv("curator-char-draft-actions");
     const cancelBtn = submitRow.createEl("button", {
@@ -7252,6 +7749,49 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
       cls: "curator-btn is-primary",
       text: "保存并加入游戏典藏"
     });
+
+    const guideToSaveBtn = (labelText) => {
+      readyBanner.textContent = labelText;
+      readyBanner.style.display = "flex";
+      requestAnimationFrame(() => {
+        if (saveGameBtn.isConnected && typeof saveGameBtn.scrollIntoView === "function") {
+          saveGameBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        saveGameBtn.classList.remove("is-save-ready-pulse");
+        void saveGameBtn.offsetWidth;
+        saveGameBtn.classList.add("is-save-ready-pulse");
+      });
+    };
+
+    let pickedSteamAspect = "";
+    v07Game.renderGameSourceSearch(gsrcMount, {
+      initialQuery: "",
+      source: "all",
+      search: v07Adapters.searchGameSourcesAdapter,
+      onPickCover: async (cand) => {
+        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
+        if ((enriched.developer || cand.developer) && !devIn.value.trim()) {
+          devIn.value = enriched.developer || cand.developer;
+        }
+        if (Notice) new Notice(`已选用《${cand.title}》的封面`);
+        guideToSaveBtn(`✓ 已选用《${cand.title}》封面，确认信息后点击下方按钮完成收录`);
+      },
+      onPickFull: async (cand) => {
+        const enriched = cand._raw ? await gameApi.enrichGameCandidateDetail(cand._raw) : cand;
+        if (cand.title) titleIn.value = cand.title;
+        if (enriched.coverUrl || cand.cover) coverIn.value = enriched.coverUrl || cand.cover;
+        if (enriched.developer || cand.developer) devIn.value = enriched.developer || cand.developer;
+        if (cand.score && !scoreIn.value) scoreIn.value = String(cand.score);
+        if (!mobile && cand.source === "steam" && enriched.steamAppId && !exeIn.value.trim()) {
+          exeIn.value = `steam://rungameid/${enriched.steamAppId}`;
+        }
+        pickedSteamAspect = "";
+        if (Notice) new Notice(`已套用词条：《${cand.title}》`);
+        guideToSaveBtn(`✓ 已填入《${cand.title}》词条资料，核对无误后点击下方按钮保存收录`);
+      }
+    });
+
     saveGameBtn.onclick = async () => {
       const title = titleIn.value.trim() || "未命名游戏";
       const parsedScore = scoreIn.value.trim() ? Number(scoreIn.value) : null;
@@ -7261,6 +7801,7 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
         launchMode: modeSelect.value,
         exePath: exeIn.value.trim(),
         romPath: romIn.value.trim(),
+        mobileLaunchUrl: mobileLaunchField ? mobileLaunchField.urlIn.value.trim() : "",
         launchArgs: "",
         coverUrl: coverIn.value.trim(),
         developer: devIn.value.trim(),
@@ -8208,14 +8749,49 @@ function getMultiHallStyles() {
 .modal.curator-gj-shell .modal-close-button {
   top: 14px;
   right: 14px;
-  z-index: 4;
+  z-index: 6;
 }
 .is-phone .modal.curator-gj-shell {
-  width: 100vw;
-  max-width: 100vw;
-  height: 100%;
-  max-height: 100%;
-  border-radius: 0;
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  margin: 0 !important;
+  padding: var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) 0 var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)) 0 !important;
+  box-sizing: border-box !important;
+  border-radius: 0 !important;
+  background: var(--gj-paper) !important;
+  animation: none !important;
+}
+.is-phone .modal.curator-gj-shell .modal-header {
+  position: static !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  overflow: visible !important;
+}
+.is-phone .modal.curator-gj-shell .modal-close-button,
+.is-phone .modal.curator-gj-shell .modal-header-button {
+  position: absolute !important;
+  top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + 10px) !important;
+  right: 12px !important;
+  left: auto !important;
+  transform: none !important;
+  margin: 0 !important;
+  z-index: 20 !important;
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  min-height: 36px !important;
+  border-radius: 999px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: color-mix(in srgb, var(--background-primary) 88%, var(--gj-paper)) !important;
+  border: 1px solid var(--gj-line) !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14) !important;
 }
 .modal.curator-gj-shell .modal-content.curator-gj {
   container-type: inline-size;
@@ -9118,12 +9694,12 @@ function getMultiHallStyles() {
   margin-left: auto;
 }
 
-/* 窄容器 / 移动端：折叠为三段切换 */
+/* 窄容器 / 移动端：首帧即按三段单栏渲染，彻底杜绝首帧双栏闪帧 */
 @container curator-gj (max-width: 640px) {
   .curator-gj-head {
     grid-template-columns: auto minmax(0, 1fr);
     gap: 12px;
-    padding: 16px 48px 12px 16px;
+    padding: 16px 58px 12px 16px;
   }
   .curator-gj-cover { width: 50px; }
   .curator-gj-title { font-size: 17px; }
@@ -9155,6 +9731,111 @@ function getMultiHallStyles() {
   .curator-gj-panel-count { display: none; }
   .curator-gj-composer-hint { display: none; }
   .curator-gj-foot { padding: 7px 10px 7px 16px; }
+}
+body.is-phone .modal.curator-gj-shell .curator-gj-head {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 58px 12px 16px;
+}
+body.is-phone .modal.curator-gj-shell .curator-gj-cover { width: 50px; }
+body.is-phone .modal.curator-gj-shell .curator-gj-title { font-size: 17px; }
+body.is-phone .modal.curator-gj-shell .curator-gj-stats { gap: 6px 16px; }
+body.is-phone .modal.curator-gj-shell .curator-gj-head-actions { grid-column: 1 / -1; }
+body.is-phone .modal.curator-gj-shell .curator-gj-head-actions:empty { display: none; }
+body.is-phone .modal.curator-gj-shell button.curator-gj-play { flex: 1; }
+body.is-phone .modal.curator-gj-shell .curator-gj-tabs { display: flex; }
+body.is-phone .modal.curator-gj-shell .curator-gj-body {
+  display: block;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+body.is-phone .modal.curator-gj-shell .curator-gj-main,
+body.is-phone .modal.curator-gj-shell .curator-gj-side {
+  overflow: visible;
+  padding: 14px 16px 28px;
+  border-left: none;
+  background: none;
+}
+body.is-phone .modal.curator-gj-shell .curator-gj[data-tab="notes"] .curator-gj-side,
+body.is-phone .modal.curator-gj-shell .curator-gj:not([data-tab="notes"]) .curator-gj-main { display: none; }
+body.is-phone .modal.curator-gj-shell .curator-gj-panel { display: none; }
+body.is-phone .modal.curator-gj-shell .curator-gj[data-tab="notes"] .curator-gj-panel[data-panel="notes"],
+body.is-phone .modal.curator-gj-shell .curator-gj[data-tab="todos"] .curator-gj-panel[data-panel="todos"],
+body.is-phone .modal.curator-gj-shell .curator-gj[data-tab="guides"] .curator-gj-panel[data-panel="guides"] { display: block; }
+body.is-phone .modal.curator-gj-shell .curator-gj-panel-head:not(.has-action) { display: none; }
+body.is-phone .modal.curator-gj-shell .curator-gj-panel-title,
+body.is-phone .modal.curator-gj-shell .curator-gj-panel-count { display: none; }
+body.is-phone .modal.curator-gj-shell .curator-gj-composer-hint { display: none; }
+body.is-phone .modal.curator-gj-shell .curator-gj-foot { padding: 7px 10px 7px 16px; }
+body.is-phone .modal.curator-gj-shell .curator-gj-row-tools { opacity: 1; }
+
+/* 移动端折叠进阶筛选、游戏快捷启动链接与套用词条防迷失提示 */
+.curator-mobile-filter-fold {
+  margin-top: 8px;
+  border-radius: 9px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  overflow: hidden;
+}
+.curator-mobile-filter-summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.curator-mobile-filter-summary::-webkit-details-marker { display: none; }
+.curator-mobile-filter-summary::after { content: "展开 ▾"; color: #8f683d; font-size: 12px; }
+.curator-mobile-filter-fold[open] .curator-mobile-filter-summary::after { content: "收起 ▴"; }
+.curator-mobile-filter-body {
+  padding: 10px 12px;
+  border-top: 1px dashed var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.curator-mobile-launch-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, #8f683d 34%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--background-secondary) 78%, transparent);
+}
+.curator-mobile-launch-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.curator-game-pick-ready-cue {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--interactive-accent, #8f683d) 42%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--interactive-accent, #8f683d) 10%, var(--background-secondary));
+  color: var(--text-normal);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.curator-char-search-grid.is-folded {
+  grid-template-columns: 1fr !important;
+}
+.curator-char-search-card.is-picked {
+  border-color: var(--interactive-accent, #8f683d) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent, #8f683d) 20%, transparent);
+}
+.curator-char-search-fold-host {
+  margin-top: 2px;
 }
 
 /* 游戏卡片：最近一条手札摘录 + 入口按钮 */
@@ -9247,6 +9928,8 @@ module.exports = {
   openGameDetailAndNotesModal,
   openGameEditMetadataModal,
   syncGameMarkdownNote,
+  reconcileGameCollectionWithNotes,
+  reconcileVoiceCollectionWithVault,
   resolveLocalOrVaultImageUrl,
   getMultiHallStyles
 };

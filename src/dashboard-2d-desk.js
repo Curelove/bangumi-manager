@@ -2218,7 +2218,9 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
   const grid = container.createDiv("curator-gallery-grid");
   const cardEls = [];
 
+  let itemIdx = 0;
   for (const item of items) {
+    const curItemIdx = itemIdx++;
     const edition = extractEditionInfo(item);
     const card = grid.createDiv("curator-gallery-card bangumi-grid-card");
     cardEls.push(card);
@@ -2284,7 +2286,8 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
     if (coverUrl) {
       const img = posterWrap.createEl("img", { cls: "bangumi-grid-poster curator-gallery-poster" });
       img.alt = item.name;
-      img.loading = "lazy";
+      img.decoding = "async";
+      img.loading = curItemIdx < 24 ? "eager" : "lazy";
       img.src = coverUrl;
       img.onerror = () => {
         img.remove();
@@ -2468,15 +2471,18 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
           reviewStudioService.openAnimeReviewStudioModal(plugin, item);
         })
       );
-      if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
+      if (!item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
         menu.addItem((mi) =>
-          mi.setTitle("下载与自动追更").setIcon("download").onClick(() => {
-            animeDownloadService.openAnimeDownloadModal(plugin, item, () => {
-              if (helpers.deskMount) {
-                renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
-              }
-            });
-          })
+          mi
+            .setTitle(isDesktopNodeAvailable() ? "下载与自动追更" : "磁力与找番助手")
+            .setIcon("download")
+            .onClick(() => {
+              animeDownloadService.openAnimeDownloadModal(plugin, item, () => {
+                if (helpers.deskMount) {
+                  renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
+                }
+              });
+            })
         );
       }
       if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
@@ -2910,13 +2916,13 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       };
     }
 
-    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
+    if (!item.isSamplePreviewItem && plugin.settings?.enableDownloadAssistant !== false) {
       const dlBtn = colActions.createEl("button", {
         cls: "curator-table-action-btn",
-        text: "下载"
+        text: isDesktopNodeAvailable() ? "下载" : "磁力"
       });
       dlBtn.dataset.indexAction = "open-download";
-      dlBtn.title = "打开追番下载与单集 RSS 助手";
+      dlBtn.title = isDesktopNodeAvailable() ? "打开追番下载与单集 RSS 助手" : "打开手机端磁力找番助手";
       dlBtn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -5528,17 +5534,19 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     });
   }
 
-  // 顶栏右侧主操作按钮组（仅保留全局级操作：外观、刷新、恢复默认布局、打开 Markdown 版/番剧档案馆、3D 展厅）
+  // 顶栏右侧主操作按钮组（桌面端全展开；移动端精简为单行：外观 / 刷新 / 3D展厅 / ··· 菜单）
+  const isMobileTopbar = isMobileEnv();
   const actionsCol = topRow1.createDiv("curator-topbar-actions");
 
   const appearanceBtn = actionsCol.createEl("button", {
     cls: "curator-top-btn is-subtle"
   });
   const syncAppearanceBtnLabel = (appState) => {
-    const label =
-      typeof v07Themes.formatAppearanceButtonLabel === "function"
-        ? v07Themes.formatAppearanceButtonLabel(appState)
-        : "外观";
+    const label = isMobileTopbar
+      ? "外观"
+      : typeof v07Themes.formatAppearanceButtonLabel === "function"
+      ? v07Themes.formatAppearanceButtonLabel(appState)
+      : "外观";
     v07Core.setBtnIconLabel(appearanceBtn, "palette", label);
   };
   syncAppearanceBtnLabel(v07Adapters.getAppearance(plugin));
@@ -5570,14 +5578,16 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
           }
         });
       },
-      { width: 540, alignRight: true }
+      { width: 540, alignRight: true, title: "档案馆外观与动效" }
     );
   };
 
   const refreshBtn = actionsCol.createEl("button", {
     cls: "curator-top-btn is-subtle"
   });
-  v07Core.setBtnIconLabel(refreshBtn, "refresh", "刷新");
+  v07Core.setBtnIconLabel(refreshBtn, "refresh", isMobileTopbar ? "" : "刷新");
+  refreshBtn.title = "刷新番剧档案馆";
+  refreshBtn.setAttribute("aria-label", "刷新番剧档案馆");
   refreshBtn.onclick = async () => {
     refreshBtn.disabled = true;
     try {
@@ -5588,11 +5598,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     }
   };
 
-  const resetBtn = actionsCol.createEl("button", {
-    cls: "curator-top-btn is-subtle",
-    text: "恢复默认布局"
-  });
-  resetBtn.onclick = async () => {
+  const handleResetLayout = async () => {
     state.workspaceMode = "auto";
     state.workspaceModeCustomized = false;
     state.searchQuery = "";
@@ -5613,22 +5619,30 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     await plugin.resetScoreDashboardLayout(container, options);
   };
 
-  if (isMarkdown) {
-    const openViewBtn = actionsCol.createEl("button", {
-      cls: "curator-top-btn",
-      text: "打开番剧档案馆"
-    });
-    openViewBtn.onclick = async () => {
-      await plugin.openScoreDashboardView();
-    };
-  } else {
-    const mdBtn = actionsCol.createEl("button", {
+  if (!isMobileTopbar) {
+    const resetBtn = actionsCol.createEl("button", {
       cls: "curator-top-btn is-subtle",
-      text: "打开 Markdown 版"
+      text: "恢复默认布局"
     });
-    mdBtn.onclick = async () => {
-      await plugin.openScoreDashboard();
-    };
+    resetBtn.onclick = handleResetLayout;
+
+    if (isMarkdown) {
+      const openViewBtn = actionsCol.createEl("button", {
+        cls: "curator-top-btn",
+        text: "打开番剧档案馆"
+      });
+      openViewBtn.onclick = async () => {
+        await plugin.openScoreDashboardView();
+      };
+    } else {
+      const mdBtn = actionsCol.createEl("button", {
+        cls: "curator-top-btn is-subtle",
+        text: "打开 Markdown 版"
+      });
+      mdBtn.onclick = async () => {
+        await plugin.openScoreDashboard();
+      };
+    }
   }
 
   // 进入 3D 原画展厅主入口按钮
@@ -5651,6 +5665,53 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   };
   if (typeof options?.bindToggle3DBtn === "function") {
     options.bindToggle3DBtn(enter3DBtn);
+  }
+
+  if (isMobileTopbar) {
+    const moreBtn = actionsCol.createEl("button", {
+      cls: "curator-top-btn is-subtle is-mobile-more-btn",
+      attr: { type: "button", "aria-label": "更多操作" }
+    });
+    moreBtn.appendChild(v07Core.icon("more", 15));
+    moreBtn.onclick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      v07Core.popover(
+        moreBtn,
+        (box, close) => {
+          const addItem = (label, iconName, fn, cls = "") => {
+            const btn = box.createEl("button", {
+              cls: `bm7-menu-item ${cls}`.trim(),
+              attr: { type: "button" }
+            });
+            if (iconName) btn.appendChild(v07Core.icon(iconName, 15));
+            btn.createSpan({ text: label });
+            btn.onclick = async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              close();
+              await fn();
+            };
+          };
+          const tabsEl = container.querySelector(".curator-workspace-mode-tabs");
+          const isReordering = Boolean(tabsEl && tabsEl.classList.contains("is-reorder-mode"));
+          addItem(
+            isReordering ? "完成展区标签排序" : "调整展区标签顺序",
+            "sliders",
+            () => {
+              if (tabsEl) tabsEl.classList.toggle("is-reorder-mode");
+            }
+          );
+          if (isMarkdown) {
+            addItem("打开番剧档案馆视图", "grid", () => plugin.openScoreDashboardView());
+          } else {
+            addItem("打开 Markdown 版快照", "book", () => plugin.openScoreDashboard());
+          }
+          addItem("恢复默认布局", "refresh", handleResetLayout);
+        },
+        { width: 220, alignRight: true, title: "档案馆更多操作" }
+      );
+    };
   }
 
   if (isSampleMode) {
@@ -6064,6 +6125,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   });
 
   const switchWorkspaceMode = (nextMode, switchOpts = {}) => {
+    if (v07Core && typeof v07Core.closeAllPopovers === "function") {
+      v07Core.closeAllPopovers();
+    }
     const targetMode = validModes.includes(nextMode) ? nextMode : "desk";
     const prevMode = state.workspaceMode;
     const orderedModes = getOrderedWorkspaceModes();
@@ -7505,6 +7569,7 @@ function getCuratorDeskStyles() {
     ".curator-char-photowall-moes{font-size:9.5px;color:rgba(255,250,240,0.84);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
     /* 立绘取景、换图与等身校准工坊模态框 (.curator-portrait-studio-modal) */
     ".modal.curator-portrait-studio-shell{width:min(880px, 94vw) !important;max-width:880px !important;}",
+    "body.is-phone .modal.curator-portrait-studio-shell,body.is-phone .modal.curator-char-detail-shell{width:100vw !important;max-width:100vw !important;}",
     ".curator-portrait-studio-modal{display:flex;flex-direction:column;gap:12px;}",
     ".curator-studio-header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--background-modifier-border);}",
     ".curator-studio-tab-bar{display:inline-flex;gap:6px;}",
@@ -7677,46 +7742,81 @@ function getCuratorDeskStyles() {
     ".curator-catalog-tagchip:hover{border-color:var(--bm7-accent, #8f683d);color:var(--bm7-accent, #8f683d);}",
     ".curator-catalog-tagchip.is-active{background:var(--bm7-accent, #8f683d);border-color:var(--bm7-accent, #8f683d);color:var(--bm7-accent-ink, #fffdf9);}",
     /* 容器窄宽度（左右侧边栏展开）与移动端窄屏触控自适应（置于级联末尾以确保覆盖子模块桌面间距） */
+    ".curator-gallery-poster-wrap{aspect-ratio:2 / 3 !important;background:var(--bm7-surface-2, var(--background-secondary));}",
     "@container curator-desk-outer (max-width: 768px){",
-    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:10px 10px 88px !important;box-sizing:border-box !important;}",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:6px 4px 104px !important;box-sizing:border-box !important;}",
     "}",
     "@container curator-desk (max-width: 760px){",
     "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
-    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:4px 0 10px !important;margin-bottom:0 !important;min-width:0 !important;}",
+    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:6px !important;padding:2px 0 8px !important;margin-bottom:0 !important;min-width:0 !important;}",
     "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
-    "  .curator-workspace-mode-btn{width:100% !important;justify-content:center !important;padding:0 6px !important;font-size:12px !important;gap:4px !important;}",
+    "  .curator-workspace-mode-btn{width:100% !important;min-height:38px !important;height:38px !important;justify-content:center !important;padding:0 6px !important;font-size:12px !important;gap:4px !important;}",
     "  .curator-ws-mode-badge{padding:1px 5px !important;}",
     "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
     "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;flex-wrap:wrap !important;}",
     "  .curator-ws-ribbon-hint{display:none !important;}",
-    "  .curator-workspace-stage{padding:10px 12px 14px !important;min-width:0 !important;}",
+    "  .curator-workspace-stage{padding:10px 8px 14px !important;min-width:0 !important;}",
     "  .curator-catalog-header-controls{margin-left:0 !important;width:100% !important;}",
     "  .curator-gallery-grid{grid-template-columns:repeat(auto-fill, minmax(136px, 1fr)) !important;gap:10px !important;}",
     "  .curator-desk-grid.is-watching-grid, .curator-desk-grid.is-standby-grid{grid-template-columns:1fr !important;}",
     "  .curator-starter-desk{padding:15px 14px;}",
     "  .curator-starter-inline-row{flex-direction:column;align-items:stretch;}",
     "}",
+    "body.is-mobile .bangumi-score-dashboard-view.view-content{padding:6px 8px 0 !important;}",
     "@media (max-width: 768px){",
-    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:10px 10px 88px !important;box-sizing:border-box !important;}",
-    "  .curator-topbar-row1{display:grid !important;grid-template-columns:1fr !important;gap:8px !important;}",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:4px 2px calc(118px + env(safe-area-inset-bottom, 0px)) !important;box-sizing:border-box !important;}",
+    "  .curator-desk-topbar{padding:8px 10px !important;margin-bottom:8px !important;border-radius:12px !important;gap:6px !important;}",
+    "  .curator-brand-kicker{display:none !important;}",
+    "  .curator-topbar-row1{display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:space-between !important;flex-wrap:nowrap !important;gap:6px !important;}",
+    "  .curator-brand-col{min-width:0;flex:1 1 auto;}",
+    "  .curator-brand-title{font-size:1.06em !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 !important;}",
     "  .curator-summary-strip{display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;gap:6px !important;}",
     "  .curator-summary-pill{justify-content:space-between !important;}",
     "  .curator-summary-pill.is-insights-trigger{grid-column:1 / -1;justify-content:center !important;}",
-    "  .curator-topbar-actions{display:flex;flex-wrap:wrap;justify-content:flex-start !important;gap:6px !important;}",
+    "  .curator-topbar-actions{display:flex !important;flex-wrap:nowrap !important;align-items:center !important;justify-content:flex-end !important;gap:5px !important;flex-shrink:0 !important;}",
+    "  .curator-top-btn{height:32px !important;padding:0 9px !important;font-size:12px !important;gap:4px !important;white-space:nowrap !important;}",
+    "  .curator-top-btn.is-mobile-more-btn{width:32px !important;padding:0 !important;}",
     "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
-    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:4px 0 10px !important;margin-bottom:0 !important;min-width:0 !important;}",
-    "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(2,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
-    "  .curator-workspace-mode-btn{width:100% !important;min-width:0 !important;overflow:hidden !important;justify-content:center !important;padding:0 4px !important;gap:3px !important;font-size:12px !important;}",
+    "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:6px !important;padding:2px 0 8px !important;margin-bottom:4px !important;min-width:0 !important;}",
+    "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;padding:4px !important;}",
+    "  .curator-workspace-mode-btn{width:100% !important;min-width:0 !important;min-height:38px !important;height:38px !important;overflow:hidden !important;justify-content:center !important;padding:0 5px !important;gap:3px !important;font-size:12px !important;line-height:1.2 !important;}",
     "  .curator-workspace-mode-btn .curator-ws-mode-icon{display:none !important;}",
-    "  .curator-workspace-mode-btn .curator-ws-mode-badge{padding:1px 4px !important;letter-spacing:-0.015em !important;max-width:100% !important;overflow:hidden !important;text-overflow:ellipsis !important;}",
+    "  .curator-workspace-mode-btn .curator-ws-mode-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
+    "  .curator-workspace-mode-btn .curator-ws-mode-badge{padding:1px 5px !important;font-size:11px !important;letter-spacing:-0.015em !important;max-width:56px !important;overflow:hidden !important;text-overflow:ellipsis !important;flex-shrink:0 !important;}",
     "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
-    "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;flex-wrap:wrap !important;}",
+    "  .curator-workspace-quick-ribbon{display:none !important;}",
     "  .curator-ws-ribbon-hint{display:none !important;}",
-    "  .curator-workspace-stage{padding:10px 12px 14px !important;min-width:0 !important;}",
-    "  .curator-gallery-grid{grid-template-columns:repeat(2, minmax(0, 1fr)) !important;gap:10px !important;}",
+    "  .curator-unified-workspace[data-active-mode]:not([data-active-mode='desk']) .curator-workspace-stage{padding:10px 8px 14px !important;border-radius:12px !important;min-width:0 !important;}",
+    "  .curator-catalog-toolbar{padding:10px !important;gap:8px !important;}",
+    "  .curator-filter-bar{flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:6px;}",
+    "  .curator-filter-bar::-webkit-scrollbar,.curator-catalog-tagbar::-webkit-scrollbar{display:none;}",
+    "  .curator-filter-bar > .curator-filter-pill{flex:0 0 auto !important;white-space:nowrap !important;}",
+    "  .curator-catalog-tagbar{flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding:6px 8px !important;margin:0 !important;}",
+    "  .curator-catalog-tagbar > *{flex:0 0 auto !important;white-space:nowrap !important;}",
+    "  .curator-gallery-grid{grid-template-columns:repeat(2, minmax(0, 1fr)) !important;gap:9px !important;}",
+    "  .bangumi-grid-ep-bar{padding:4px 5px !important;gap:3px !important;}",
+    "  .bangumi-grid-ep-btn{min-width:28px !important;width:28px !important;height:28px !important;font-size:14px !important;border-radius:6px !important;}",
+    "  .curator-gallery-add-tag{min-width:24px !important;width:24px !important;height:22px !important;opacity:0.92 !important;}",
+    "  .curator-gallery-quiet-actions{opacity:1 !important;gap:4px !important;}",
+    "  .curator-gallery-quiet-link{min-height:28px !important;padding:3px 7px !important;display:inline-flex !important;align-items:center !important;}",
     "  .curator-desk-grid.is-watching-grid, .curator-desk-grid.is-standby-grid{grid-template-columns:1fr !important;}",
     "  .curator-starter-desk{padding:15px 14px;}",
     "  .curator-starter-inline-row{flex-direction:column;align-items:stretch;}",
+    "  .curator-download-modal{padding:2px 0 calc(20px + env(safe-area-inset-bottom, 0px));}",
+    "  .curator-dl-env-box{display:flex !important;flex-direction:column !important;gap:8px !important;}",
+    "  .curator-dl-search-row{display:flex !important;flex-wrap:wrap !important;gap:6px !important;}",
+    "  .curator-dl-keyword-input{flex:1 1 100% !important;min-width:0 !important;min-height:38px !important;}",
+    "  .curator-dl-search-row > .curator-dl-btn{flex:1 1 auto !important;min-height:36px !important;}",
+    "  .curator-dl-chips-row{flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:4px;}",
+    "  .curator-dl-chips-row > *{flex:0 0 auto !important;white-space:nowrap !important;}",
+    "  .curator-dl-stream-grid{grid-template-columns:1fr !important;}",
+    "  .curator-dl-verify-banner{flex-direction:column !important;align-items:stretch !important;gap:10px !important;}",
+    "  .curator-dl-verify-actions{width:100% !important;flex-wrap:wrap !important;}",
+    "  .curator-dl-verify-actions > button{flex:1 1 auto !important;min-height:36px !important;}",
+    "  .curator-dl-ep-row{display:flex !important;flex-direction:column !important;align-items:stretch !important;gap:8px !important;padding:10px !important;}",
+    "  .curator-dl-ep-badge-col{flex-direction:row !important;align-items:center !important;gap:6px !important;width:100% !important;}",
+    "  .curator-dl-ep-actions-col{width:100% !important;display:flex !important;flex-wrap:wrap !important;gap:6px !important;justify-content:flex-start !important;}",
+    "  .curator-dl-ep-actions-col > button{min-height:34px !important;padding:4px 10px !important;}",
     "}"
   ].join("\n");
 }
