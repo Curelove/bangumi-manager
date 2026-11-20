@@ -7,6 +7,8 @@ const animeDownloadService = require("./anime-download-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const characterArchiveService = require("./character-archive-service.js");
 const multiHallArchiveService = require("./multi-hall-archive-service.js");
+const multiSiteRatingService = require("./multisite-rating-service.js");
+const v08RatingCompare = require("./v08-rating-compare.js");
 const v07Core = require("./v07-core.js");
 const v07Themes = require("./v07-themes.js");
 const v07Stage = require("./v07-anime-stage.js");
@@ -241,24 +243,33 @@ function matchesInstantSearch(item, rawQuery) {
 /**
  * 排序目录条目
  */
-function sortCatalogItems(items, sortBy = "year_desc") {
+function sortCatalogItems(items, sortBy = "year_desc", plugin = null) {
   const list = [...items];
+  const getCommunitySortScore = (it) => {
+    if (plugin && multiSiteRatingService && typeof multiSiteRatingService.getPreferredDisplayRating === "function") {
+      const pref = multiSiteRatingService.getPreferredDisplayRating(plugin, it);
+      if (pref && pref.normalized10 !== null && Number.isFinite(pref.normalized10)) {
+        return pref.normalized10;
+      }
+    }
+    return it.preciseScore ?? it.publicScore ?? it.bangumiScore ?? -1;
+  };
   switch (sortBy) {
     case "myScore_desc":
       list.sort((a, b) => {
         const sa = a.personalScore !== null ? a.personalScore : -1;
         const sb = b.personalScore !== null ? b.personalScore : -1;
         if (sb !== sa) return sb - sa;
-        const ba = a.preciseScore ?? a.publicScore ?? a.bangumiScore ?? -1;
-        const bb = b.preciseScore ?? b.publicScore ?? b.bangumiScore ?? -1;
+        const ba = getCommunitySortScore(a);
+        const bb = getCommunitySortScore(b);
         if (bb !== ba) return bb - ba;
         return a.name.localeCompare(b.name, "zh-CN");
       });
       break;
     case "bgmScore_desc":
       list.sort((a, b) => {
-        const sa = a.preciseScore ?? a.publicScore ?? a.bangumiScore ?? -1;
-        const sb = b.preciseScore ?? b.publicScore ?? b.bangumiScore ?? -1;
+        const sa = getCommunitySortScore(a);
+        const sb = getCommunitySortScore(b);
         if (sb !== sa) return sb - sa;
         return a.name.localeCompare(b.name, "zh-CN");
       });
@@ -296,11 +307,11 @@ function sortCatalogItems(items, sortBy = "year_desc") {
 function ensureDeskState(plugin, container, options = {}) {
   if (!container._deskState) {
     const saved = plugin.settings?.curatorDeskState || {};
-    const validSavedModes = ["desk", "catalog", "character", "gallery", "voice", "game"];
+    const validSavedModes = ["desk", "catalog", "ratings", "character", "gallery", "voice", "game"];
     container._deskState = {
       workspaceMode: validSavedModes.includes(saved.workspaceMode)
         ? saved.workspaceMode
-        : "auto", // "auto" | "desk" | "catalog" | "character" | "gallery" | "voice" | "game"
+        : "auto", // "auto" | "desk" | "catalog" | "ratings" | "character" | "gallery" | "voice" | "game"
       workspaceModeCustomized: Boolean(saved.workspaceModeCustomized),
       roxyGrimoireDismissed: Boolean(
         plugin.settings?.roxyGrimoireDismissed ?? saved.roxyGrimoireDismissed
@@ -386,28 +397,35 @@ function computeLocalUpdatedItems(items) {
         continue;
       }
 
-      // 已看完的老番且没有多出未看新集 -> 排除
-      if (item.state === "已看" && effectiveNewCount <= 0) {
+      // 已看完、抛弃或已弃的老番排除
+      if (item.state === "抛弃" || item.state === "已弃" || (item.state === "已看" && effectiveNewCount <= 0)) {
         item._localInspect = localRes;
         continue;
       }
 
+      const watchedNum = Number(item.watchedEpisodes) || 0;
       let latestVideoMtime = 0;
-      if (fsMod && Array.isArray(localRes.videoFiles)) {
+      let latestUnwatchedMtime = 0;
+      if (Array.isArray(localRes.videoFiles)) {
         for (const vf of localRes.videoFiles) {
-          try {
-            const st = fsMod.statSync(vf.path);
-            if (st && st.mtimeMs > latestVideoMtime) {
-              latestVideoMtime = st.mtimeMs;
-            }
-          } catch (e) {}
+          let t = Math.max(Number(vf.addedTimeMs) || 0, Number(vf.mtimeMs) || 0, Number(vf.birthtimeMs) || 0);
+          if (!t && fsMod && vf.path) {
+            try {
+              const st = fsMod.statSync(vf.path);
+              t = Math.max(Number(st?.mtimeMs) || 0, Number(st?.birthtimeMs) || 0);
+            } catch (e) {}
+          }
+          if (t > latestVideoMtime) latestVideoMtime = t;
+          if ((Number(vf.episode) || 0) > watchedNum && t > latestUnwatchedMtime) {
+            latestUnwatchedMtime = t;
+          }
         }
       }
 
       item._localInspect = {
         ...localRes,
         newCount: effectiveNewCount,
-        latestVideoMtime
+        latestVideoMtime: latestUnwatchedMtime || latestVideoMtime
       };
       candidates.push(item);
     } catch (itemErr) {
@@ -1879,7 +1897,7 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
     : baseFiltered;
 
   // 3. 排序
-  const sortedItems = sortCatalogItems(searchFiltered, state.sortBy);
+  const sortedItems = sortCatalogItems(searchFiltered, state.sortBy, plugin);
 
   // 构建或复用目录区头部与工具栏（确保即时输入搜索时不丢失焦点与输入法组合态）
   let header = catalogMount.querySelector(".curator-catalog-header");
@@ -1910,11 +1928,13 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
       renderCatalogSection(plugin, catalogMount, state, helpers);
     };
 
+    const prefSrcId = multiSiteRatingService.getPreferredRatingSource(plugin);
+    const prefMeta = multiSiteRatingService.RATING_SOURCES[prefSrcId] || multiSiteRatingService.RATING_SOURCES.bangumi;
     const sortSelect = headerControls.createEl("select", { cls: "curator-sort-select" });
     [
       { val: "year_desc", text: "排序：番季年份 ↓" },
       { val: "myScore_desc", text: "排序：个人评分 ↓" },
-      { val: "bgmScore_desc", text: "排序：BGM 评分 ↓" },
+      { val: "bgmScore_desc", text: `排序：${prefMeta.shortLabel} 评分 ↓` },
       { val: "progress_desc", text: "排序：观看进度 ↓" },
       { val: "title_asc", text: "排序：标题音序 ↑" }
     ].forEach((opt) => {
@@ -2251,19 +2271,24 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       plugin.openStateMenu(e, item);
     };
 
-    // 右上角评分签（优先显示个人评分，否则显示 BGM 社区评分）
+    // 右上角评分签（优先显示个人评分，否则按当前优先评分源显示：默认 BGM，支持 AL / MAL / FM / 跨站综合）
     let scoreBadgeText = "★ 评分";
-    const bgmCommunity = item.preciseScore ?? item.publicScore ?? item.bangumiScore;
+    const prefDisp = multiSiteRatingService.getPreferredDisplayRating(plugin, item);
     if (item.personalScore !== null) {
       scoreBadgeText = `★ ${item.personalScore.toFixed(1)}`;
-    } else if (bgmCommunity !== null && bgmCommunity !== undefined) {
-      scoreBadgeText = `BGM ${Number(bgmCommunity).toFixed(1)}`;
+    } else if (prefDisp && prefDisp.badgeText) {
+      scoreBadgeText = prefDisp.badgeText;
     }
     const scoreBadge = posterWrap.createDiv({
       cls: `bangumi-grid-score-badge curator-gallery-score is-interactive ${item.personalScore !== null ? "is-personal" : "is-bgm"}`,
       text: scoreBadgeText
     });
-    scoreBadge.title = "点击快速打分 / 修改个人评分";
+    if (item.personalScore === null && prefDisp?.sourceId) {
+      scoreBadge.dataset.ratingSrc = prefDisp.sourceId;
+    }
+    scoreBadge.title = prefDisp?.tooltip
+      ? `${prefDisp.tooltip} · 点击快速打分 / 修改个人评分`
+      : "点击快速打分 / 修改个人评分";
     scoreBadge.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -2695,7 +2720,9 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
   head.createDiv({ cls: "col-state", text: "状态" });
   head.createDiv({ cls: "col-progress", text: "观看进度" });
   head.createDiv({ cls: "col-myscore", text: "个人评分" });
-  head.createDiv({ cls: "col-bgmscore", text: "BGM 评分" });
+  const prefSrcId = multiSiteRatingService.getPreferredRatingSource(plugin);
+  const prefMeta = multiSiteRatingService.RATING_SOURCES[prefSrcId] || multiSiteRatingService.RATING_SOURCES.bangumi;
+  head.createDiv({ cls: "col-bgmscore", text: `${prefMeta.shortLabel} 评分` });
   head.createDiv({ cls: "col-actions", text: "快捷操作" });
 
   const body = tableWrap.createDiv("curator-index-body");
@@ -2906,15 +2933,32 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       plugin.openScoreMenu(e, item);
     };
 
-    // 8. BGM 评分列（等宽数字）
+    // 8. 优先评分源列（默认 BGM，支持切换 AL / MAL / FM / 综合，点击直达四站评分对比）
     const colBgmScore = row.createDiv("col-bgmscore curator-mono");
-    const bgmVal = item.preciseScore ?? item.publicScore ?? item.bangumiScore;
-    colBgmScore.createSpan({
+    const prefDisp = multiSiteRatingService.getPreferredDisplayRating(plugin, item);
+    const displayText =
+      prefDisp && prefDisp.compactNumber
+        ? prefDisp.isFallback
+          ? `${prefDisp.shortLabel} ${prefDisp.compactNumber}`
+          : prefDisp.compactNumber
+        : "—";
+    const scoreValSpan = colBgmScore.createSpan({
       cls: "curator-index-bgm-val",
-      text: bgmVal !== null && bgmVal !== undefined ? Number(bgmVal).toFixed(1) : "—"
+      text: displayText
     });
-    if (item.personalScore !== null && bgmVal !== null && bgmVal !== undefined) {
-      const delta = item.personalScore - Number(bgmVal);
+    if (prefDisp?.tooltip) {
+      colBgmScore.title = `${prefDisp.tooltip} · 点击查看四站评分对比`;
+    }
+    if (helpers && typeof helpers.switchWorkspaceMode === "function") {
+      scoreValSpan.style.cursor = "pointer";
+      scoreValSpan.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        helpers.switchWorkspaceMode("ratings", { focusItem: item, scrollToWorkspace: true });
+      };
+    }
+    if (item.personalScore !== null && prefDisp && prefDisp.normalized10 !== null) {
+      const delta = item.personalScore - Number(prefDisp.normalized10);
       const sign = delta > 0 ? "+" : "";
       colBgmScore.createSpan({
         cls: `curator-index-delta ${delta >= 0 ? "is-plus" : "is-minus"}`,
@@ -5608,6 +5652,28 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       (box) => {
         v07Themes.renderAppearancePicker(box, {
           appearance: v07Adapters.getAppearance(plugin),
+          ratingSourceOptions: {
+            value: multiSiteRatingService.getPreferredRatingSource(plugin),
+            items: multiSiteRatingService.DISPLAY_SOURCE_IDS.map((id) => ({
+              value: id,
+              label: multiSiteRatingService.RATING_SOURCES[id].shortLabel,
+              title: `${multiSiteRatingService.RATING_SOURCES[id].label}：${multiSiteRatingService.RATING_SOURCES[id].desc}`
+            })),
+            onChange: async (nextSrc) => {
+              await multiSiteRatingService.setPreferredRatingSource(plugin, nextSrc);
+              if (container._deskRuntime) {
+                if (typeof container._deskRuntime.refreshV07Stage === "function") {
+                  container._deskRuntime.refreshV07Stage();
+                }
+                if (container._deskRuntime.catalogMount) {
+                  renderCatalogSection(plugin, container._deskRuntime.catalogMount, state, container._deskRuntime);
+                }
+                if (state.workspaceMode === "ratings" && typeof container._deskRuntime.renderRatingsPane === "function") {
+                  container._deskRuntime.renderRatingsPane();
+                }
+              }
+            }
+          },
           onChange: async (next) => {
             syncAppearanceBtnLabel(next);
             v07Themes.applyTheme(container, next);
@@ -5639,6 +5705,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   refreshBtn.onclick = async () => {
     refreshBtn.disabled = true;
     try {
+      if (v07Adapters && typeof v07Adapters.invalidateLocalFolderCache === "function") {
+        v07Adapters.invalidateLocalFolderCache(plugin);
+      }
       await plugin.refreshScoreDashboard(true);
       await renderCuratorDesk(plugin, container, options, helpers);
     } finally {
@@ -5655,7 +5724,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     state.viewMode = "gallery";
     state.deskTab = "auto";
     state.catalogExpanded = false;
-    plugin.settings.workspaceTabOrder = ["desk", "catalog", "character", "gallery", "voice", "game"];
+    plugin.settings.workspaceTabOrder = ["desk", "catalog", "ratings", "character", "gallery", "voice", "game"];
     await plugin.saveSettings();
     roxyMascotService.emitRoxyEvent(plugin, {
       type: "layout:reset_warn",
@@ -5811,7 +5880,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const watchingCount = Number(metrics.stateCounts["在看"]) || 0;
   const localUpdatedCount = computeLocalUpdatedItems(items).length;
 
-  const validModes = ["desk", "catalog", "character", "gallery", "voice", "game"];
+  const validModes = ["desk", "catalog", "ratings", "character", "gallery", "voice", "game"];
   let effectiveWorkspaceMode = "desk";
   if (state.workspaceModeCustomized && validModes.includes(state.workspaceMode)) {
     effectiveWorkspaceMode = state.workspaceMode;
@@ -5848,7 +5917,12 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     ? plugin.settings.gameCollection.length
     : 0;
 
-  // 6 大顶栏模块名称（单色 1.75px 线性图标 + 悬浮药丸分段槽），支持用户手动拖拽或点击箭头调整顺序（持久化在 workspaceTabOrder）
+  const syncedMultiSiteCount = items.filter((it) => {
+    const rec = multiSiteRatingService.getCachedMultiSiteRecord(plugin, it);
+    return Boolean(rec && (rec.anilist || rec.mal || rec.filmarks));
+  }).length;
+
+  // 7 大顶栏模块名称（单色 1.75px 线性图标 + 悬浮药丸分段槽），支持用户手动拖拽或点击箭头调整顺序（持久化在 workspaceTabOrder）
   const workspaceTabDefs = {
     desk: {
       mode: "desk",
@@ -5866,6 +5940,13 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
       title: "全部番剧",
       statRole: "workspace-catalog-badge",
       getBadgeText: () => `${metrics.total}`
+    },
+    ratings: {
+      mode: "ratings",
+      iconName: "barChart",
+      title: "评分对比",
+      statRole: "workspace-ratings-badge",
+      getBadgeText: () => (syncedMultiSiteCount > 0 ? `${syncedMultiSiteCount}` : "4站")
     },
     character: {
       mode: "character",
@@ -5912,7 +5993,13 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     for (const m of validModes) {
       if (!seen.has(m)) {
         seen.add(m);
-        out.push(m);
+        if (m === "ratings") {
+          const catIdx = out.indexOf("catalog");
+          if (catIdx >= 0) out.splice(catIdx + 1, 0, m);
+          else out.push(m);
+        } else {
+          out.push(m);
+        }
       }
     }
     return out;
@@ -6032,6 +6119,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   const deskModeBtn = tabBtnMap.desk;
   const catalogModeBtn = tabBtnMap.catalog;
+  const ratingsModeBtn = tabBtnMap.ratings;
   const charModeBtn = tabBtnMap.character;
   const galleryModeBtn = tabBtnMap.gallery;
   const voiceModeBtn = tabBtnMap.voice;
@@ -6039,6 +6127,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   const deskModeBadge = tabBadgeMap.desk;
   const catalogModeBadge = tabBadgeMap.catalog;
+  const ratingsModeBadge = tabBadgeMap.ratings;
   const charModeBadge = tabBadgeMap.character;
   const galleryModeBadge = tabBadgeMap.gallery;
   const voiceModeBadge = tabBadgeMap.voice;
@@ -6057,6 +6146,11 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const catalogMount = workspaceStage.createDiv(
     `curator-mount-catalog curator-workspace-pane ${
       effectiveWorkspaceMode === "catalog" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
+    }`
+  );
+  const ratingsMount = workspaceStage.createDiv(
+    `curator-mount-ratings curator-workspace-pane ${
+      effectiveWorkspaceMode === "ratings" ? "is-workspace-pane-active" : "is-workspace-pane-hidden"
     }`
   );
   const characterMount = workspaceStage.createDiv(
@@ -6109,6 +6203,13 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     }
     if (catalogModeBadge) {
       catalogModeBadge.textContent = `${curMetrics.total}`;
+    }
+    if (ratingsModeBadge) {
+      const syncedNow = (state.items || []).filter((it) => {
+        const rec = multiSiteRatingService.getCachedMultiSiteRecord(plugin, it);
+        return Boolean(rec && (rec.anilist || rec.mal || rec.filmarks));
+      }).length;
+      ratingsModeBadge.textContent = syncedNow > 0 ? `${syncedNow}` : "4站";
     }
     if (charModeBadge) {
       charModeBadge.textContent = `${curCharCount}`;
@@ -6204,6 +6305,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     container.dataset.activeMode = targetMode;
     deskModeBtn.classList.toggle("is-active", targetMode === "desk");
     catalogModeBtn.classList.toggle("is-active", targetMode === "catalog");
+    if (ratingsModeBtn) ratingsModeBtn.classList.toggle("is-active", targetMode === "ratings");
     charModeBtn.classList.toggle("is-active", targetMode === "character");
     galleryModeBtn.classList.toggle("is-active", targetMode === "gallery");
     voiceModeBtn.classList.toggle("is-active", targetMode === "voice");
@@ -6215,6 +6317,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     deskMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "desk");
     catalogMount.classList.toggle("is-workspace-pane-active", targetMode === "catalog");
     catalogMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "catalog");
+    ratingsMount.classList.toggle("is-workspace-pane-active", targetMode === "ratings");
+    ratingsMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "ratings");
     characterMount.classList.toggle("is-workspace-pane-active", targetMode === "character");
     characterMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "character");
     galleryMount.classList.toggle("is-workspace-pane-active", targetMode === "gallery");
@@ -6232,6 +6336,8 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
           if (sInput) sInput.focus();
         });
       }
+    } else if (targetMode === "ratings") {
+      renderRatingsPane(switchOpts.focusItem || null);
     } else if (targetMode === "character") {
       if (switchOpts.searchQuery !== undefined && plugin.__characterArchiveUiState) {
         plugin.__characterArchiveUiState.searchQuery = switchOpts.searchQuery;
@@ -6287,6 +6393,12 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     e.preventDefault();
     if (state.workspaceMode !== "catalog") switchWorkspaceMode("catalog");
   };
+  if (ratingsModeBtn) {
+    ratingsModeBtn.onclick = (e) => {
+      e.preventDefault();
+      if (state.workspaceMode !== "ratings") switchWorkspaceMode("ratings");
+    };
+  }
   charModeBtn.onclick = (e) => {
     e.preventDefault();
     if (state.workspaceMode !== "character") switchWorkspaceMode("character");
@@ -6334,6 +6446,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     v07StageMount,
     deskMount: deskDetailMount,
     catalogMount,
+    ratingsMount,
     characterMount,
     galleryMount,
     voiceMount,
@@ -6357,6 +6470,39 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     stageCtx.themeRoot = container;
     v07Stage.renderAnimeStage(v07StageMount, stageCtx);
   };
+  const renderRatingsPane = (focusItem = null) => {
+    v08RatingCompare.renderRatingCompareWorkspace(ratingsMount, {
+      plugin,
+      items: state.items || [],
+      focusItem,
+      getCover: (it) => {
+        try {
+          return it && it.cover ? plugin.getCoverResourceUrl(it.cover, (it.file && it.file.path) || "") : "";
+        } catch (_) {
+          return "";
+        }
+      },
+      openNote: async (it) => {
+        if (it && it.file && plugin.app && plugin.app.workspace) {
+          const leaf = plugin.app.workspace.getLeaf(false);
+          await leaf.openFile(it.file);
+        }
+      },
+      openExternal: (url) => {
+        if (!url) return;
+        try {
+          window.open(url, "_blank", "noopener");
+        } catch (_) {}
+      },
+      onPreferredSourceChanged: () => {
+        renderQuickRibbon();
+        refreshV07Stage();
+        renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
+      },
+      service: multiSiteRatingService
+    });
+  };
+  runtimeHelpers.renderRatingsPane = renderRatingsPane;
   runtimeHelpers.refreshV07Stage = refreshV07Stage;
   runtimeHelpers.refreshStage = refreshV07Stage;
   container._deskRuntime = runtimeHelpers;
@@ -6364,7 +6510,9 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   renderQuickRibbon();
   refreshV07Stage();
   renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
-  if (effectiveWorkspaceMode === "character") {
+  if (effectiveWorkspaceMode === "ratings") {
+    renderRatingsPane(null);
+  } else if (effectiveWorkspaceMode === "character") {
     characterArchiveService.renderCharacterArchiveWorkspace(
       plugin,
       characterMount,
@@ -6487,18 +6635,21 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
       // 更新个人评分徽章
       if (updates.score !== undefined) {
         const pScore = item.personalScore;
-        const bgmVal = item.preciseScore ?? item.publicScore ?? item.bangumiScore;
+        const prefDisp = multiSiteRatingService.getPreferredDisplayRating(plugin, item);
         node.querySelectorAll(".bangumi-grid-score-badge").forEach((badge) => {
           if (pScore !== null) {
             badge.textContent = `★ ${pScore.toFixed(1)}`;
             badge.classList.add("is-personal");
             badge.classList.remove("is-bgm");
-          } else if (bgmVal !== null && bgmVal !== undefined) {
-            badge.textContent = `BGM ${Number(bgmVal).toFixed(1)}`;
+            delete badge.dataset.ratingSrc;
+          } else if (prefDisp && prefDisp.badgeText) {
+            badge.textContent = prefDisp.badgeText;
+            badge.dataset.ratingSrc = prefDisp.sourceId || "bangumi";
             badge.classList.add("is-bgm");
             badge.classList.remove("is-personal");
           } else {
             badge.textContent = "★ 评分";
+            delete badge.dataset.ratingSrc;
           }
         });
         node.querySelectorAll(".curator-score-pill.is-personal").forEach((pill) => {
@@ -7835,7 +7986,7 @@ function getCuratorDeskStyles() {
     "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
     "  .curator-workspace-mode-btn{width:100% !important;min-height:38px !important;height:38px !important;justify-content:center !important;padding:0 6px !important;font-size:12px !important;gap:4px !important;}",
     "  .curator-ws-mode-badge{padding:1px 5px !important;}",
-    "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
     "  .curator-workspace-quick-ribbon{margin-left:0 !important;width:100% !important;min-width:0 !important;justify-content:flex-start !important;gap:6px !important;flex-wrap:wrap !important;}",
     "  .curator-ws-ribbon-hint{display:none !important;}",
     "  .curator-workspace-stage{padding:10px 8px 14px !important;min-width:0 !important;}",
@@ -7866,7 +8017,7 @@ function getCuratorDeskStyles() {
     "  .curator-workspace-mode-btn .curator-ws-mode-icon{display:none !important;}",
     "  .curator-workspace-mode-btn .curator-ws-mode-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
     "  .curator-workspace-mode-btn .curator-ws-mode-badge{padding:1px 5px !important;font-size:11px !important;letter-spacing:-0.015em !important;max-width:56px !important;overflow:hidden !important;text-overflow:ellipsis !important;flex-shrink:0 !important;}",
-    "  .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode) .curator-ws-tab-move-btn{display:none !important;}",
     "  .curator-workspace-quick-ribbon{display:none !important;}",
     "  .curator-ws-ribbon-hint{display:none !important;}",
     "  .curator-unified-workspace[data-active-mode]:not([data-active-mode='desk']) .curator-workspace-stage{padding:10px 8px 14px !important;border-radius:12px !important;min-width:0 !important;}",
@@ -7908,7 +8059,14 @@ function getCuratorDeskStyles() {
     "  .curator-dl-ep-actions-col > button{min-height:34px !important;padding:4px 10px !important;}",
     "}",
     ".curator-download-modal.is-mobile-download .curator-dl-chips-row,.curator-download-modal.is-mobile-download .curator-dl-subgroup-bar{flex-wrap:nowrap !important;overflow-x:auto !important;-webkit-overflow-scrolling:touch;scrollbar-width:none;}",
-    ".curator-download-modal.is-mobile-download .curator-dl-chips-row > *,.curator-download-modal.is-mobile-download .curator-dl-subgroup-bar > *{flex:0 0 auto !important;white-space:nowrap !important;}"
+    ".curator-download-modal.is-mobile-download .curator-dl-chips-row > *,.curator-download-modal.is-mobile-download .curator-dl-subgroup-bar > *{flex:0 0 auto !important;white-space:nowrap !important;}",
+    /* v0.9：窄屏顶栏恰好 7 个标签时排成「4 + 3」两行，避免 3 + 3 + 1 留下孤零零的一格（重排模式除外） */
+    "@container curator-desk (min-width: 330px) and (max-width: 760px){",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode){grid-template-columns:repeat(12,minmax(0,1fr)) !important;}",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode) > .curator-workspace-mode-btn{grid-column:span 4 !important;}",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode) > .curator-workspace-mode-btn:first-child:nth-last-child(7),",
+    "  div.curator-desk-root .curator-workspace-mode-tabs:not(.is-reorder-mode) > .curator-workspace-mode-btn:first-child:nth-last-child(7) ~ .curator-workspace-mode-btn:nth-child(-n+4){grid-column:span 3 !important;}",
+    "}"
   ].join("\n");
 }
 

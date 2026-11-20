@@ -406,6 +406,24 @@ function renderAppearancePicker(host, opts = {}) {
   const gazeHintEl = gazeRow.querySelector(".bm7-toggle-hint");
   gazeInput.dataset.key = "roxyGaze";
 
+  let ratingSourceRow = null;
+  let ratingSourceSegHost = null;
+  let ratingSourceHint = null;
+  let currentRatingSource = opts.ratingSourceOptions ? String(opts.ratingSourceOptions.value || "bangumi") : "bangumi";
+  if (opts.ratingSourceOptions && Array.isArray(opts.ratingSourceOptions.items)) {
+    ratingSourceHint = h("div.bm7-toggle-hint", {
+      text: "控制追番封面、全部番剧与 3D 展厅等单评分位默认显示的评分依据（该站未同步时自动回退 Bangumi）"
+    });
+    ratingSourceSegHost = h("div.bm8-motion-tier-seg");
+    ratingSourceRow = h("div.bm8-motion-tier-row", [
+      h("div.bm7-toggle-text", [
+        h("div.bm7-toggle-label", { text: "优先展示评分源" }),
+        ratingSourceHint
+      ]),
+      ratingSourceSegHost
+    ]);
+  }
+
   const commit = (patch) => {
     const merged = Object.assign({}, a, patch);
     if (patch && patch.theme && !patch.themeMotion && !patch.themeMotionLevel) {
@@ -547,9 +565,28 @@ function renderAppearancePicker(host, opts = {}) {
           ? "「轻巧」档位已暂停持续光标追踪以节省显存；切至「丰富」即可启用视线跟随"
           : "光标移动时洛琪希会轻转视线看向光标并自然眨眼；关闭后释放动态图层，不占用额外显存";
     }
+
+    if (ratingSourceSegHost && opts.ratingSourceOptions) {
+      clear(ratingSourceSegHost);
+      ratingSourceSegHost.appendChild(
+        segmented(
+          opts.ratingSourceOptions.items,
+          currentRatingSource,
+          (nextSrc) => {
+            currentRatingSource = nextSrc;
+            if (typeof opts.ratingSourceOptions.onChange === "function") {
+              opts.ratingSourceOptions.onChange(nextSrc);
+            }
+            paint();
+          },
+          "is-small"
+        )
+      );
+    }
   };
 
   toggles.append(motionRow, celFxRow, artRow, gazeRow);
+  if (ratingSourceRow) toggles.append(ratingSourceRow);
   wrap.append(grid, toggles);
   host.appendChild(wrap);
   paint();

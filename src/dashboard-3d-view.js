@@ -1,6 +1,7 @@
 import * as THREE from "three";
 const { Notice } = require("obsidian");
 const netabaTrendService = require("./netaba-trend-service.js");
+const multiSiteRatingService = require("./multisite-rating-service.js");
 const { inspectLocalFolder, openLocalPathSafely, parseFrontmatter, parseNoteReviewsSection } = require("./note-utils.js");
 const reviewStudioService = require("./review-studio-service.js");
 const { isMobileEnv, isDesktopNodeAvailable } = require("./platform-env.js");
@@ -3771,11 +3772,17 @@ class Dashboard3DSpace {
 
     const scoreCell = this.detailCell(grid, "评分对照 / RATING");
     const personal = item.personalScore == null ? "未评分" : Number(item.personalScore).toFixed(1);
+    const pref3d = multiSiteRatingService.getPreferredDisplayRating(this.plugin, item);
     const rawBgm = Number(item.preciseScore ?? item.publicScore ?? item.bangumiScore);
     const bgm = Number.isFinite(rawBgm) && rawBgm > 0 ? rawBgm.toFixed(1) : "未记录";
+    const prefLabel =
+      pref3d && pref3d.rawScore !== null && pref3d.sourceId !== "bangumi"
+        ? `${pref3d.siteLabel} ${pref3d.compactNumber}`
+        : `BGM 评分 ${bgm}`;
     const rawUserBgm = Number(item.bangumiScore);
     const userBgmPart = Number.isFinite(rawUserBgm) && rawUserBgm > 0 ? ` ／ 你在 BGM 的评分 ${rawUserBgm.toFixed(1)}` : "";
-    this.el(scoreCell, "div", "atelier-data-value", `个人 ${personal}${userBgmPart} ／ BGM 评分 ${bgm}`);
+    const scoreLine = this.el(scoreCell, "div", "atelier-data-value", `个人 ${personal}${userBgmPart} ／ ${prefLabel}`);
+    if (pref3d && pref3d.tooltip) scoreLine.title = pref3d.tooltip;
 
     const ruler = this.el(scoreCell, "div", "atelier-score-ruler");
     for (let score = 1; score <= 10; score += 1) {

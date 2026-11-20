@@ -747,7 +747,7 @@ function renderAnimeStage(host, ctx) {
 
     downloadedPool = items
       .filter((it) => {
-        if (it.state === "已看" || it.state === "抛弃") return false;
+        if (it.state === "已看" || it.state === "抛弃" || it.state === "已弃") return false;
         const loc = getLocal(it);
         if (!loc) return false;
         const w = Number(it.watchedEpisodes) || 0;
@@ -756,6 +756,9 @@ function renderAnimeStage(host, ctx) {
       .sort((a, b) => {
         const la = getLocal(a);
         const lb = getLocal(b);
+        const ta = (la && (Number(la.latestUnwatchedTimeMs) || Number(la.latestFileTimeMs))) || 0;
+        const tb = (lb && (Number(lb.latestUnwatchedTimeMs) || Number(lb.latestFileTimeMs))) || 0;
+        if (tb !== ta) return tb - ta;
         const na = (la && Number(la.newCount)) || 0;
         const nb = (lb && Number(lb.newCount)) || 0;
         return nb - na || activity(b) - activity(a);
@@ -1063,7 +1066,7 @@ function renderAnimeStage(host, ctx) {
       "is-small bm7-hero-tabs"
     );
 
-  const syncPlateBadges = (plateEl, pScore, pubScore) => {
+  const syncPlateBadges = (plateEl, pScore, pubScore, item) => {
     let myBadge = plateEl.querySelector(":scope > .bm7-hero-myscore");
     if (pScore !== null) {
       if (!myBadge) {
@@ -1076,13 +1079,40 @@ function renderAnimeStage(host, ctx) {
       myBadge.remove();
     }
 
+    const pref =
+      item && typeof ctx.getPreferredRating === "function" ? ctx.getPreferredRating(item) : null;
+    const hasPref = Boolean(pref && pref.rawScore !== null && pref.compactNumber);
+    const hasFallbackPub = pubScore !== null;
+
     let pubBadge = plateEl.querySelector(":scope > .bm7-hero-score");
-    if (pubScore !== null) {
+    if (hasPref || hasFallbackPub) {
       if (!pubBadge) {
-        pubBadge = h("span.bm7-hero-score", { title: "Bangumi 评分" });
+        pubBadge = h("span.bm7-hero-score");
+        if (typeof ctx.openRatingCompare === "function") {
+          pubBadge.classList.add("is-clickable");
+          pubBadge.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ctx.openRatingCompare(plateEl._heroItem || item);
+          });
+        }
         plateEl.appendChild(pubBadge);
       }
-      pubBadge.textContent = pubScore.toFixed(1);
+      if (hasPref) {
+        pubBadge.dataset.ratingSrc = pref.sourceId || "bangumi";
+        pubBadge.textContent =
+          pref.sourceId === "bangumi"
+            ? Number(pref.rawScore).toFixed(1)
+            : `${pref.shortLabel} ${pref.compactNumber}`;
+        const tipBody = pref.tooltip || `${pref.siteLabel} ${pref.compactNumber}`;
+        pubBadge.title = `${tipBody}${typeof ctx.openRatingCompare === "function" ? " · 点击查看四站评分对比" : ""}`;
+      } else {
+        pubBadge.dataset.ratingSrc = "bangumi";
+        pubBadge.textContent = pubScore.toFixed(1);
+        pubBadge.title = `Bangumi 评分 ${pubScore.toFixed(1)}${
+          typeof ctx.openRatingCompare === "function" ? " · 点击查看四站评分对比" : ""
+        }`;
+      }
     } else if (pubBadge) {
       pubBadge.remove();
     }
@@ -1135,7 +1165,11 @@ function renderAnimeStage(host, ctx) {
       btn._railIdx = idx;
       btn._railItem = it;
       btn.classList.toggle("is-active", isAct);
-      btn.title = `${it.name} · 已看 ${w} 集`;
+      const railLoc = activeScene === "downloaded" ? getLocal(it) : null;
+      const railDlTs = railLoc && (railLoc.latestUnwatchedTimeMs || railLoc.latestFileTimeMs);
+      btn.title = railDlTs
+        ? `${it.name} · 最新入库 ${formatRelative(toDate(railDlTs))} · 已看 ${w} 集`
+        : `${it.name} · 已看 ${w} 集`;
       btn.setAttribute("aria-current", isAct ? "true" : "false");
 
       let prog = btn.querySelector(":scope > .bm7-rail-prog");
@@ -1423,10 +1457,9 @@ function renderAnimeStage(host, ctx) {
               : null,
             desktop && isAutoFollowing && actions.openDownload
               ? h(
-                  "button.bm7-hero-local",
+                  "button.bm7-hero-local-follow",
                   {
                     attr: { type: "button" },
-                    style: { cursor: "pointer", border: "none", background: "transparent", padding: "0" },
                     title: `自动追更中（${autoFollow.sourceLabel || "已绑定源"}）· 点击管理或暂停`,
                     on: {
                       click: (ev) => {
@@ -1435,7 +1468,7 @@ function renderAnimeStage(host, ctx) {
                       }
                     }
                   },
-                  [icon("rss", 13), "自动追更中"]
+                  [icon("rss", 13), h("span", { text: "自动追更中" })]
                 )
               : null,
             local && local.hasAttentionNeeded && actions.openLocalDiagnostics
@@ -1472,6 +1505,12 @@ function renderAnimeStage(host, ctx) {
         ]),
         quipBar,
         h("div.bm7-hero-foot", [
+          activeScene === "downloaded" && local && (local.latestUnwatchedTimeMs || local.latestFileTimeMs)
+            ? h("span", [
+                icon("download", 13),
+                `最新入库 ${formatRelative(toDate(local.latestUnwatchedTimeMs || local.latestFileTimeMs))}`
+              ])
+            : null,
           lastAt ? h("span", [icon("clock", 13), `上次更新 ${formatRelative(toDate(lastAt))}`]) : null,
           lastReview && (lastReview.text || lastReview.content)
             ? h("span.bm7-hero-quote", {
@@ -1495,7 +1534,7 @@ function renderAnimeStage(host, ctx) {
         const existingInfo = existingMain && existingMain.querySelector(":scope > .bm7-hero-info");
         if (existingMain && existingPlate && existingInfo) {
           existingPlate._heroItem = item;
-          syncPlateBadges(existingPlate, pScore, pubScore);
+          syncPlateBadges(existingPlate, pScore, pubScore, item);
           existingMain.replaceChild(infoCol, existingInfo);
 
           const existingRail = existingHero.querySelector(":scope > nav.bm7-hero-rail");
@@ -1521,7 +1560,7 @@ function renderAnimeStage(host, ctx) {
 
       const plate = h("div.bm7-hero-plate.bm7-hero-cover", [coverEl(coverUrl, item.name)]);
       plate._heroItem = item;
-      syncPlateBadges(plate, pScore, pubScore);
+      syncPlateBadges(plate, pScore, pubScore, item);
       plate.addEventListener("click", () => actions.openNote && actions.openNote(plate._heroItem));
 
       const main = h("div.bm7-hero-main", [plate, infoCol]);

@@ -579,11 +579,14 @@ function inspectLocalFolder(downloadPath, watchedEpisodes, options = {}) {
   const recordCandidate = (entryName, fullPath, relPath, depth, topSubdirName, parentDirName, inExtraBranch, siblingVideoCountInDir) => {
     let fileSize = 0;
     let mtimeMs = 0;
+    let birthtimeMs = 0;
     try {
       const st = fs.statSync(fullPath);
       fileSize = Number(st?.size) || 0;
       mtimeMs = Number(st?.mtimeMs) || 0;
+      birthtimeMs = Number(st?.birthtimeMs) || 0;
     } catch (_) {}
+    const addedTimeMs = Math.max(mtimeMs, birthtimeMs);
 
     const ext = extnameLower(entryName);
     // .ts 仅当体积 > 2MB 时视为电视传输流视频，避免误判小型 TypeScript 脚本
@@ -649,7 +652,9 @@ function inspectLocalFolder(downloadPath, watchedEpisodes, options = {}) {
       extraKind: inExtraBranch ? (meta.extraKind || "特典子目录") : meta.extraKind,
       fractionalEp: meta.fractionalEp,
       size: fileSize,
-      mtimeMs
+      mtimeMs,
+      birthtimeMs,
+      addedTimeMs
     };
 
     if (inExtraBranch || meta.isExtra) {

@@ -209,6 +209,9 @@ var DEFAULT_SETTINGS = {
 
 
   bangumiPreciseScoreDisplayDigits: 4,
+  preferredRatingSource: "bangumi",
+  multiSiteRatingsCache: {},
+  multiSiteWeightConfig: null,
   dashboardSectionOrder: [],
   dashboardSectionCollapsed: {},
   dashboardSectionHidden: {},
@@ -244,7 +247,7 @@ var DEFAULT_SETTINGS = {
   qbittorrentAutoCreateFolder: true,
   workspaceDefaultMode: "auto",
   workspaceModeCustomized: false,
-  workspaceTabOrder: ["desk", "catalog", "character", "gallery", "voice", "game"],
+  workspaceTabOrder: ["desk", "catalog", "ratings", "character", "gallery", "voice", "game"],
   characterImageFolder: "附件/角色立绘",
   reviewImageFolder: "附件/观片手札图片",
   reviewEnterToSubmit: true,

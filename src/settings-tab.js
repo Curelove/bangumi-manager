@@ -13,6 +13,7 @@ const {
   resetRoxyGestureMemory
 } = require("./roxy-mascot-service");
 const reviewStudioService = require("./review-studio-service");
+const multiSiteRatingService = require("./multisite-rating-service");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -4712,6 +4713,69 @@ await this.saveAndSynchronizeNoteScores();
 
           await this.saveAndSynchronizeNoteScores();
         });
+      });
+
+    this.addScoreSectionTitle(
+      container,
+      "多站国际评分源（AniList · MyAnimeList · Filmarks）"
+    );
+
+    new Setting(container)
+      .setName("番剧档案馆优先展示的评分依据")
+      .setDesc(
+        "控制追番封面、全部番剧卡片、列表评分列与 3D 展厅等单评分位默认显示的评分来源（默认 Bangumi；所选网站尚未同步时自动回退显示 Bangumi 评分）。多站对比详见番剧档案馆「评分对比」标签页。"
+      )
+      .addDropdown((dropdown) => {
+        dropdown.addOptions({
+          bangumi: "Bangumi（默认 · 华语社区 10 分制）",
+          anilist: "AniList（英文社区百分制）",
+          mal: "MyAnimeList（欧美最大 10 分制）",
+          filmarks: "Filmarks（日本最大 5 分制）",
+          composite: "跨站综合分（四站加权 10 分制）"
+        });
+        dropdown.setValue(multiSiteRatingService.getPreferredRatingSource(this.plugin));
+        dropdown.onChange(async (value) => {
+          await multiSiteRatingService.setPreferredRatingSource(this.plugin, value);
+          if (typeof this.plugin.refreshOpenDashboardViews === "function") {
+            await this.plugin.refreshOpenDashboardViews().catch(() => {});
+          }
+        });
+      });
+
+    const cachedMultiCount = Object.values(this.plugin.settings?.multiSiteRatingsCache || {}).filter(
+      (r) => r && (r.anilist || r.mal || r.filmarks)
+    ).length;
+
+    new Setting(container)
+      .setName("同步国际多站评分缓存")
+      .setDesc(
+        `当前已缓存 ${cachedMultiCount} 部作品的 AniList / MyAnimeList / Filmarks 评分（独立存放在插件缓存中，绝不改动既有动画 Markdown 笔记）。`
+      )
+      .addButton((btn) => {
+        btn
+          .setButtonText("同步在看 / 想看")
+          .setCta()
+          .onClick(async () => {
+            const items =
+              typeof this.plugin.collectDashboardItems === "function"
+                ? await this.plugin.collectDashboardItems().catch(() => [])
+                : [];
+            btn.setDisabled(true);
+            btn.setButtonText("后台同步中…");
+            new Notice("已开始后台同步「在看 / 想看」作品的多站评分，可随时在「评分对比」页查看进度");
+            try {
+              const res = await multiSiteRatingService.startBatchMultiSiteSync(this.plugin, items, {
+                scope: "watching"
+              });
+              const st = res?.status || {};
+              new Notice(`多站评分同步完成：成功 ${st.succeeded || 0} 部，失败 ${st.failed || 0} 部`, 4000);
+              if (typeof this.plugin.refreshOpenDashboardViews === "function") {
+                await this.plugin.refreshOpenDashboardViews().catch(() => {});
+              }
+            } finally {
+              this.display();
+            }
+          });
       });
 
     this.addScoreSectionTitle(

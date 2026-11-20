@@ -18,6 +18,7 @@ const { dayKey, toDate } = require("./v07-core.js");
 const bilibiliLiveService = require("./bilibili-live-service.js");
 const animeActivityService = require("./anime-activity-and-random-service.js");
 const animeDownloadService = require("./anime-download-service.js");
+const multiSiteRatingService = require("./multisite-rating-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
 const gameMultisourceApi = require("./game-multisource-api.js");
@@ -260,6 +261,12 @@ function computeBangumiTagCoverage(items) {
   return { total, missing };
 }
 
+function invalidateLocalFolderCache(plugin) {
+  if (plugin && plugin._v07LocalFolderCache && typeof plugin._v07LocalFolderCache.clear === "function") {
+    plugin._v07LocalFolderCache.clear();
+  }
+}
+
 /* ============================== 番剧首屏 ============================== */
 
 function createAnimeStageContext(plugin, items, deskRuntime = {}) {
@@ -313,11 +320,22 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
     if (!entry.videoFiles) return null;
     const watched = Number(it.watchedEpisodes) || 0;
     let maxEp = 0;
+    let latestFileTimeMs = 0;
+    let latestUnwatchedTimeMs = 0;
     const unseen = [];
     for (const vf of entry.videoFiles) {
       const ep = Number(vf && vf.episode) || 0;
+      const tMs = Math.max(
+        Number(vf && vf.addedTimeMs) || 0,
+        Number(vf && vf.mtimeMs) || 0,
+        Number(vf && vf.birthtimeMs) || 0
+      );
+      if (tMs > latestFileTimeMs) latestFileTimeMs = tMs;
       if (ep > maxEp) maxEp = ep;
-      if (ep > watched) unseen.push(vf);
+      if (ep > watched) {
+        unseen.push(vf);
+        if (tMs > latestUnwatchedTimeMs) latestUnwatchedTimeMs = tMs;
+      }
     }
     unseen.sort((a, b) => (Number(a.episode) || 0) - (Number(b.episode) || 0));
     const exactNext = unseen.find((v) => Number(v.episode) === watched + 1) || unseen[0] || null;
@@ -327,6 +345,8 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       nextEpisodeNumber: exactNext ? Number(exactNext.episode) || null : null,
       maxLocalEpisode: maxEp,
       newCount: unseen.length,
+      latestFileTimeMs,
+      latestUnwatchedTimeMs: latestUnwatchedTimeMs || latestFileTimeMs,
       hasAttentionNeeded: Boolean(m.hasAttentionNeeded),
       duplicateCount: Number(m.duplicateCount) || 0,
       suspectedParent: Boolean(m.suspectedParent),
@@ -360,6 +380,15 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       animeDownloadService && typeof animeDownloadService.getAnimeAutoFollowState === "function"
         ? animeDownloadService.getAnimeAutoFollowState(plugin, it)
         : { status: "none", sourceLabel: "" },
+    getPreferredRating: (it) =>
+      multiSiteRatingService && typeof multiSiteRatingService.getPreferredDisplayRating === "function"
+        ? multiSiteRatingService.getPreferredDisplayRating(plugin, it)
+        : null,
+    openRatingCompare: (it) => {
+      if (deskRuntime && typeof deskRuntime.switchWorkspaceMode === "function") {
+        deskRuntime.switchWorkspaceMode("ratings", { focusItem: it || null, scrollToWorkspace: true });
+      }
+    },
     getWatchUrl: (it) => (it && it.watchUrl) || "",
     getBgmUrl: (it) =>
       (it && it.bgmUrl) ||
@@ -897,6 +926,7 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
 module.exports = {
   getAppearance,
   saveAppearance,
+  invalidateLocalFolderCache,
   createLiveRoomProvider,
   buildWatchHistoryEvents,
   computeBangumiTagCoverage,

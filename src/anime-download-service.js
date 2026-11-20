@@ -3568,22 +3568,45 @@ async function sanitizeDeadQbittorrentComicatRules(plugin) {
   }
 }
 
+const AUTO_FOLLOW_STOPPED_WATCH_STATES = new Set(["已看", "搁置", "抛弃", "已弃"]);
+
+function isAutoFollowStoppedWatchState(state) {
+  return AUTO_FOLLOW_STOPPED_WATCH_STATES.has(String(state || "").trim());
+}
+
+function isAutoFollowActiveWatchState(state) {
+  const s = String(state || "").trim();
+  return !s || !AUTO_FOLLOW_STOPPED_WATCH_STATES.has(s);
+}
+
 /**
  * 插件侧磁力 RSS 追更轮询器：拉取已启用订阅的 RSS XML，校验连续片名、过滤已看/本地已有/已投递剧集后推送给 qBittorrent。
+ * 默认覆盖「在看」与「想看」（支持养肥预下载），仅自动跳过「已看 / 搁置 / 抛弃 / 已弃」作品。
  * 严格尊重用户的暂停/移除操作，绝不从笔记残留的 YAML 属性中静默复活已删除的订阅规则。
  */
 async function pollPluginRssSubscriptions(plugin, options = {}) {
-  if (!isDesktopNodeAvailable() || !plugin?.settings) return { checked: 0, dispatched: 0 };
-  if (plugin._isPollingPluginRss) return { checked: 0, dispatched: 0 };
-  plugin._isPollingPluginRss = true;
+  if (!isDesktopNodeAvailable() || !plugin?.settings) return { checked: 0, dispatched: 0, skippedStopped: 0 };
+  if (plugin._isPollingPluginRss && !options.allowConcurrentSingle) {
+    return { checked: 0, dispatched: 0, skippedStopped: 0 };
+  }
+  const setLock = !options.allowConcurrentSingle;
+  if (setLock) plugin._isPollingPluginRss = true;
 
   try {
-    await healPollutedPluginRssSubscriptions(plugin).catch(() => {});
+    if (!options.targetItem) {
+      await healPollutedPluginRssSubscriptions(plugin).catch(() => {});
+    }
     const qbStatus = detectQbittorrentStatus(plugin);
-    if (!qbStatus.enabled || !qbStatus.installed) return { checked: 0, dispatched: 0 };
+    if (!qbStatus.enabled || !qbStatus.installed) {
+      return { checked: 0, dispatched: 0, skippedStopped: 0, qbNotReady: true };
+    }
 
     const subMap = ensurePluginRssSubMap(plugin);
-    const items = typeof plugin.collectDashboardItems === "function" ? await plugin.collectDashboardItems().catch(() => []) : [];
+    const items = options.targetItem
+      ? [options.targetItem]
+      : typeof plugin.collectDashboardItems === "function"
+      ? await plugin.collectDashboardItems().catch(() => [])
+      : [];
     const byName = new Map();
     const bySavePath = new Map();
     const byNotePath = new Map();
@@ -3595,19 +3618,35 @@ async function pollPluginRssSubscriptions(plugin, options = {}) {
       if (it?.file?.path) byNotePath.set(it.file.path, it);
     }
 
+    let entriesToPoll = Object.entries(subMap);
+    if (options.targetItem) {
+      const matchedEntries = findMatchingSubEntriesForItem(plugin, options.targetItem);
+      entriesToPoll = matchedEntries.map((m) => [m.key, m.sub]);
+    }
+
     let checked = 0;
     let dispatched = 0;
+    let skippedStopped = 0;
     let dirty = false;
 
-    for (const [key, sub] of Object.entries(subMap)) {
-      if (!sub || sub.enabled === false || !sub.rssUrl) continue;
+    for (const [key, sub] of entriesToPoll) {
+      if (!sub || (!options.includePaused && sub.enabled === false) || !sub.rssUrl) continue;
       if (isGenericSiteWideRssFeed(sub.rssUrl)) {
         continue;
       }
 
-      const resolved = resolveNoteItemForSubscription(key, sub, items, byName, bySavePath, byNotePath);
+      const resolved = options.targetItem
+        ? { matched: true, item: options.targetItem }
+        : resolveNoteItemForSubscription(key, sub, items, byName, bySavePath, byNotePath);
       const noteItem = resolved.item;
-      if (resolved.matched && noteItem.state && noteItem.state !== "在看" && !options.forceAll) {
+      if (
+        resolved.matched &&
+        noteItem.state &&
+        isAutoFollowStoppedWatchState(noteItem.state) &&
+        !options.forceAll &&
+        !options.targetItem
+      ) {
+        skippedStopped++;
         continue;
       }
       if (resolved.matched && noteItem.file?.path && sub.notePath !== noteItem.file.path) {
@@ -3638,9 +3677,12 @@ async function pollPluginRssSubscriptions(plugin, options = {}) {
       const watchedEp = Number(noteItem.watchedEpisodes) || 0;
       const saveDir = (noteItem.downloadPath && noteItem.downloadPath !== "无" ? noteItem.downloadPath : sub.savePath) || "";
       const localInspect = saveDir ? noteUtils.inspectLocalFolder(saveDir, watchedEp) : null;
-      const localEpSet = new Set(
-        Array.isArray(localInspect?.videoFiles) ? localInspect.videoFiles.map((v) => Number(v.episode)) : []
-      );
+      const localEps = Array.isArray(localInspect?.videoFiles)
+        ? localInspect.videoFiles.map((v) => Number(v.episode)).filter((n) => Number.isFinite(n))
+        : [];
+      const localEpSet = new Set(localEps);
+      const maxLocalEp = localEps.length > 0 ? Math.max(...localEps) : 0;
+      const epWatermark = Math.max(watchedEp, maxLocalEp);
       const matchedSet = new Set(Array.isArray(sub.matchedHashes) ? sub.matchedHashes : []);
       const baseline = Number(sub.baselineTimeMs) || 0;
       const mustContainRaw = String(sub.mustContain || "").trim();
@@ -3659,7 +3701,9 @@ async function pollPluginRssSubscriptions(plugin, options = {}) {
           dirty = true;
           continue;
         }
-        if (baseline > 0 && epItem.pubTimeMs > 0 && epItem.pubTimeMs <= baseline) {
+        // 严格大于当前「已看集数与本地最高集数」的新集不受旧 baselineTimeMs 误拦截，避免先播后订阅漏抓当周新集
+        const isStrictlyNewerEp = Number.isFinite(epNum) && epNum > epWatermark;
+        if (!isStrictlyNewerEp && baseline > 0 && epItem.pubTimeMs > 0 && epItem.pubTimeMs <= baseline) {
           matchedSet.add(epItem.infoHash);
           dirty = true;
           continue;
@@ -3683,10 +3727,19 @@ async function pollPluginRssSubscriptions(plugin, options = {}) {
     if (dirty && typeof plugin.saveSettings === "function") {
       await plugin.saveSettings().catch(() => {});
     }
-    return { checked, dispatched };
+    return { checked, dispatched, skippedStopped };
   } finally {
-    plugin._isPollingPluginRss = false;
+    if (setLock) plugin._isPollingPluginRss = false;
   }
+}
+
+async function pollSinglePluginRssSubscription(plugin, item) {
+  if (!item) return { checked: 0, dispatched: 0, skippedStopped: 0 };
+  return pollPluginRssSubscriptions(plugin, {
+    targetItem: item,
+    forceAll: true,
+    allowConcurrentSingle: true
+  });
 }
 
 let _nativeQbRulesCache = { ts: 0, rules: [] };
@@ -4093,6 +4146,9 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
       }
       entries.sort((a, b) => {
         if (a.isEnabled !== b.isEnabled) return a.isEnabled ? -1 : 1;
+        const aAct = isAutoFollowActiveWatchState(a.watchState) && a.matchedNote;
+        const bAct = isAutoFollowActiveWatchState(b.watchState) && b.matchedNote;
+        if (aAct !== bAct) return aAct ? -1 : 1;
         if ((a.watchState === "在看") !== (b.watchState === "在看")) return a.watchState === "在看" ? -1 : 1;
         return b.updatedAt - a.updatedAt;
       });
@@ -4107,7 +4163,9 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
       const entries = this.buildEntries();
       const activeEntries = entries.filter((e) => e.isEnabled);
       const pausedEntries = entries.filter((e) => !e.isEnabled);
-      const nonWatchingActive = activeEntries.filter((e) => e.watchState !== "在看");
+      const stoppedOrUnmatchedActive = activeEntries.filter(
+        (e) => !e.matchedNote || isAutoFollowStoppedWatchState(e.watchState)
+      );
 
       const header = contentEl.createDiv("curator-dl-header curator-dl-header-row");
       const titleCol = header.createDiv("curator-dl-title-col");
@@ -4117,7 +4175,7 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
       });
       titleCol.createDiv({
         cls: "curator-dl-meta-sub",
-        text: "集中查看并控制所有番剧的后台自动下载（开启中的「在看」番剧每 30 分钟检查新集并推送至 qBittorrent，自动跳过已看与本地已有集数）。"
+        text: "集中查看并控制所有番剧的后台自动下载（开启中的「在看 / 想看」番剧每 30 分钟检查新集并推送至 qBittorrent，自动跳过已看与本地已有集数；「已看 / 搁置 / 已弃」将自动静默挂起）。"
       });
 
       const toolbar = contentEl.createDiv("curator-dl-submgr-toolbar");
@@ -4137,14 +4195,14 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
       makeFilter("paused", `已暂停 (${pausedEntries.length})`);
 
       const toolBtns = toolbar.createDiv("curator-dl-stream-head-btns");
-      if (nonWatchingActive.length > 0) {
+      if (stoppedOrUnmatchedActive.length > 0) {
         const cleanInactiveBtn = toolBtns.createEl("button", {
           cls: "curator-dl-mini-btn",
-          text: `暂停非「在看」番剧 (${nonWatchingActive.length})`
+          text: `暂停已完结/已弃番剧 (${stoppedOrUnmatchedActive.length})`
         });
-        cleanInactiveBtn.title = "一键暂停所有已看完、搁置、抛弃或未匹配笔记的旧追更规则";
+        cleanInactiveBtn.title = "一键暂停所有已看完、搁置、抛弃/已弃或未匹配笔记的旧追更规则（保留「在看」与「想看」）";
         cleanInactiveBtn.onclick = async () => {
-          for (const e of nonWatchingActive) {
+          for (const e of stoppedOrUnmatchedActive) {
             e.sub.enabled = false;
             e.sub.updatedAt = Date.now();
           }
@@ -4152,7 +4210,7 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
           await this.triggerNotifyChanged();
           this.render();
           if (NoticeClass) {
-            new NoticeClass(`已暂停 ${nonWatchingActive.length} 部非「在看」番剧的自动追更`);
+            new NoticeClass(`已暂停 ${stoppedOrUnmatchedActive.length} 部已完结/已弃番剧的自动追更`);
           }
         };
       }
@@ -4166,15 +4224,16 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
         pollNowBtn.onclick = async () => {
           this.isPollingNow = true;
           this.render();
-          const res = await pollPluginRssSubscriptions(plugin).catch(() => ({ checked: 0, dispatched: 0 }));
+          const res = await pollPluginRssSubscriptions(plugin).catch(() => ({ checked: 0, dispatched: 0, skippedStopped: 0 }));
           this.isPollingNow = false;
           await this.triggerNotifyChanged();
           this.render();
           if (NoticeClass) {
+            const skipHint = res.skippedStopped > 0 ? `（已跳过 ${res.skippedStopped} 部已看/搁置/已弃番剧）` : "";
             new NoticeClass(
               res.dispatched > 0
-                ? `已检查 ${res.checked} 部追更番剧，发现并添加 ${res.dispatched} 集新更新至 qBittorrent`
-                : `已检查 ${res.checked} 部「在看」追更番剧，当前暂无未下载的新集`
+                ? `已检查 ${res.checked} 部追更番剧，发现并添加 ${res.dispatched} 集新更新至 qBittorrent${skipHint}`
+                : `已检查 ${res.checked} 部「在看 / 想看」追更番剧，当前暂无未下载的新集${skipHint}`
             );
           }
         };
@@ -4209,13 +4268,14 @@ function openAllRssSubscriptionsManagerModal(plugin, onChanged = null) {
       for (const entry of visible) {
         const row = listWrap.createDiv("curator-dl-ep-row");
         const badgeCol = row.createDiv("curator-dl-ep-badge-col");
+        const isStoppedByState = entry.isEnabled && isAutoFollowStoppedWatchState(entry.watchState);
         badgeCol.createSpan({
-          cls: `curator-dl-ep-local-tag ${entry.isEnabled ? "is-ok" : ""}`,
-          text: entry.isEnabled ? "追更中" : "已暂停"
+          cls: `curator-dl-ep-local-tag ${entry.isEnabled && !isStoppedByState ? "is-ok" : ""}`,
+          text: !entry.isEnabled ? "已暂停" : isStoppedByState ? "已挂起" : "追更中"
         });
         badgeCol.createSpan({
           cls: "curator-dl-stream-tag",
-          text: entry.watchState
+          text: isStoppedByState ? `${entry.watchState} · 暂不拉取` : entry.watchState
         });
 
         const infoCol = row.createDiv("curator-dl-ep-info-col");
@@ -6156,12 +6216,14 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       this.autoFollowBox.style.display = "";
 
       const follow = getAnimeAutoFollowState(this.plugin, this.item);
+      const curState = String(this.item?.state || "").trim();
+      const stoppedByWatchState = follow.status === "active" && isAutoFollowStoppedWatchState(curState);
       const bar = this.autoFollowBox.createDiv(
-        `curator-dl-autofollow-bar is-${follow.status}`
+        `curator-dl-autofollow-bar is-${stoppedByWatchState ? "paused" : follow.status}`
       );
 
       const left = bar.createDiv("curator-dl-autofollow-left");
-      if (follow.status === "active") {
+      if (follow.status === "active" && !stoppedByWatchState) {
         left.createSpan({ cls: "curator-dl-status-dot is-ok" });
         left.createSpan({
           cls: "curator-dl-autofollow-badge is-active",
@@ -6170,6 +6232,16 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         left.createSpan({
           cls: "curator-dl-autofollow-desc",
           text: `锁定字幕组「${follow.sourceLabel}」— 有未看新集更新时自动推送至 qBittorrent`
+        });
+      } else if (stoppedByWatchState) {
+        left.createSpan({ cls: "curator-dl-status-dot is-warn" });
+        left.createSpan({
+          cls: "curator-dl-autofollow-badge is-paused",
+          text: `已因「${curState}」挂起`
+        });
+        left.createSpan({
+          cls: "curator-dl-autofollow-desc",
+          text: `保留源「${follow.sourceLabel}」；当前观看状态为「${curState}」，后台暂不自动拉取（改回「在看 / 想看」即恢复）`
         });
       } else if (follow.status === "paused") {
         left.createSpan({ cls: "curator-dl-status-dot is-warn" });
@@ -6195,6 +6267,31 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
 
       const right = bar.createDiv("curator-dl-autofollow-actions");
       if (follow.status === "active") {
+        const checkOneBtn = right.createEl("button", {
+          cls: "curator-dl-mini-btn is-primary",
+          text: "立即检查新集"
+        });
+        checkOneBtn.dataset.dlAction = "check-single-autofollow";
+        checkOneBtn.title = "立即拉取该番剧绑定的 RSS 源，发现未看且本地缺失的新集即刻推送至 qBittorrent";
+        checkOneBtn.onclick = async () => {
+          checkOneBtn.disabled = true;
+          checkOneBtn.textContent = "检查中…";
+          try {
+            const res = await pollSinglePluginRssSubscription(this.plugin, this.item);
+            if (NoticeClass) {
+              if (res.qbNotReady) {
+                new NoticeClass("尚未检测到已启用的 qBittorrent 客户端，请先确认安装与启用状态", 4000);
+              } else if (res.dispatched > 0) {
+                new NoticeClass(`已发现并推送《${this.item?.name}》的 ${res.dispatched} 集新更新至 qBittorrent`, 4000);
+              } else {
+                new NoticeClass(`已检查《${this.item?.name}》锁定源，当前暂无未下载的新集`, 3200);
+              }
+            }
+          } finally {
+            await this.refreshAllStates({ showNotice: false });
+          }
+        };
+
         const pauseBtn = right.createEl("button", {
           cls: "curator-dl-mini-btn",
           text: "暂停追更"
@@ -7775,6 +7872,7 @@ module.exports = {
   dispatchDownloadToQbittorrent,
   sanitizeDeadQbittorrentComicatRules,
   pollPluginRssSubscriptions,
+  pollSinglePluginRssSubscription,
   getAnimeAutoFollowState,
   setAnimeAutoFollowEnabled,
   removeAnimeAutoFollowAndUnbind,
