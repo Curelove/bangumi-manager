@@ -356,6 +356,10 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
     getCover,
     getKey: itemKey,
     getLocal,
+    getAutoFollow: (it) =>
+      animeDownloadService && typeof animeDownloadService.getAnimeAutoFollowState === "function"
+        ? animeDownloadService.getAnimeAutoFollowState(plugin, it)
+        : { status: "none", sourceLabel: "" },
     getWatchUrl: (it) => (it && it.watchUrl) || "",
     getBgmUrl: (it) =>
       (it && it.bgmUrl) ||

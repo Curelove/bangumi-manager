@@ -3917,6 +3917,25 @@ module.exports = function createSettingsTabClass({
 
       if (!isMobile) {
         new Setting(container)
+          .setName("管理全部自动追更番剧")
+          .setDesc(
+            "集中查看当前仓库中已开启或已暂停后台自动追更的所有番剧，支持一键暂停、恢复或取消任意番剧的自动下载规则。"
+          )
+          .addButton((btn) => {
+            btn
+              .setButtonText("打开追更管理")
+              .setCta()
+              .onClick(() => {
+                const dlSvc = require("./anime-download-service");
+                if (dlSvc && typeof dlSvc.openAllRssSubscriptionsManagerModal === "function") {
+                  dlSvc.openAllRssSubscriptionsManagerModal(this.plugin, async () => {
+                    await this.plugin.refreshOpenDashboardViews();
+                  });
+                }
+              });
+          });
+
+        new Setting(container)
           .setName("启用 qBittorrent 客户端联动下载")
           .setDesc(
             "开启后自动检测本机 qBittorrent（未启动时可自动唤起，未安装时提示下载链接），并将剧集直接下载到该动画笔记的本地文件夹。若您不使用 qBittorrent，可关闭此项以使用纯磁力/种子自行下载。"

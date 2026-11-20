@@ -1326,13 +1326,23 @@ function renderAnimeStage(host, ctx) {
         pScore !== null ? "is-active" : ""
       );
 
+      const autoFollow = typeof ctx.getAutoFollow === "function" ? ctx.getAutoFollow(item) : { status: "none" };
+      const isAutoFollowing = autoFollow && autoFollow.status === "active";
+
       const dlBtn = actions.openDownload
         ? iconButton(
             "download",
             desktop
-              ? (local && local.newCount > 0 ? `下载与自动追更（本地待看 ${local.newCount} 集）` : "下载与自动追更")
-              : "磁力搜索与追番下载助手",
-            () => actions.openDownload(item, () => applyItemMutation(item, {}))
+              ? isAutoFollowing
+                ? `自动追更中（${autoFollow.sourceLabel || "已绑定源"}）${
+                    local && local.newCount > 0 ? ` · 本地待看 ${local.newCount} 集` : ""
+                  }`
+                : local && local.newCount > 0
+                ? `下载与自动追更（本地待看 ${local.newCount} 集）`
+                : "下载与自动追更"
+              : "磁力检索助手",
+            () => actions.openDownload(item, () => applyItemMutation(item, {})),
+            isAutoFollowing ? "is-active" : ""
           )
         : null;
 
@@ -1410,6 +1420,23 @@ function renderAnimeStage(host, ctx) {
             h("span", { text: info.total ? ` / ${info.total} 集` : " 集" }),
             info.localMax > info.watched
               ? h("span.bm7-hero-local", [icon("folder", 13), `本地已备至第 ${info.localMax} 集`])
+              : null,
+            desktop && isAutoFollowing && actions.openDownload
+              ? h(
+                  "button.bm7-hero-local",
+                  {
+                    attr: { type: "button" },
+                    style: { cursor: "pointer", border: "none", background: "transparent", padding: "0" },
+                    title: `自动追更中（${autoFollow.sourceLabel || "已绑定源"}）· 点击管理或暂停`,
+                    on: {
+                      click: (ev) => {
+                        ev.stopPropagation();
+                        actions.openDownload(item, () => applyItemMutation(item, {}));
+                      }
+                    }
+                  },
+                  [icon("rss", 13), "自动追更中"]
+                )
               : null,
             local && local.hasAttentionNeeded && actions.openLocalDiagnostics
               ? h(
