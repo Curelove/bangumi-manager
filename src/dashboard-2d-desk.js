@@ -16,6 +16,7 @@ const v07Adapters = require("./v07-adapters.js");
 const v07Styles = require("./v07-styles.js");
 const {
   animateWorkspaceGlide,
+  transitionRoxyWorkspacePane,
   paperSlipSwap,
   scrollUnrollMorph,
   withPreservedScroll
@@ -365,25 +366,43 @@ function persistDeskPrefs(plugin, state) {
  * - 严格过滤：必须配置了有效下载路径（非“无”且本地文件夹真实存在），且文件夹内包含视频文件（或笔记明确记录“已更新 X 集”）
  * - 本地根本没建文件夹的老番、或已看完且无新集的老番绝不混入！
  */
-function computeLocalUpdatedItems(items) {
+function computeLocalUpdatedItems(items, opts = {}) {
   const list = Array.isArray(items) ? items : [];
   const candidates = [];
   if (!isDesktopNodeAvailable()) {
     return candidates;
   }
   const fsMod = tryRequireNode("fs");
+  const preferCache = Boolean(opts && opts.preferCache);
+  const maxAgeMs = Number(opts && opts.maxAgeMs) > 0 ? Number(opts.maxAgeMs) : 15000;
+  const nowMs = Date.now();
 
   for (const item of list) {
     try {
       const rawPath = String(item?.downloadPath || "").trim();
       if (!rawPath || rawPath === "无") {
-        if (item) item._localInspect = null;
+        if (item) {
+          item._localInspect = null;
+          item._localInspectPath = "";
+          item._localInspectAt = nowMs;
+        }
         continue;
       }
 
-      const localRes = inspectLocalFolder(rawPath, item.watchedEpisodes);
+      const watchedNum = Number(item.watchedEpisodes) || 0;
+      const canReuse =
+        preferCache &&
+        item._localInspect &&
+        item._localInspectPath === rawPath &&
+        item._localInspectWatched === watchedNum &&
+        nowMs - (Number(item._localInspectAt) || 0) < maxAgeMs;
+
+      const localRes = canReuse ? item._localInspect : inspectLocalFolder(rawPath, item.watchedEpisodes);
       if (!localRes || localRes.error) {
         item._localInspect = localRes || null;
+        item._localInspectPath = rawPath;
+        item._localInspectWatched = watchedNum;
+        item._localInspectAt = nowMs;
         continue;
       }
 
@@ -394,19 +413,24 @@ function computeLocalUpdatedItems(items) {
       // 文件夹内无视频文件且无未看更新集数 -> 排除
       if (localRes.fileCount <= 0 && effectiveNewCount <= 0) {
         item._localInspect = localRes;
+        item._localInspectPath = rawPath;
+        item._localInspectWatched = watchedNum;
+        item._localInspectAt = nowMs;
         continue;
       }
 
       // 已看完、抛弃或已弃的老番排除
       if (item.state === "抛弃" || item.state === "已弃" || (item.state === "已看" && effectiveNewCount <= 0)) {
         item._localInspect = localRes;
+        item._localInspectPath = rawPath;
+        item._localInspectWatched = watchedNum;
+        item._localInspectAt = nowMs;
         continue;
       }
 
-      const watchedNum = Number(item.watchedEpisodes) || 0;
-      let latestVideoMtime = 0;
+      let latestVideoMtime = Number(localRes.latestVideoMtime) || 0;
       let latestUnwatchedMtime = 0;
-      if (Array.isArray(localRes.videoFiles)) {
+      if (!canReuse && Array.isArray(localRes.videoFiles)) {
         for (const vf of localRes.videoFiles) {
           let t = Math.max(Number(vf.addedTimeMs) || 0, Number(vf.mtimeMs) || 0, Number(vf.birthtimeMs) || 0);
           if (!t && fsMod && vf.path) {
@@ -427,6 +451,9 @@ function computeLocalUpdatedItems(items) {
         newCount: effectiveNewCount,
         latestVideoMtime: latestUnwatchedMtime || latestVideoMtime
       };
+      item._localInspectPath = rawPath;
+      item._localInspectWatched = watchedNum;
+      item._localInspectAt = nowMs;
       candidates.push(item);
     } catch (itemErr) {
       console.warn("[Bangumi Manager] computeLocalUpdatedItems skipped item due to error:", item?.name || "", itemErr);
@@ -2234,12 +2261,28 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
 /**
  * 刷新单个条目的本地文件夹检查缓存（用于集数 +1/-1 后同步「播第 X 集」与顶栏新更计数）
  */
-function refreshItemLocalInspectCache(item) {
+function refreshItemLocalInspectCache(item, opts = {}) {
   if (!item || !isDesktopNodeAvailable() || item.isSamplePreviewItem) return null;
   const rawPath = String(item.downloadPath || "").trim();
+  const watchedNum = Number(item.watchedEpisodes) || 0;
+  const nowMs = Date.now();
   if (!rawPath || rawPath === "无") {
     item._localInspect = null;
+    item._localInspectPath = "";
+    item._localInspectWatched = watchedNum;
+    item._localInspectAt = nowMs;
     return null;
+  }
+  const force = Boolean(opts && opts.force);
+  const maxAgeMs = Number(opts && opts.maxAgeMs) > 0 ? Number(opts.maxAgeMs) : 15000;
+  if (
+    !force &&
+    item._localInspect &&
+    item._localInspectPath === rawPath &&
+    item._localInspectWatched === watchedNum &&
+    nowMs - (Number(item._localInspectAt) || 0) < maxAgeMs
+  ) {
+    return item._localInspect;
   }
   const localResult = inspectLocalFolder(rawPath, item.watchedEpisodes);
   if (localResult && !localResult.error) {
@@ -2248,8 +2291,13 @@ function refreshItemLocalInspectCache(item) {
       ...localResult,
       latestVideoMtime: localResult.latestVideoMtime || prevMtime
     };
+  } else {
+    item._localInspect = localResult || null;
   }
-  return localResult;
+  item._localInspectPath = rawPath;
+  item._localInspectWatched = watchedNum;
+  item._localInspectAt = nowMs;
+  return item._localInspect;
 }
 
 /**
@@ -6209,11 +6257,13 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
   const shelvesMount = container.createDiv("curator-mount-shelves");
   const almanacMount = container.createDiv("curator-mount-almanac");
 
-  const renderQuickRibbon = () => {
+  const renderQuickRibbon = (ribbonOpts = {}) => {
     quickRibbon.empty();
     const curMetrics = computeDeskMetrics(state.items || []);
     const curWatching = Number(curMetrics.stateCounts["在看"]) || 0;
-    const curLocalUpd = computeLocalUpdatedItems(state.items || []).length;
+    const curLocalUpd = computeLocalUpdatedItems(state.items || [], {
+      preferCache: Boolean(ribbonOpts && ribbonOpts.preferCache)
+    }).length;
     const curCharCount = Array.isArray(plugin.settings?.characterCollection)
       ? plugin.settings.characterCollection.length
       : 0;
@@ -6305,6 +6355,16 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     onFilterCatalog: (kw) => switchWorkspaceMode("catalog", { searchQuery: kw, scrollToWorkspace: true })
   });
 
+  const paneByMode = {
+    desk: deskMount,
+    catalog: catalogMount,
+    ratings: ratingsMount,
+    character: characterMount,
+    gallery: galleryMount,
+    voice: voiceMount,
+    game: gameMount
+  };
+
   const switchWorkspaceMode = (nextMode, switchOpts = {}) => {
     if (v07Core && typeof v07Core.closeAllPopovers === "function") {
       v07Core.closeAllPopovers();
@@ -6333,84 +6393,114 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
     persistDeskPrefs(plugin, state);
 
-    unifiedWorkspace.dataset.activeMode = targetMode;
-    container.dataset.activeMode = targetMode;
-    deskModeBtn.classList.toggle("is-active", targetMode === "desk");
-    catalogModeBtn.classList.toggle("is-active", targetMode === "catalog");
-    if (ratingsModeBtn) ratingsModeBtn.classList.toggle("is-active", targetMode === "ratings");
-    charModeBtn.classList.toggle("is-active", targetMode === "character");
-    galleryModeBtn.classList.toggle("is-active", targetMode === "gallery");
-    voiceModeBtn.classList.toggle("is-active", targetMode === "voice");
-    gameModeBtn.classList.toggle("is-active", targetMode === "game");
+    const applyModeDomAndRender = () => {
+      unifiedWorkspace.dataset.activeMode = targetMode;
+      container.dataset.activeMode = targetMode;
+      deskModeBtn.classList.toggle("is-active", targetMode === "desk");
+      catalogModeBtn.classList.toggle("is-active", targetMode === "catalog");
+      if (ratingsModeBtn) ratingsModeBtn.classList.toggle("is-active", targetMode === "ratings");
+      charModeBtn.classList.toggle("is-active", targetMode === "character");
+      galleryModeBtn.classList.toggle("is-active", targetMode === "gallery");
+      voiceModeBtn.classList.toggle("is-active", targetMode === "voice");
+      gameModeBtn.classList.toggle("is-active", targetMode === "game");
 
-    workspaceStage.classList.remove("is-switching-to-catalog", "is-switching-to-desk");
+      workspaceStage.classList.remove("is-switching-to-catalog", "is-switching-to-desk");
 
-    deskMount.classList.toggle("is-workspace-pane-active", targetMode === "desk");
-    deskMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "desk");
-    catalogMount.classList.toggle("is-workspace-pane-active", targetMode === "catalog");
-    catalogMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "catalog");
-    ratingsMount.classList.toggle("is-workspace-pane-active", targetMode === "ratings");
-    ratingsMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "ratings");
-    characterMount.classList.toggle("is-workspace-pane-active", targetMode === "character");
-    characterMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "character");
-    galleryMount.classList.toggle("is-workspace-pane-active", targetMode === "gallery");
-    galleryMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "gallery");
-    voiceMount.classList.toggle("is-workspace-pane-active", targetMode === "voice");
-    voiceMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "voice");
-    gameMount.classList.toggle("is-workspace-pane-active", targetMode === "game");
-    gameMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "game");
+      deskMount.classList.toggle("is-workspace-pane-active", targetMode === "desk");
+      deskMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "desk");
+      catalogMount.classList.toggle("is-workspace-pane-active", targetMode === "catalog");
+      catalogMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "catalog");
+      ratingsMount.classList.toggle("is-workspace-pane-active", targetMode === "ratings");
+      ratingsMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "ratings");
+      characterMount.classList.toggle("is-workspace-pane-active", targetMode === "character");
+      characterMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "character");
+      galleryMount.classList.toggle("is-workspace-pane-active", targetMode === "gallery");
+      galleryMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "gallery");
+      voiceMount.classList.toggle("is-workspace-pane-active", targetMode === "voice");
+      voiceMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "voice");
+      gameMount.classList.toggle("is-workspace-pane-active", targetMode === "game");
+      gameMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "game");
 
-    if (targetMode === "catalog") {
-      renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
-      if (switchOpts.focusSearch) {
+      if (targetMode === "catalog") {
+        renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
+      } else if (targetMode === "ratings") {
+        renderRatingsPane(switchOpts.focusItem || null);
+      } else if (targetMode === "character") {
+        if (switchOpts.searchQuery !== undefined && plugin.__characterArchiveUiState) {
+          plugin.__characterArchiveUiState.searchQuery = switchOpts.searchQuery;
+        }
+        characterArchiveService.renderCharacterArchiveWorkspace(
+          plugin,
+          characterMount,
+          state.items || [],
+          { compactAlmanacMode: false }
+        );
+      } else if (targetMode === "gallery") {
+        multiHallArchiveService.renderIllustrationGalleryWorkspace(
+          plugin,
+          galleryMount,
+          state.items || [],
+          { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
+        );
+      } else if (targetMode === "voice") {
+        multiHallArchiveService.renderVoiceLineArchiveWorkspace(
+          plugin,
+          voiceMount,
+          state.items || [],
+          { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
+        );
+      } else if (targetMode === "game") {
+        multiHallArchiveService.renderGameLibraryWorkspace(
+          plugin,
+          gameMount,
+          state.items || [],
+          { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
+        );
+      } else if (needCatalogRefresh) {
+        renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
+      }
+    };
+
+    const runAfterModeSwitch = () => {
+      if (targetMode === "catalog" && switchOpts.focusSearch) {
         requestAnimationFrame(() => {
           const sInput = catalogMount.querySelector(".curator-search-input");
-          if (sInput) sInput.focus();
+          if (sInput) {
+            try {
+              sInput.focus({ preventScroll: true });
+            } catch (_) {
+              sInput.focus();
+            }
+          }
         });
       }
-    } else if (targetMode === "ratings") {
-      renderRatingsPane(switchOpts.focusItem || null);
-    } else if (targetMode === "character") {
-      if (switchOpts.searchQuery !== undefined && plugin.__characterArchiveUiState) {
-        plugin.__characterArchiveUiState.searchQuery = switchOpts.searchQuery;
+    };
+
+    const dir = nextIdx >= prevIdx ? 1 : -1;
+    let handledByRoxyTurn = false;
+    if (prevMode !== targetMode && paneByMode[prevMode] && paneByMode[targetMode]) {
+      handledByRoxyTurn = transitionRoxyWorkspacePane({
+        unifiedWorkspace,
+        workspaceStage,
+        prevPane: paneByMode[prevMode],
+        nextPane: paneByMode[targetMode],
+        prevMode,
+        targetMode,
+        dir,
+        applyStateAndRender: applyModeDomAndRender,
+        onAfterRender: runAfterModeSwitch
+      });
+    }
+
+    if (!handledByRoxyTurn) {
+      applyModeDomAndRender();
+      if (prevMode !== targetMode) {
+        animateWorkspaceGlide(workspaceStage, dir);
       }
-      characterArchiveService.renderCharacterArchiveWorkspace(
-        plugin,
-        characterMount,
-        state.items || [],
-        { compactAlmanacMode: false }
-      );
-    } else if (targetMode === "gallery") {
-      multiHallArchiveService.renderIllustrationGalleryWorkspace(
-        plugin,
-        galleryMount,
-        state.items || [],
-        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
-      );
-    } else if (targetMode === "voice") {
-      multiHallArchiveService.renderVoiceLineArchiveWorkspace(
-        plugin,
-        voiceMount,
-        state.items || [],
-        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
-      );
-    } else if (targetMode === "game") {
-      multiHallArchiveService.renderGameLibraryWorkspace(
-        plugin,
-        gameMount,
-        state.items || [],
-        { searchQuery: switchOpts.searchQuery, wandCallbacks: getWandCallbacks() }
-      );
-    } else if (needCatalogRefresh) {
-      renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
+      runAfterModeSwitch();
     }
 
-    if (prevMode !== targetMode) {
-      const dir = nextIdx >= prevIdx ? 1 : -1;
-      animateWorkspaceGlide(workspaceStage, dir);
-    }
-
-    renderQuickRibbon();
+    renderQuickRibbon({ preferCache: true });
 
     if (switchOpts.scrollToWorkspace && typeof unifiedWorkspace.scrollIntoView === "function") {
       unifiedWorkspace.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -6623,9 +6713,12 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
   }
 
   if (updates.watchedEpisodes !== undefined && syncedItemRef) {
-    refreshItemLocalInspectCache(syncedItemRef);
+    refreshItemLocalInspectCache(syncedItemRef, { force: true });
     if (item && item !== syncedItemRef) {
       item._localInspect = syncedItemRef._localInspect;
+      item._localInspectAt = syncedItemRef._localInspectAt;
+      item._localInspectPath = syncedItemRef._localInspectPath;
+      item._localInspectWatched = syncedItemRef._localInspectWatched;
     }
   }
 

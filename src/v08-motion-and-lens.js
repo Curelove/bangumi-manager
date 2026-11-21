@@ -801,6 +801,7 @@ const WS_SWITCH_CLASSES = [
  */
 function animateWorkspaceGlide(paneEl, dir = 1) {
   if (!paneEl) return;
+  abortRoxyWorkspaceTurn(paneEl);
   const tier = getTier(paneEl);
   paneEl.classList.remove(...WS_SWITCH_CLASSES);
   paneEl.querySelectorAll(":scope > .bm8-fx-band").forEach((n) => n.remove());
@@ -850,6 +851,443 @@ function animateWorkspaceGlide(paneEl, dir = 1) {
     if (band && band.parentNode) band.remove();
     paneEl._bm8WsTid = 0;
   }, ms);
+}
+
+/* =========================================================================
+ * 2C. 洛琪希手记（roxy）专属：顶层 7 大页面真·书页掀卷翻页 + 折页水蓝墨线与淡彩晕染收尾
+ *     - 不克隆 DOM、不挪动父子节点（零内存暴涨、零幽灵音频、保留内部滚动位置）
+ *     - 先稳稳把旧页留在上层，等下层新页完成布局与首屏图片解码（上限 160ms 兜底不卡死），再同步起翻
+ *     - 旧页 clip-path 揭开边界与纸背卷边 / 压页投影 / 水蓝淡彩共享同一 WAAPI 时间轴，0px 错位
+ *     - 连续快速点击可随时立刻打断清理并无缝切向最新目标页
+ * ========================================================================= */
+
+const ROXY_TURN_DURATION_MS = 550;
+const ROXY_TURN_EASING = "cubic-bezier(0.36, 0.06, 0.20, 1)";
+const ROXY_TURN_STYLE_PROPS = [
+  "position",
+  "top",
+  "left",
+  "right",
+  "width",
+  "height",
+  "minHeight",
+  "maxHeight",
+  "paddingTop",
+  "paddingRight",
+  "paddingBottom",
+  "paddingLeft",
+  "borderRadius",
+  "clipPath",
+  "overflow",
+  "zIndex",
+  "pointerEvents",
+  "boxSizing",
+  "contain",
+  "willChange"
+];
+
+function abortRoxyWorkspaceTurn(workspaceStage) {
+  if (!workspaceStage || !workspaceStage._bm8RoxyTurn) return;
+  const active = workspaceStage._bm8RoxyTurn;
+  workspaceStage._bm8RoxyTurn = null;
+  if (typeof active.cancel === "function") {
+    try {
+      active.cancel();
+    } catch (_) {}
+  }
+}
+
+function waitNextAnimationFrame() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 16);
+    }
+  });
+}
+
+function waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted) {
+  if (!nextPane || isAborted()) return Promise.resolve();
+  const budget = Math.max(40, Math.min(240, Number(maxWaitMs) || 160));
+  return waitNextAnimationFrame().then(() => {
+    if (isAborted() || !nextPane.isConnected) return;
+    let imgs = [];
+    try {
+      const allImgs = Array.from(nextPane.querySelectorAll("img"));
+      for (const img of allImgs) {
+        if (imgs.length >= 18) break;
+        const r = img.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.bottom < vp.top - 80 || r.top > vp.bottom + 140) continue;
+        if (img.complete && img.naturalWidth > 0) continue;
+        imgs.push(img);
+      }
+    } catch (_) {
+      imgs = [];
+    }
+    if (!imgs.length) {
+      return waitNextAnimationFrame();
+    }
+    const perImg = imgs.map(
+      (img) =>
+        new Promise((res) => {
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            img.removeEventListener("load", done);
+            img.removeEventListener("error", done);
+            res();
+          };
+          img.addEventListener("load", done, { once: true });
+          img.addEventListener("error", done, { once: true });
+          if (typeof img.decode === "function") {
+            img.decode().then(done, done);
+          }
+          if (img.complete) done();
+        })
+    );
+    const timeoutP = new Promise((res) => setTimeout(res, budget));
+    return Promise.race([Promise.all(perImg), timeoutP]).then(() => {
+      if (isAborted()) return;
+      return waitNextAnimationFrame();
+    });
+  });
+}
+
+function createRoxyPageTurnOverlay(dir, opts = {}) {
+  const isBack = dir < 0;
+  const compact = Boolean(opts.compact);
+  const overlay = h("div.bm8-rxturn-overlay", {
+    cls: [isBack ? "is-back" : "is-next", compact ? "is-compact" : ""].join(" ").trim(),
+    attr: { "aria-hidden": "true" }
+  });
+  const track = h("div.bm8-rxturn-track");
+  const seam = h("div.bm8-rxturn-seam");
+
+  const innerShade = h("span.bm8-rxturn-inner-shade");
+  const curl = h("span.bm8-rxturn-curl", [
+    h("span.bm8-rxturn-curl-grain"),
+    h("span.bm8-rxturn-curl-ridge")
+  ]);
+  const cast = h("span.bm8-rxturn-cast");
+  const inkwash = h("span.bm8-rxturn-inkwash", [
+    h("span.bm8-rxturn-inkline"),
+    svgEl(
+      `<svg class="bm8-rxturn-seam-glint is-upper" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 1.5 L10.6 7.4 L16.5 9 L10.6 10.6 L9 16.5 L7.4 10.6 L1.5 9 L7.4 7.4 Z"/></svg>`
+    ),
+    svgEl(
+      `<svg class="bm8-rxturn-seam-glint is-lower" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 L8.2 5.8 L12.5 7 L8.2 8.2 L7 12.5 L5.8 8.2 L1.5 7 L5.8 5.8 Z"/></svg>`
+    )
+  ]);
+
+  seam.append(innerShade, curl, cast, inkwash);
+  track.appendChild(seam);
+  overlay.append(track);
+  return { overlay, track, curl, cast, inkwash, innerShade };
+}
+
+/**
+ * 洛琪希手记（roxy）大页签真·书页掀卷翻页控制器。
+ * 返回 true 表示已接管本次切换（含 state/DOM 更新与动效）；返回 false 表示交给默认逻辑。
+ */
+function transitionRoxyWorkspacePane(opts = {}) {
+  const {
+    workspaceStage,
+    prevPane,
+    nextPane,
+    prevMode,
+    targetMode,
+    dir = 1,
+    applyStateAndRender,
+    onAfterRender,
+    maxWaitMs = 160
+  } = opts;
+
+  if (!workspaceStage || !prevPane || !nextPane || prevPane === nextPane || typeof applyStateAndRender !== "function") {
+    return false;
+  }
+
+  abortRoxyWorkspaceTurn(workspaceStage);
+  workspaceStage.classList.remove(...WS_SWITCH_CLASSES);
+  workspaceStage.querySelectorAll(":scope > .bm8-fx-band, :scope > .bm8-rxturn-overlay").forEach((n) => n.remove());
+  if (workspaceStage._bm8WsTid) {
+    clearTimeout(workspaceStage._bm8WsTid);
+    workspaceStage._bm8WsTid = 0;
+  }
+
+  const { themeId } = resolvePanelTransitionProfile(workspaceStage);
+  if (themeId !== "roxy") return false;
+
+  const tier = getTier(workspaceStage);
+  if (tier === "off") return false;
+
+  // 轻巧档：直接渲染并播低显存轻巧短滑
+  if (tier === "lite") {
+    applyStateAndRender();
+    if (typeof onAfterRender === "function") onAfterRender();
+    animateWorkspaceGlide(workspaceStage, dir);
+    return true;
+  }
+
+  if (typeof prevPane.animate !== "function") return false;
+
+  const stageRectBefore = workspaceStage.getBoundingClientRect();
+  const prevPaneRectBefore = prevPane.getBoundingClientRect();
+  if (stageRectBefore.width < 40 || prevPaneRectBefore.height < 24) return false;
+
+  const stageCSBefore = getComputedStyle(workspaceStage);
+  const savedScroll = captureScrollAncestors(workspaceStage);
+  const vpBefore = findScrollViewportRect(workspaceStage);
+
+  const padL = Math.max(0, prevPaneRectBefore.left - stageRectBefore.left);
+  const padR = Math.max(0, stageRectBefore.right - prevPaneRectBefore.right);
+  const padT = Math.max(0, prevPaneRectBefore.top - stageRectBefore.top);
+  const padB = Math.max(0, stageRectBefore.bottom - prevPaneRectBefore.bottom);
+  const prevRadius = stageCSBefore.borderRadius || "0px";
+  const prevIsDesk = prevMode === "desk";
+  const targetIsDesk = targetMode === "desk";
+
+  // 备份旧页和舞台将被临时写入的行内样式
+  const savedPrevInline = {};
+  for (const prop of ROXY_TURN_STYLE_PROPS) {
+    savedPrevInline[prop] = prevPane.style[prop] || "";
+  }
+  const savedStageMinH = workspaceStage.style.minHeight || "";
+  const savedStagePos = workspaceStage.style.position || "";
+
+  const seq = (workspaceStage._bm8RoxyTurnSeq = (workspaceStage._bm8RoxyTurnSeq || 0) + 1);
+  let finished = false;
+  let finishTid = 0;
+  let overlayEl = null;
+  const animations = [];
+
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
+    if (finishTid) {
+      clearTimeout(finishTid);
+      finishTid = 0;
+    }
+    for (const anim of animations) {
+      try {
+        anim.cancel();
+      } catch (_) {}
+    }
+    animations.length = 0;
+    if (overlayEl && overlayEl.parentNode) {
+      overlayEl.remove();
+    }
+    overlayEl = null;
+
+    prevPane.classList.remove("bm8-rxturn-leaving", "is-from-desk", "is-from-card");
+    for (const prop of ROXY_TURN_STYLE_PROPS) {
+      prevPane.style[prop] = savedPrevInline[prop];
+    }
+    prevPane.classList.remove("is-workspace-pane-active");
+    prevPane.classList.add("is-workspace-pane-hidden");
+
+    nextPane.classList.remove("bm8-rxturn-entering");
+    workspaceStage.classList.remove("bm8-rxturn-stage", "is-roxy-from-desk", "is-roxy-to-desk");
+    workspaceStage.style.minHeight = savedStageMinH;
+    workspaceStage.style.position = savedStagePos;
+
+    if (workspaceStage._bm8RoxyTurn && workspaceStage._bm8RoxyTurn.seq === seq) {
+      workspaceStage._bm8RoxyTurn = null;
+    }
+  };
+
+  workspaceStage._bm8RoxyTurn = { seq, cancel: cleanup };
+
+  // Step 1: 锁住舞台最小高度防止切换瞬间滚条跳顶，并在下层同步切换状态与渲染新页
+  const preLockMinH = Math.max(
+    prevPaneRectBefore.height,
+    Math.min(stageRectBefore.height, Math.max(240, vpBefore.bottom - Math.max(stageRectBefore.top, vpBefore.top)))
+  );
+  if (getComputedStyle(workspaceStage).position === "static") {
+    workspaceStage.style.position = "relative";
+  }
+  workspaceStage.classList.add("bm8-rxturn-stage");
+  if (prevIsDesk) workspaceStage.classList.add("is-roxy-from-desk");
+  if (targetIsDesk) workspaceStage.classList.add("is-roxy-to-desk");
+  workspaceStage.style.minHeight = `${Math.ceil(preLockMinH)}px`;
+
+  // 同步执行状态更新与新页渲染（期间新页位于真实宽度下层，ResizeObserver / sticky 均可一次算准）
+  applyStateAndRender();
+
+  // 立即把旧页保持可见并固定在上层，完全不挪动 DOM 父子关系
+  prevPane.classList.remove("is-workspace-pane-hidden");
+  prevPane.classList.add("bm8-rxturn-leaving", prevIsDesk ? "is-from-desk" : "is-from-card");
+  nextPane.classList.add("bm8-rxturn-entering");
+
+  restoreScrollAncestors(savedScroll);
+
+  const stageRectAfter = workspaceStage.getBoundingClientRect();
+  const stageCSAfter = getComputedStyle(workspaceStage);
+  const borderL = parseFloat(stageCSAfter.borderLeftWidth) || 0;
+  const borderT = parseFloat(stageCSAfter.borderTopWidth) || 0;
+  const vp = findScrollViewportRect(workspaceStage);
+
+  const isNarrowStage = stageRectAfter.width < 680;
+  const edgeBleedX = prevIsDesk && !targetIsDesk && !isNarrowStage ? 1 : 0;
+  const baseLeft = -borderL - edgeBleedX;
+  const turnW = stageRectAfter.width + edgeBleedX * 2;
+  const visTop = Math.max(0, vp.top - stageRectAfter.top);
+  const maxVpH = Math.max(240, vp.bottom - Math.max(stageRectAfter.top, vp.top));
+  const oldAvailH = Math.max(0, prevPaneRectBefore.height - visTop);
+  const newPaneRect = nextPane.getBoundingClientRect();
+  const newAvailH = Math.max(0, newPaneRect.height - visTop);
+  const turnH = Math.min(maxVpH + 16, Math.max(oldAvailH, newAvailH, 260));
+  const leavingHeight = Math.ceil(visTop + turnH + 4);
+
+  // 让舞台最小高度覆盖整个翻页视窗（短页切长页或长页切短页均不跳动不露馅）
+  workspaceStage.style.minHeight = `${Math.ceil(Math.max(newPaneRect.height, visTop + turnH))}px`;
+
+  // 将旧页像素级对齐回切换前的原位置，并用不透明羊皮纸背板严密遮盖整个首屏视窗（零顶边溢出）
+  prevPane.style.position = "absolute";
+  prevPane.style.boxSizing = "border-box";
+  prevPane.style.left = `${baseLeft}px`;
+  prevPane.style.top = `${-borderT}px`;
+  prevPane.style.width = `${turnW}px`;
+  prevPane.style.height = `${leavingHeight}px`;
+  prevPane.style.maxHeight = `${leavingHeight}px`;
+  prevPane.style.paddingLeft = `${padL + edgeBleedX}px`;
+  prevPane.style.paddingRight = `${padR + edgeBleedX}px`;
+  prevPane.style.paddingTop = `${padT}px`;
+  prevPane.style.paddingBottom = `${padB}px`;
+  prevPane.style.borderRadius = prevIsDesk ? (targetIsDesk ? "0px" : stageCSAfter.borderRadius || "16px") : prevRadius;
+  prevPane.style.overflow = "hidden";
+  prevPane.style.zIndex = "26";
+  prevPane.style.pointerEvents = "none";
+  prevPane.style.contain = "layout style paint";
+  prevPane.style.willChange = "clip-path";
+  prevPane.style.clipPath = "inset(0px 0% 0px 0%)";
+
+  const d = dir < 0 ? -1 : 1;
+  const isAborted = () => finished || !workspaceStage.isConnected || workspaceStage._bm8RoxyTurnSeq !== seq;
+
+  // Step 2: 等待新页完成布局与首屏图片就绪（短超时兜底，绝不卡死）
+  waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted).then(() => {
+    if (isAborted()) return;
+
+    // 就绪后再校准一次新页高度（例如画册/评分对比首帧布局后高度变化）
+    const readyStageRect = workspaceStage.getBoundingClientRect();
+    const readyVp = findScrollViewportRect(workspaceStage);
+    const readyVisTop = Math.max(0, readyVp.top - readyStageRect.top);
+    const readyMaxVpH = Math.max(240, readyVp.bottom - Math.max(readyStageRect.top, readyVp.top));
+    const readyNewH = Math.max(0, nextPane.getBoundingClientRect().height - readyVisTop);
+    const readyTurnH = Math.min(readyMaxVpH + 16, Math.max(oldAvailH, readyNewH, 260));
+    const readyLeavingH = Math.ceil(readyVisTop + readyTurnH + 4);
+
+    if (readyLeavingH > leavingHeight) {
+      prevPane.style.height = `${readyLeavingH}px`;
+      prevPane.style.maxHeight = `${readyLeavingH}px`;
+    }
+    workspaceStage.style.minHeight = `${Math.ceil(Math.max(nextPane.getBoundingClientRect().height, readyVisTop + readyTurnH))}px`;
+
+    // Step 3: 挂载与旧页完全同坐标系的立体纸背卷边 + 压页投影 + 折页水蓝墨韵覆盖层
+    const parts = createRoxyPageTurnOverlay(d, { compact: isNarrowStage });
+    overlayEl = parts.overlay;
+    overlayEl.style.left = `${baseLeft}px`;
+    overlayEl.style.top = `${readyVisTop - borderT}px`;
+    overlayEl.style.width = `${turnW}px`;
+    overlayEl.style.height = `${Math.ceil(readyTurnH)}px`;
+    const activeRadius = !targetIsDesk ? stageCSAfter.borderRadius || "16px" : prevRadius !== "0px" ? prevRadius : "12px";
+    overlayEl.style.borderRadius = readyVisTop > 4 ? "0px" : activeRadius;
+    workspaceStage.appendChild(overlayEl);
+
+    const commonOpts = {
+      duration: ROXY_TURN_DURATION_MS,
+      easing: ROXY_TURN_EASING,
+      fill: "forwards"
+    };
+
+    const prevKeyframes =
+      d > 0
+        ? [{ clipPath: "inset(0px 0% 0px 0px)" }, { clipPath: "inset(0px 100% 0px 0px)" }]
+        : [{ clipPath: "inset(0px 0px 0px 0%)" }, { clipPath: "inset(0px 0px 0px 100%)" }];
+
+    const trackKeyframes =
+      d > 0
+        ? [{ transform: "translate3d(0%, 0, 0)" }, { transform: "translate3d(-100%, 0, 0)" }]
+        : [{ transform: "translate3d(0%, 0, 0)" }, { transform: "translate3d(100%, 0, 0)" }];
+
+    const curlKeyframes = [
+      { transform: "scaleX(0.16)", opacity: 0, offset: 0 },
+      { transform: "scaleX(0.88)", opacity: 1, offset: 0.14 },
+      { transform: "scaleX(1.04)", opacity: 1, offset: 0.5 },
+      { transform: "scaleX(0.76)", opacity: 0.94, offset: 0.85 },
+      { transform: "scaleX(0.2)", opacity: 0, offset: 1 }
+    ];
+
+    const shadeKeyframes = [
+      { opacity: 0, offset: 0 },
+      { opacity: 1, offset: 0.14 },
+      { opacity: 0.96, offset: 0.8 },
+      { opacity: 0, offset: 1 }
+    ];
+
+    const inkWashKeyframes = [
+      { opacity: 0, transform: "scaleX(0.45)", offset: 0 },
+      { opacity: 0.96, transform: "scaleX(1)", offset: 0.22 },
+      { opacity: 0.88, transform: "scaleX(1.06)", offset: 0.72 },
+      { opacity: 0, transform: "scaleX(0.68)", offset: 1 }
+    ];
+
+    const nextShift = isNarrowStage ? 6 : 10;
+    const nextKeyframes = [
+      { transform: `translate3d(${d > 0 ? nextShift : -nextShift}px, 0, 0) scale(0.996)` },
+      { transform: "translate3d(0, 0, 0) scale(1)" }
+    ];
+
+    const prevAnim = prevPane.animate(prevKeyframes, commonOpts);
+    const trackAnim = parts.track.animate(trackKeyframes, commonOpts);
+    const curlAnim = parts.curl.animate(curlKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
+    const castAnim = parts.cast.animate(shadeKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
+    const innerShadeAnim = parts.innerShade.animate(shadeKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
+    const inkWashAnim = parts.inkwash.animate(inkWashKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
+    const nextAnim = nextPane.animate(nextKeyframes, {
+      duration: ROXY_TURN_DURATION_MS,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      fill: "none"
+    });
+
+    animations.push(prevAnim, trackAnim, curlAnim, castAnim, innerShadeAnim, inkWashAnim, nextAnim);
+
+    // 对齐同一 timeline 起始时刻，确保旧页裁切边界与卷边/阴影 0.00ms 锁定
+    try {
+      const t0 = document.timeline && typeof document.timeline.currentTime === "number" ? document.timeline.currentTime : null;
+      if (t0 !== null) {
+        for (const a of animations) {
+          a.startTime = t0;
+        }
+      }
+    } catch (_) {}
+
+    parts.overlay.classList.add("is-ink-live");
+
+    const safeFinish = () => {
+      if (isAborted()) return;
+      try {
+        if (animations.some((a) => a.playState === "paused")) {
+          finishTid = setTimeout(safeFinish, 90);
+          return;
+        }
+      } catch (_) {}
+      cleanup();
+      if (typeof onAfterRender === "function") {
+        try {
+          onAfterRender();
+        } catch (_) {}
+      }
+    };
+
+    prevAnim.onfinish = () => safeFinish();
+    finishTid = setTimeout(safeFinish, ROXY_TURN_DURATION_MS + 110);
+  });
+
+  return true;
 }
 
 /**
@@ -5179,8 +5617,354 @@ const MOTION_AND_LENS_CSS = String.raw`
   100% { transform: translate3d(100%, 0, 0); }
 }
 
+/* =====================================================================
+ * v0.9.2 洛琪希手记（roxy）专属：顶层大页真·书页掀卷翻页 + 钢笔水蓝墨线收尾
+ * ===================================================================== */
+.bm8-rxturn-stage {
+  position: relative;
+}
+.bm8-rxturn-stage.is-roxy-from-desk {
+  box-shadow: none !important;
+}
+.bm8-rxturn-leaving {
+  box-sizing: border-box !important;
+  pointer-events: none !important;
+  user-select: none !important;
+}
+.bm8-rxturn-leaving.is-from-desk {
+  background-color: var(--bm7-bg, #f3ecdd) !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .28 0 0 0 0 .18 0 0 0 .045 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E") !important;
+}
+.bm8-rxturn-leaving.is-from-card {
+  background-color: var(--bm7-surface, #fbf7ee) !important;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .28 0 0 0 0 .18 0 0 0 .038 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E") !important;
+  box-shadow: inset 0 0 0 1px var(--bm7-line, #ddd0b8) !important;
+}
+.theme-dark .bm8-rxturn-leaving.is-from-desk {
+  background-color: var(--bm7-bg, #151927) !important;
+}
+.theme-dark .bm8-rxturn-leaving.is-from-card {
+  background-color: var(--bm7-surface, #1b2031) !important;
+  box-shadow: inset 0 0 0 1px var(--bm7-line, #2f3654) !important;
+}
+.bm8-rxturn-entering {
+  position: relative;
+  z-index: 1;
+}
+
+.bm8-rxturn-overlay {
+  position: absolute;
+  z-index: 28;
+  overflow: hidden;
+  pointer-events: none;
+  contain: paint;
+  --rx-curl-w: 54px;
+  --rx-cast-w: 68px;
+  --rx-ink-w: 96px;
+  --rx-inner-w: 40px;
+}
+.bm8-rxturn-overlay.is-compact {
+  --rx-curl-w: 32px;
+  --rx-cast-w: 44px;
+  --rx-ink-w: 60px;
+  --rx-inner-w: 24px;
+}
+.bm8-rxturn-track {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  will-change: transform;
+}
+.bm8-rxturn-seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;
+  width: 0;
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-seam {
+  left: 0%;
+}
+
+/* 旧页拱起受光柔影（紧贴卷边内侧） */
+.bm8-rxturn-inner-shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: calc(var(--rx-curl-w) - 8px);
+  width: var(--rx-inner-w);
+  background: linear-gradient(270deg, rgb(76 58 30 / .11) 0%, rgb(76 58 30 / .035) 52%, transparent 100%);
+  opacity: 0;
+}
+.theme-dark .bm8-rxturn-inner-shade {
+  background: linear-gradient(270deg, rgb(4 8 20 / .28) 0%, rgb(4 8 20 / .10) 52%, transparent 100%);
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-inner-shade {
+  left: calc(var(--rx-curl-w) - 8px);
+  right: auto;
+  background: linear-gradient(90deg, rgb(76 58 30 / .11) 0%, rgb(76 58 30 / .035) 52%, transparent 100%);
+}
+.theme-dark .bm8-rxturn-overlay.is-back .bm8-rxturn-inner-shade {
+  background: linear-gradient(90deg, rgb(4 8 20 / .28) 0%, rgb(4 8 20 / .10) 52%, transparent 100%);
+}
+
+/* 翻起的哑光羊皮纸背面卷边（柔和纸背过渡，拒绝塑料高光柱管感） */
+.bm8-rxturn-curl {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -2px;
+  width: var(--rx-curl-w);
+  transform-origin: 100% 50%;
+  opacity: 0;
+  will-change: transform, opacity;
+  background: linear-gradient(
+    90deg,
+    #e4d8bf 0%,
+    #f1e8d6 14%,
+    #f9f3e6 46%,
+    #f6efe0 74%,
+    #ebe0c9 92%,
+    #dacba9 98%,
+    #cab790 100%
+  );
+  box-shadow:
+    -14px 0 26px -6px rgb(68 50 22 / .20),
+    -3px 0 6px -1px rgb(68 50 22 / .11),
+    inset 1px 0 0 rgb(255 251 242 / .55);
+}
+.theme-dark .bm8-rxturn-curl {
+  background: linear-gradient(
+    90deg,
+    #141928 0%,
+    #1b2238 16%,
+    #232c48 48%,
+    #202842 76%,
+    #192036 93%,
+    #2b375d 98.5%,
+    #3d4e82 100%
+  );
+  box-shadow:
+    -14px 0 28px -6px rgb(0 0 0 / .52),
+    -3px 0 6px -1px rgb(0 0 0 / .32),
+    inset 1px 0 0 rgb(164 184 248 / .10);
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-curl {
+  left: -2px;
+  right: auto;
+  transform-origin: 0% 50%;
+  background: linear-gradient(
+    270deg,
+    #e4d8bf 0%,
+    #f1e8d6 14%,
+    #f9f3e6 46%,
+    #f6efe0 74%,
+    #ebe0c9 92%,
+    #dacba9 98%,
+    #cab790 100%
+  );
+  box-shadow:
+    14px 0 26px -6px rgb(68 50 22 / .20),
+    3px 0 6px -1px rgb(68 50 22 / .11),
+    inset -1px 0 0 rgb(255 251 242 / .55);
+}
+.theme-dark .bm8-rxturn-overlay.is-back .bm8-rxturn-curl {
+  background: linear-gradient(
+    270deg,
+    #141928 0%,
+    #1b2238 16%,
+    #232c48 48%,
+    #202842 76%,
+    #192036 93%,
+    #2b375d 98.5%,
+    #3d4e82 100%
+  );
+  box-shadow:
+    14px 0 28px -6px rgb(0 0 0 / .52),
+    3px 0 6px -1px rgb(0 0 0 / .32),
+    inset -1px 0 0 rgb(164 184 248 / .10);
+}
+.bm8-rxturn-curl-grain {
+  position: absolute;
+  inset: 0;
+  opacity: .6;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .28 0 0 0 0 .18 0 0 0 .06 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.bm8-rxturn-curl-ridge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent 0%, rgb(61 85 176 / .18) 18%, rgb(255 252 246 / .52) 50%, rgb(61 85 176 / .18) 84%, transparent 100%);
+}
+.theme-dark .bm8-rxturn-curl-ridge {
+  background: linear-gradient(180deg, transparent 0%, rgb(143 162 240 / .24) 18%, rgb(196 212 255 / .34) 50%, rgb(143 162 240 / .22) 84%, transparent 100%);
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-curl-ridge {
+  left: 0;
+  right: auto;
+}
+
+/* 投射在新页上的真实压页投影（紧贴折脊外侧，近实远虚） */
+.bm8-rxturn-cast {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--rx-cast-w);
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    rgb(54 40 20 / .20) 0%,
+    rgb(66 50 26 / .10) 22%,
+    rgb(74 56 30 / .035) 58%,
+    transparent 100%
+  );
+}
+.theme-dark .bm8-rxturn-cast {
+  background: linear-gradient(
+    90deg,
+    rgb(2 5 14 / .48) 0%,
+    rgb(5 10 24 / .22) 26%,
+    rgb(8 14 34 / .07) 62%,
+    transparent 100%
+  );
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-cast {
+  right: 0;
+  left: auto;
+  background: linear-gradient(
+    270deg,
+    rgb(54 40 20 / .20) 0%,
+    rgb(66 50 26 / .10) 22%,
+    rgb(74 56 30 / .035) 58%,
+    transparent 100%
+  );
+}
+.theme-dark .bm8-rxturn-overlay.is-back .bm8-rxturn-cast {
+  background: linear-gradient(
+    270deg,
+    rgb(2 5 14 / .48) 0%,
+    rgb(5 10 24 / .22) 26%,
+    rgb(8 14 34 / .07) 62%,
+    transparent 100%
+  );
+}
+
+/* 折页边缘钢笔水蓝墨线与淡彩晕染（100% 绑定折脊边界，上下羽化消隐，绝不横穿正文） */
+.bm8-rxturn-inkwash {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: var(--rx-ink-w);
+  transform-origin: 0% 50%;
+  opacity: 0;
+  will-change: transform, opacity;
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  background:
+    radial-gradient(90% 34% at 4% 22%, rgb(61 85 176 / .16) 0%, transparent 74%),
+    radial-gradient(85% 38% at 6% 78%, rgb(82 142 214 / .13) 0%, transparent 74%),
+    linear-gradient(90deg, rgb(61 85 176 / .14) 0%, rgb(92 146 216 / .08) 32%, rgb(134 186 232 / .025) 68%, transparent 100%);
+}
+.theme-dark .bm8-rxturn-inkwash {
+  background:
+    radial-gradient(90% 34% at 4% 22%, rgb(143 162 240 / .18) 0%, transparent 74%),
+    radial-gradient(85% 38% at 6% 78%, rgb(104 156 238 / .14) 0%, transparent 74%),
+    linear-gradient(90deg, rgb(143 162 240 / .15) 0%, rgb(108 156 234 / .08) 34%, rgb(88 134 220 / .02) 70%, transparent 100%);
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-inkwash {
+  right: 2px;
+  left: auto;
+  transform-origin: 100% 50%;
+  background:
+    radial-gradient(90% 34% at 96% 22%, rgb(61 85 176 / .16) 0%, transparent 74%),
+    radial-gradient(85% 38% at 94% 78%, rgb(82 142 214 / .13) 0%, transparent 74%),
+    linear-gradient(270deg, rgb(61 85 176 / .14) 0%, rgb(92 146 216 / .08) 32%, rgb(134 186 232 / .025) 68%, transparent 100%);
+}
+.theme-dark .bm8-rxturn-overlay.is-back .bm8-rxturn-inkwash {
+  background:
+    radial-gradient(90% 34% at 96% 22%, rgb(143 162 240 / .18) 0%, transparent 74%),
+    radial-gradient(85% 38% at 94% 78%, rgb(104 156 238 / .14) 0%, transparent 74%),
+    linear-gradient(270deg, rgb(143 162 240 / .15) 0%, rgb(108 156 234 / .08) 34%, rgb(88 134 220 / .02) 70%, transparent 100%);
+}
+
+/* 紧贴折脊外沿的纵贯钢笔水蓝墨锋细线与两颗极小水色四芒微星 */
+.bm8-rxturn-inkline {
+  position: absolute;
+  top: 5%;
+  bottom: 5%;
+  left: 0;
+  width: 1.5px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgb(61 85 176 / .38) 18%,
+    rgb(92 148 218 / .56) 46%,
+    rgb(61 85 176 / .36) 78%,
+    transparent 100%
+  );
+}
+.theme-dark .bm8-rxturn-inkline {
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgb(143 162 240 / .36) 18%,
+    rgb(176 202 255 / .56) 46%,
+    rgb(143 162 240 / .34) 78%,
+    transparent 100%
+  );
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-inkline {
+  right: 0;
+  left: auto;
+}
+.bm8-rxturn-seam-glint {
+  position: absolute;
+  left: 10px;
+  fill: color-mix(in srgb, var(--bm7-accent, #3d55b0) 78%, #7cc4ff);
+  opacity: 0;
+  transform-origin: center;
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-seam-glint {
+  right: 10px;
+  left: auto;
+}
+.bm8-rxturn-seam-glint.is-upper {
+  top: 18%;
+  width: 11px;
+  height: 11px;
+}
+.bm8-rxturn-seam-glint.is-lower {
+  bottom: 19%;
+  left: 18px;
+  width: 8px;
+  height: 8px;
+  fill: color-mix(in srgb, var(--bm7-gold, #c99b52) 64%, var(--bm7-accent, #3d55b0));
+}
+.bm8-rxturn-overlay.is-back .bm8-rxturn-seam-glint.is-lower {
+  right: 18px;
+  left: auto;
+}
+.bm8-rxturn-overlay.is-ink-live .bm8-rxturn-seam-glint.is-upper {
+  animation: bm8-rxturn-star-glint .46s cubic-bezier(.22, 1, .36, 1) .08s forwards;
+}
+.bm8-rxturn-overlay.is-ink-live .bm8-rxturn-seam-glint.is-lower {
+  animation: bm8-rxturn-star-glint .42s cubic-bezier(.22, 1, .36, 1) .15s forwards;
+}
+@keyframes bm8-rxturn-star-glint {
+  0% { opacity: 0; transform: scale(.35) rotate(-18deg); }
+  40% { opacity: .82; transform: scale(1.04) rotate(0deg); }
+  100% { opacity: 0; transform: scale(.58) rotate(22deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .bm8-fx-band, .bm8-fx-bloomwrap, .bm8-fx-wipe, .bm8-dw-fx { display: none !important; }
+  .bm8-fx-band, .bm8-fx-bloomwrap, .bm8-fx-wipe, .bm8-dw-fx, .bm8-rxturn-overlay { display: none !important; }
   .bm8-ws-paper-next, .bm8-ws-paper-prev, .bm8-ws-glow-next, .bm8-ws-glow-prev, .bm8-ws-cinema-in,
   .bm8-ws-roxy-next, .bm8-ws-roxy-prev, .bm8-paper-in, .bm8-glow-in, .bm8-cinema-in,
   .bm8-paper-out, .bm8-glow-out, .bm8-cinema-out, .bm8-dw-in, .bm8-dw-out, .bm8-dw-lite-in, .bm8-dw-lite-out,
@@ -5199,6 +5983,8 @@ module.exports = {
   paperSlipSwap,
   scrollUnrollMorph,
   animateWorkspaceGlide,
+  transitionRoxyWorkspacePane,
+  abortRoxyWorkspaceTurn,
   animateDrawerReveal,
   registerThemePanelTransition,
   spawnCelOpticalSweep,
