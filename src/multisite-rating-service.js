@@ -1442,10 +1442,139 @@ function computePearsonCorrelation(xs, ys) {
   return Number((num / denom).toFixed(3));
 }
 
-function computeLibraryRatingAnalytics(plugin, items, customWeights = null) {
-  const list = Array.isArray(items) ? items : [];
-  const weights = customWeights || getCompositeWeights(plugin);
-  const profiles = list.map((it) => computeAnimeCrossSiteProfile(plugin, it, weights));
+function getSeasonOrderWeight(seasonStr) {
+  const s = String(seasonStr || "");
+  if (/10|秋/.test(s)) return 4;
+  if (/0?7|夏/.test(s)) return 3;
+  if (/0?4|春/.test(s)) return 2;
+  if (/0?1|冬/.test(s)) return 1;
+  return 0;
+}
+
+function getItemSeasonInfo(item) {
+  const year = String(item?.year || "").trim();
+  const season = String(item?.season || "").trim();
+  const seasonKey = year && season ? `${year}:${season}` : "";
+  const label = year && season ? `${year}年${season}` : year ? `${year}年` : "";
+  return { year, season, seasonKey, label };
+}
+
+function collectRatingFilterFacets(profiles) {
+  const list = Array.isArray(profiles) ? profiles : [];
+  const seasonMap = new Map();
+  const yearMap = new Map();
+  const stateCounts = new Map();
+  let syncedCount = 0;
+  let multiSiteCount = 0;
+  let fullQuartetCount = 0;
+
+  for (const p of list) {
+    if (!p || !p.item) continue;
+    if (p.hasExternalSync) syncedCount++;
+    if (p.availableCount >= 2) multiSiteCount++;
+    if (p.availableCount >= 4) fullQuartetCount++;
+
+    const { year, season, seasonKey, label } = getItemSeasonInfo(p.item);
+    if (seasonKey) {
+      let sEntry = seasonMap.get(seasonKey);
+      if (!sEntry) {
+        sEntry = { key: seasonKey, year, season, label, count: 0, syncedCount: 0 };
+        seasonMap.set(seasonKey, sEntry);
+      }
+      sEntry.count++;
+      if (p.hasExternalSync) sEntry.syncedCount++;
+    }
+    if (year) {
+      let yEntry = yearMap.get(year);
+      if (!yEntry) {
+        yEntry = { key: `year:${year}`, year, label: `${year}年`, count: 0, syncedCount: 0 };
+        yearMap.set(year, yEntry);
+      }
+      yEntry.count++;
+      if (p.hasExternalSync) yEntry.syncedCount++;
+    }
+    const st = String(p.item.state || "").trim();
+    if (st) {
+      stateCounts.set(st, (stateCounts.get(st) || 0) + 1);
+    }
+  }
+
+  const seasons = Array.from(seasonMap.values()).sort((a, b) => {
+    const ya = parseInt(a.year, 10) || 0;
+    const yb = parseInt(b.year, 10) || 0;
+    if (yb !== ya) return yb - ya;
+    return getSeasonOrderWeight(b.season) - getSeasonOrderWeight(a.season);
+  });
+
+  const years = Array.from(yearMap.values()).sort(
+    (a, b) => (parseInt(b.year, 10) || 0) - (parseInt(a.year, 10) || 0)
+  );
+
+  const preferredOrder = ["在看", "想看", "已看", "抛弃"];
+  const states = [];
+  for (const st of preferredOrder) {
+    if (stateCounts.has(st)) {
+      states.push({ key: st, label: st, count: stateCounts.get(st) });
+      stateCounts.delete(st);
+    }
+  }
+  for (const [st, count] of stateCounts.entries()) {
+    states.push({ key: st, label: st, count });
+  }
+
+  return {
+    seasons,
+    years,
+    states,
+    coverage: {
+      total: list.length,
+      syncedCount,
+      multiSiteCount,
+      fullQuartetCount
+    }
+  };
+}
+
+function filterRatingProfiles(profiles, filterSpec = {}) {
+  const list = Array.isArray(profiles) ? profiles : [];
+  const f = filterSpec && typeof filterSpec === "object" ? filterSpec : {};
+  const seasonFilter = String(f.seasonFilter || "").trim();
+  const stateFilter = String(f.stateFilter || "").trim();
+  const syncFilter = String(f.syncFilter || (f.onlySynced ? "synced" : "all")).trim();
+  const q = String(f.search || "").trim().toLowerCase();
+
+  return list.filter((p) => {
+    if (!p || !p.item) return false;
+    if (syncFilter === "synced" && !p.hasExternalSync) return false;
+    if (syncFilter === "quartet" && p.availableCount < 4) return false;
+    if (stateFilter && stateFilter !== "all" && String(p.item.state || "").trim() !== stateFilter) {
+      return false;
+    }
+    if (seasonFilter && seasonFilter !== "all") {
+      const info = getItemSeasonInfo(p.item);
+      if (seasonFilter.startsWith("year:")) {
+        if (info.year !== seasonFilter.slice(5)) return false;
+      } else if (info.seasonKey !== seasonFilter) {
+        return false;
+      }
+    }
+    if (q) {
+      const name = String(p.item.name || "").toLowerCase();
+      const jp = String(p.item.japaneseName || "").toLowerCase();
+      const studio = String(p.item.studio || "").toLowerCase();
+      const tags = Array.isArray(p.item.tags)
+        ? p.item.tags.join(" ").toLowerCase()
+        : String(p.item.tags || "").toLowerCase();
+      if (!name.includes(q) && !jp.includes(q) && !studio.includes(q) && !tags.includes(q)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function computeRatingAnalyticsFromProfiles(profilesInput, weights) {
+  const profiles = Array.isArray(profilesInput) ? profilesInput : [];
 
   const siteStats = {};
   for (const id of CORE_SITE_IDS) {
@@ -1468,7 +1597,7 @@ function computeLibraryRatingAnalytics(plugin, items, customWeights = null) {
       id,
       meta: RATING_SOURCES[id],
       count,
-      coveragePct: list.length ? Math.round((count / list.length) * 100) : 0,
+      coveragePct: profiles.length ? Math.round((count / profiles.length) * 100) : 0,
       mean10,
       median10,
       stdDev,
@@ -1547,7 +1676,7 @@ function computeLibraryRatingAnalytics(plugin, items, customWeights = null) {
     .slice(0, 12);
 
   return {
-    totalCount: list.length,
+    totalCount: profiles.length,
     syncedCount: syncedProfiles.length,
     multiSiteCount: multiSiteProfiles.length,
     fullQuartetCount: fullQuartetProfiles.length,
@@ -1562,6 +1691,13 @@ function computeLibraryRatingAnalytics(plugin, items, customWeights = null) {
     westFavored,
     personalRebels
   };
+}
+
+function computeLibraryRatingAnalytics(plugin, items, customWeights = null) {
+  const list = Array.isArray(items) ? items : [];
+  const weights = customWeights || getCompositeWeights(plugin);
+  const profiles = list.map((it) => computeAnimeCrossSiteProfile(plugin, it, weights));
+  return computeRatingAnalyticsFromProfiles(profiles, weights);
 }
 
 module.exports = {
@@ -1589,5 +1725,9 @@ module.exports = {
   formatSiteNativeScore,
   computeAnimeCrossSiteProfile,
   getPreferredDisplayRating,
+  getItemSeasonInfo,
+  collectRatingFilterFacets,
+  filterRatingProfiles,
+  computeRatingAnalyticsFromProfiles,
   computeLibraryRatingAnalytics
 };

@@ -2232,6 +2232,73 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
 }
 
 /**
+ * 刷新单个条目的本地文件夹检查缓存（用于集数 +1/-1 后同步「播第 X 集」与顶栏新更计数）
+ */
+function refreshItemLocalInspectCache(item) {
+  if (!item || !isDesktopNodeAvailable() || item.isSamplePreviewItem) return null;
+  const rawPath = String(item.downloadPath || "").trim();
+  if (!rawPath || rawPath === "无") {
+    item._localInspect = null;
+    return null;
+  }
+  const localResult = inspectLocalFolder(rawPath, item.watchedEpisodes);
+  if (localResult && !localResult.error) {
+    const prevMtime = item._localInspect?.latestVideoMtime || 0;
+    item._localInspect = {
+      ...localResult,
+      latestVideoMtime: localResult.latestVideoMtime || prevMtime
+    };
+  }
+  return localResult;
+}
+
+/**
+ * 构建「全部番剧」卡片底栏主按钮：本地有下一集可播时显示「播第 X 集」，否则显示「随记」
+ */
+function createGalleryPrimaryQuietButton(plugin, item, docRef) {
+  const doc = docRef || (typeof document !== "undefined" ? document : null);
+  const btn = doc.createElement("button");
+  btn.type = "button";
+  btn.dataset.galleryPrimaryAction = "1";
+
+  const watched = Number(item?.watchedEpisodes) || 0;
+  const reviewCount = Array.isArray(item?.reviews) ? item.reviews.length : 0;
+
+  if (isDesktopNodeAvailable() && item && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
+    const localResult = refreshItemLocalInspectCache(item);
+    if (localResult && !localResult.error && localResult.fileCount > 0 && localResult.nextEpisodeFile) {
+      const nextEpNum = localResult.nextEpisodeNumber || (watched + 1);
+      btn.className = "curator-gallery-quiet-link is-play";
+      btn.textContent = `播第 ${nextEpNum} 集`;
+      btn.title = `播放本地第 ${nextEpNum} 集`;
+      btn.dataset.galleryAction = "play-next";
+      btn.dataset.playEp = String(nextEpNum);
+      btn.onclick = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const epToPlay = Number(btn.dataset.playEp) || nextEpNum;
+        await reviewStudioService.launchVideoAtEpisodeAndTimestamp(plugin, item, {
+          episode: epToPlay,
+          timestamp: ""
+        });
+      };
+      return btn;
+    }
+  }
+
+  btn.className = `curator-gallery-quiet-link ${reviewCount > 0 ? "has-reviews" : ""}`.trim();
+  btn.textContent = reviewCount > 0 ? `随记(${reviewCount})` : "随记";
+  btn.dataset.galleryAction = "open-reviews";
+  btn.title = "打开观片手札（记录单集吐槽、时间码或截图）";
+  btn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    reviewStudioService.openAnimeReviewStudioModal(plugin, item);
+  };
+  return btn;
+}
+
+/**
  * 模式 A：画廊封面模式（纸本档案封套卡片，固定高度行高对齐，支持默认两排响应式折叠与展开）
  */
 function renderCatalogGalleryMode(plugin, container, items, state, helpers, catalogMount) {
@@ -2431,42 +2498,7 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
 
     const quietActions = footer.createDiv("curator-gallery-quiet-actions");
     const reviewCount = Array.isArray(item.reviews) ? item.reviews.length : 0;
-    let primaryCardActionRendered = false;
-
-    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
-      const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
-      if (localResult && !localResult.error && localResult.fileCount > 0 && localResult.nextEpisodeFile) {
-        const nextEpNum = localResult.nextEpisodeNumber || (watched + 1);
-        const playBtn = quietActions.createEl("button", {
-          cls: "curator-gallery-quiet-link is-play",
-          text: `播第 ${nextEpNum} 集`
-        });
-        playBtn.title = `播放本地第 ${nextEpNum} 集`;
-        playBtn.onclick = async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          await reviewStudioService.launchVideoAtEpisodeAndTimestamp(plugin, item, {
-            episode: nextEpNum,
-            timestamp: ""
-          });
-        };
-        primaryCardActionRendered = true;
-      }
-    }
-
-    if (!primaryCardActionRendered) {
-      const galleryReviewBtn = quietActions.createEl("button", {
-        cls: `curator-gallery-quiet-link ${reviewCount > 0 ? "has-reviews" : ""}`,
-        text: reviewCount > 0 ? `随记(${reviewCount})` : "随记"
-      });
-      galleryReviewBtn.dataset.galleryAction = "open-reviews";
-      galleryReviewBtn.title = "打开观片手札（记录单集吐槽、时间码或截图）";
-      galleryReviewBtn.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        reviewStudioService.openAnimeReviewStudioModal(plugin, item);
-      };
-    }
+    quietActions.appendChild(createGalleryPrimaryQuietButton(plugin, item, quietActions.ownerDocument));
 
     const triggerGalleryWand = () => {
       multiHallArchiveService.openMagicWandRelationModal(
@@ -6577,6 +6609,7 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
   state.incrementalUpdateCount = (state.incrementalUpdateCount || 0) + 1;
 
   // 1. 同步内存态中的对应条目引用
+  let syncedItemRef = item;
   if (Array.isArray(state.items) && item?.file?.path) {
     const target = state.items.find((it) => it.file?.path === item.file.path);
     if (target && target !== item) {
@@ -6586,6 +6619,14 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
       if (updates.addTag || updates.removeTag) target.tags = item.tags;
       if (updates.reviewsUpdated) target.reviews = item.reviews;
     }
+    if (target) syncedItemRef = target;
+  }
+
+  if (updates.watchedEpisodes !== undefined && syncedItemRef) {
+    refreshItemLocalInspectCache(syncedItemRef);
+    if (item && item !== syncedItemRef) {
+      item._localInspect = syncedItemRef._localInspect;
+    }
   }
 
   // 2. 原地刷新顶栏核心统计、主工作台徽章与快筛胶囊计数
@@ -6594,7 +6635,7 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
     runtime.renderQuickRibbon();
   }
 
-  // 3. 原地更新该卡片/行在 DOM 中的进度、评分、状态显示
+  // 3. 原地更新该卡片/行在 DOM 中的进度、评分、状态与下一集播放按钮显示
   if (item?.file?.path) {
     const escapedPath =
       typeof CSS !== "undefined" && typeof CSS.escape === "function"
@@ -6619,6 +6660,26 @@ function applyIncrementalDashboardUpdate(plugin, container, item, updates = {}) 
       const deskIncBtn = node.querySelector(".curator-desk-card .curator-step-btn.is-inc");
       if (deskIncBtn) {
         deskIncBtn.textContent = totalNum > 0 && watched < totalNum ? `+1 (第${nextEp}话)` : "+";
+      }
+
+      // 同步更新全部番剧画廊卡片底栏「播第 X 集」/「随记」按钮
+      if (updates.watchedEpisodes !== undefined || updates.reviewsUpdated) {
+        const quietActions = node.querySelector(".curator-gallery-quiet-actions");
+        if (quietActions) {
+          const nextPrimaryBtn = createGalleryPrimaryQuietButton(
+            plugin,
+            syncedItemRef || item,
+            node.ownerDocument
+          );
+          const oldPrimaryBtn = quietActions.querySelector(
+            '[data-gallery-primary-action="1"], .curator-gallery-quiet-link.is-play, [data-gallery-action="open-reviews"]'
+          );
+          if (oldPrimaryBtn) {
+            oldPrimaryBtn.replaceWith(nextPrimaryBtn);
+          } else {
+            quietActions.insertBefore(nextPrimaryBtn, quietActions.firstChild);
+          }
+        }
       }
 
       // 更新状态徽章

@@ -17,6 +17,7 @@ function prefersReducedMotion() {
 }
 
 function getTier(el) {
+  if (prefersReducedMotion()) return "off";
   if (typeof motionTier === "function") return motionTier(el);
   const root = el && el.closest ? el.closest(".bm7-root") : null;
   if (root) {
@@ -390,19 +391,101 @@ function withPreservedScroll(hostEl, mutateFn, opts = {}) {
 
 /* =========================================================================
  * 外观专属面板内切换动效注册表（支持未来为任意外观独立挂载定制转场）
- *   - glide : 干净顺滑的方向性横向滑移（类似「角色典藏画廊」，follow/paper/glow/cinema 默认采用）
+ *   - glide : 干净顺滑的方向性横向滑移（跟随 Obsidian 的默认外观）
+ *   - paper : 暖色纸本专属（旧页轻轻揭起、新页带一点角度落回桌面）
+ *   - glow  : 封面柔光专属（旧内容向外淡散、新内容从微缩中显影，一团封面色柔光随方向掠过）
+ *   - cinema: 夜间影院专属（暗场遮片顺切换方向划开，边缘带一线放映机暖光）
  *   - roxy  : 洛琪希手记专属（焦点区书页平实滑阅 + 书脊折影；子卡片便签轻滑 / 网格清爽横滑）
  *   - cel   : 晴空画集专属（随左右切换方向自动翻转的光学棱镜虹彩折射 / 清玻镜面反光 / 多重折光切面）
  * ========================================================================= */
 const THEME_PANEL_TRANSITIONS = {
   default: "glide",
   follow: "glide",
-  paper: "glide",
-  glow: "glide",
-  cinema: "glide",
+  paper: "paper",
+  glow: "glow",
+  cinema: "cinema",
   roxy: "roxy",
   cel: "cel"
 };
+
+/** paper / glow / cinema 三款外观的面板入场与旧页退场类（统一清理用） */
+const THEMED_SWAP_CLASSES = [
+  "bm8-paper-in",
+  "bm8-glow-in",
+  "bm8-cinema-in",
+  "bm8-paper-out",
+  "bm8-glow-out",
+  "bm8-cinema-out",
+  "is-rev"
+];
+const THEMED_SWAP_MODES = { paper: true, glow: true, cinema: true };
+
+/** 封面柔光：一团取自当前封面色的柔光从新内容进入的一侧掠过（仅 transform / opacity） */
+function spawnPanelBloom(hostEl, dir = 1) {
+  if (!hostEl) return null;
+  hostEl.querySelectorAll(":scope > .bm8-fx-bloomwrap").forEach((n) => n.remove());
+  if (getComputedStyle(hostEl).position === "static") hostEl.style.position = "relative";
+  const wrap = h("div.bm8-fx-bloomwrap", {
+    cls: dir < 0 ? "is-from-left" : "is-from-right",
+    attr: { "aria-hidden": "true" }
+  }, [h("span.bm8-fx-pbloom")]);
+  hostEl.appendChild(wrap);
+  scheduleAfterAnimations(wrap, 520, () => wrap.parentNode && wrap.remove());
+  return wrap;
+}
+
+/** 夜间影院：暗场遮片先盖住旧画面，再顺着切换方向划开，前沿带一线放映机暖光 */
+function spawnCinemaWipe(hostEl, dir = 1) {
+  if (!hostEl) return null;
+  hostEl.querySelectorAll(":scope > .bm8-fx-wipe").forEach((n) => n.remove());
+  if (getComputedStyle(hostEl).position === "static") hostEl.style.position = "relative";
+  const wrap = h("div.bm8-fx-wipe", {
+    cls: dir < 0 ? "is-rev" : "",
+    attr: { "aria-hidden": "true" }
+  }, [h("span.bm8-fx-wipe-track", [h("span.bm8-fx-wipe-panel"), h("span.bm8-fx-wipe-edge")])]);
+  hostEl.appendChild(wrap);
+  scheduleAfterAnimations(wrap, 460, () => wrap.parentNode && wrap.remove());
+  return wrap;
+}
+
+/** 找到最近的可滚动祖先视口（用于把大页签转场特效限定在当前看得见的区域） */
+function findScrollViewportRect(el) {
+  let n = el && el.parentElement;
+  while (n && n !== document.body) {
+    let cs = null;
+    try {
+      cs = getComputedStyle(n);
+    } catch (_) {}
+    if (cs && /(auto|scroll|overlay)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight + 1) {
+      const r = n.getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom };
+    }
+    n = n.parentElement;
+  }
+  return { top: 0, bottom: window.innerHeight || document.documentElement.clientHeight || 800 };
+}
+
+/** 在宿主内只覆盖「当前屏幕可见部分」的特效层：长页面也只在眼前的这一屏播放 */
+function spawnVisibleBand(hostEl, cls) {
+  if (!hostEl || typeof document === "undefined") return null;
+  hostEl.querySelectorAll(":scope > .bm8-fx-band").forEach((n) => n.remove());
+  const r = hostEl.getBoundingClientRect();
+  if (r.width < 40 || r.height < 40) return null;
+  const vp = findScrollViewportRect(hostEl);
+  const winH = window.innerHeight || vp.bottom;
+  const top = Math.max(r.top, vp.top, 0);
+  const bottom = Math.min(r.bottom, vp.bottom, winH);
+  const bandH = bottom - top;
+  if (bandH < 40) return null;
+  if (getComputedStyle(hostEl).position === "static") hostEl.style.position = "relative";
+  const band = h("div.bm8-fx-band", {
+    cls,
+    attr: { "aria-hidden": "true" },
+    style: { top: `${(top - r.top).toFixed(1)}px`, height: `${bandH.toFixed(1)}px` }
+  });
+  hostEl.appendChild(band);
+  return band;
+}
 
 function registerThemePanelTransition(themeId, modeOrHandler) {
   if (!themeId || !modeOrHandler) return;
@@ -554,7 +637,7 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
   // 捕获旧面板快照（剥离嵌套转场层并把破框封面收入裁切盒内，彻底杜绝 -20px 顶边残片与 20px 错位双影）
   let ghost = null;
   const prevChild = hostEl.firstElementChild;
-  if (prevChild && prevChild.offsetHeight > 24 && (mode === "roxy" || mode === "cel" || mode === "glide")) {
+  if (prevChild && prevChild.offsetHeight > 24 && (mode === "roxy" || mode === "cel" || mode === "glide" || THEMED_SWAP_MODES[mode])) {
     try {
       ghost = prevChild.cloneNode(true);
       ghost.setAttribute("aria-hidden", "true");
@@ -565,11 +648,12 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
         "bm8-glide-in-next",
         "bm8-glide-in-prev",
         "bm8-cel-hero-in-next",
-        "bm8-cel-hero-in-prev"
+        "bm8-cel-hero-in-prev",
+        ...THEMED_SWAP_CLASSES
       );
       ghost.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
       ghost
-        .querySelectorAll(".bm8-swap-stage, .bm8-ink-flourish, .bm8-reader-crease, .bm8-cel-optics-stage")
+        .querySelectorAll(".bm8-swap-stage, .bm8-ink-flourish, .bm8-reader-crease, .bm8-cel-optics-stage, .bm8-fx-bloomwrap, .bm8-fx-wipe")
         .forEach((n) => n.remove());
       if (mode === "roxy") {
         ghost.querySelectorAll(".bm7-hero-plate").forEach((p) => {
@@ -637,6 +721,32 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
     return;
   }
 
+  if (THEMED_SWAP_MODES[mode]) {
+    // 纸本 / 柔光 / 影院：各自的焦点区换页手感（只走 transform / opacity）
+    const mainTarget = nextChild.querySelector(":scope > .bm7-hero-main") || nextChild;
+    const inCls = `bm8-${mode}-in`;
+    mainTarget.classList.remove(...THEMED_SWAP_CLASSES);
+    void mainTarget.offsetWidth;
+    mainTarget.classList.add(inCls);
+    if (dir < 0) mainTarget.classList.add("is-rev");
+    scheduleAfterAnimations(mainTarget, 440, () => mainTarget.classList.remove(...THEMED_SWAP_CLASSES));
+
+    if (ghost) {
+      const ghostMain = ghost.querySelector(":scope > .bm7-hero-main") || ghost;
+      const stageWrap = h("div.bm8-swap-stage.is-frameless-glide", { attr: { "aria-hidden": "true" } });
+      ghostMain.classList.add(`bm8-${mode}-out`);
+      if (dir < 0) ghostMain.classList.add("is-rev");
+      stageWrap.appendChild(ghostMain);
+      nextChild.appendChild(stageWrap);
+      scheduleAfterAnimations(stageWrap, 220, () => {
+        if (stageWrap.parentNode) stageWrap.remove();
+      });
+    }
+    if (mode === "glow") spawnPanelBloom(nextChild, dir);
+    else if (mode === "cinema") spawnCinemaWipe(nextChild, dir);
+    return;
+  }
+
   // 其他外观（follow / paper / glow / cinema）：干净顺滑的「角色典藏画廊」同款方向性横向切换动效
   const mainTarget = nextChild.querySelector(":scope > .bm7-hero-main") || nextChild;
   const inCls = dir < 0 ? "bm8-frameless-hero-in-prev" : "bm8-frameless-hero-in-next";
@@ -664,18 +774,126 @@ function inkPageSwap(hostEl, renderNext, opts = {}) {
  *     3) scrollUnrollMorph     : 逐页⇄平铺与内联展开（画卷顺滑滚下铺开、反向柔和卷起 + 连贯高度形变）
  * ========================================================================= */
 
+const WS_SWITCH_CLASSES = [
+  "bm8-ws-glide-next",
+  "bm8-ws-glide-prev",
+  "bm8-ws-glide-lite",
+  "bm8-ws-paper-next",
+  "bm8-ws-paper-prev",
+  "bm8-ws-glow-next",
+  "bm8-ws-glow-prev",
+  "bm8-ws-cinema-in",
+  "bm8-ws-roxy-next",
+  "bm8-ws-roxy-prev",
+  "bm8-cel-hero-in-next",
+  "bm8-cel-hero-in-prev"
+];
+
+/**
+ * 顶层大页签切换：由当前番剧档案馆外观定调
+ *   follow：干净的方向性横滑
+ *   paper ：新一页带一点角度落回桌面，一道纸影从上往下扫过
+ *   glow  ：新页面从微缩中显影，一团封面色柔光从进入的一侧晕开
+ *   cinema：暗场上下遮幅向两边拉开（像影院幕布开场），中缝闪过一线放映暖光
+ *   roxy  ：手记翻到下一页，书脊折影顺翻页方向扫过
+ *   cel   ：沿用晴空画集当前选择的棱镜 / 白羽 / 涟漪光学转场
+ * 特效层只覆盖当前屏幕看得见的部分；轻巧档统一为短淡入，关闭档与系统「减少动态效果」时完全不播放。
+ */
 function animateWorkspaceGlide(paneEl, dir = 1) {
   if (!paneEl) return;
   const tier = getTier(paneEl);
-  paneEl.classList.remove("bm8-ws-glide-next", "bm8-ws-glide-prev", "bm8-ws-glide-lite");
+  paneEl.classList.remove(...WS_SWITCH_CLASSES);
+  paneEl.querySelectorAll(":scope > .bm8-fx-band").forEach((n) => n.remove());
+  if (paneEl._bm8WsTid) {
+    clearTimeout(paneEl._bm8WsTid);
+    paneEl._bm8WsTid = 0;
+  }
   if (tier === "off") return;
+  const d = dir < 0 ? -1 : 1;
+  const { themeId, celFx } = resolvePanelTransitionProfile(paneEl);
+  let cls = d < 0 ? "bm8-ws-glide-prev" : "bm8-ws-glide-next";
+  let ms = 320;
+  let band = null;
+  if (tier === "lite") {
+    cls = "bm8-ws-glide-lite";
+    ms = 220;
+  } else if (themeId === "paper") {
+    band = spawnVisibleBand(paneEl, "is-paper");
+    if (band) band.appendChild(h("span.bm8-fx-papershade"));
+    cls = d < 0 ? "bm8-ws-paper-prev" : "bm8-ws-paper-next";
+    ms = 440;
+  } else if (themeId === "glow") {
+    band = spawnVisibleBand(paneEl, `is-glow ${d < 0 ? "is-from-left" : "is-from-right"}`);
+    if (band) band.append(h("span.bm8-fx-bloom"), h("span.bm8-fx-bloom.is-b2"));
+    cls = d < 0 ? "bm8-ws-glow-prev" : "bm8-ws-glow-next";
+    ms = 580;
+  } else if (themeId === "cinema") {
+    band = spawnVisibleBand(paneEl, "is-cinema");
+    if (band) band.append(h("span.bm8-fx-bar.is-top"), h("span.bm8-fx-bar.is-bot"), h("span.bm8-fx-slit"));
+    cls = "bm8-ws-cinema-in";
+    ms = 520;
+  } else if (themeId === "roxy") {
+    band = spawnVisibleBand(paneEl, `is-roxy ${d < 0 ? "is-back" : ""}`);
+    if (band) band.appendChild(h("span.bm8-fx-track", [h("span.bm8-fx-crease")]));
+    cls = d < 0 ? "bm8-ws-roxy-prev" : "bm8-ws-roxy-next";
+    ms = 460;
+  } else if (themeId === "cel") {
+    band = spawnVisibleBand(paneEl, "is-cel");
+    if (band) spawnCelOpticalSweep(band, d, { variant: celFx, hero: true });
+    cls = d < 0 ? "bm8-cel-hero-in-prev" : "bm8-cel-hero-in-next";
+    ms = 620;
+  }
   void paneEl.offsetWidth;
-  const cls = tier === "lite" ? "bm8-ws-glide-lite" : dir < 0 ? "bm8-ws-glide-prev" : "bm8-ws-glide-next";
   paneEl.classList.add(cls);
-  if (paneEl._bm8WsTid) clearTimeout(paneEl._bm8WsTid);
   paneEl._bm8WsTid = setTimeout(() => {
-    paneEl.classList.remove("bm8-ws-glide-next", "bm8-ws-glide-prev", "bm8-ws-glide-lite");
-  }, tier === "lite" ? 220 : 320);
+    paneEl.classList.remove(...WS_SWITCH_CLASSES);
+    if (band && band.parentNode) band.remove();
+    paneEl._bm8WsTid = 0;
+  }, ms);
+}
+
+/**
+ * 抽屉 / 详情面板的展开与收起：由当前外观定调（右侧抽屉与底部抽屉两种方向）
+ *   follow 平滑滑入 · paper 抽出一页（带角度） · glow 柔光中显影 · cinema 聚光灯打亮
+ *   roxy 像翻开手记封面 · cel 一道清透反光掠过
+ * 返回本次动画时长（毫秒），关闭档返回 0。
+ */
+const DRAWER_FX_CLASSES = ["bm8-dw-in", "bm8-dw-out", "bm8-dw-lite-in", "bm8-dw-lite-out"];
+const DRAWER_IN_MS = { follow: 280, paper: 360, glow: 360, cinema: 380, roxy: 400, cel: 340 };
+function animateDrawerReveal(el, opts = {}) {
+  if (!el) return 0;
+  el.classList.remove(...DRAWER_FX_CLASSES);
+  el.querySelectorAll(":scope > .bm8-dw-fx").forEach((n) => n.remove());
+  if (el._bm8DwTid) {
+    clearTimeout(el._bm8DwTid);
+    el._bm8DwTid = 0;
+  }
+  const tier = getTier(el);
+  if (tier === "off") return 0;
+  const closing = Boolean(opts.closing);
+  el.setAttribute("data-bm8-dw-side", opts.side === "bottom" ? "bottom" : "right");
+  const { themeId } = resolvePanelTransitionProfile(el);
+  let cls;
+  let ms;
+  if (tier === "lite") {
+    cls = closing ? "bm8-dw-lite-out" : "bm8-dw-lite-in";
+    ms = closing ? 150 : 200;
+  } else {
+    cls = closing ? "bm8-dw-out" : "bm8-dw-in";
+    ms = closing ? 200 : DRAWER_IN_MS[themeId] || 280;
+    if (!closing && themeId !== "follow" && DRAWER_IN_MS[themeId]) {
+      el.appendChild(h("span.bm8-dw-fx", { attr: { "aria-hidden": "true" } }));
+      if (themeId === "glow" || themeId === "cel") ms += 160;
+    }
+  }
+  void el.offsetWidth;
+  el.classList.add(cls);
+  el._bm8DwTid = setTimeout(() => {
+    el.classList.remove(...DRAWER_FX_CLASSES);
+    el.querySelectorAll(":scope > .bm8-dw-fx").forEach((n) => n.remove());
+    el._bm8DwTid = 0;
+  }, ms + 30);
+  return ms;
 }
 
 function paperSlipSwap(hostEl, renderNext, opts = {}) {
@@ -701,7 +919,7 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     clearTimeout(hostEl._bm8SlipTid);
     hostEl._bm8SlipTid = 0;
   }
-  hostEl.querySelectorAll(":scope > .bm8-memo-slip-sheet, :scope > .bm8-cel-optics-stage").forEach((n) => n.remove());
+  hostEl.querySelectorAll(":scope > .bm8-memo-slip-sheet, :scope > .bm8-cel-optics-stage, :scope > .bm8-fx-bloomwrap, :scope > .bm8-fx-wipe").forEach((n) => n.remove());
   hostEl.style.height = "";
   hostEl.style.overflow = "";
   hostEl.style.transition = "";
@@ -749,10 +967,12 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   }
 
   // 判定当前外观的面板内切换模式：
-  // - 仅「洛琪希手记」(roxy) 在封闭卡片内保留便签斜滑，其余外观（follow/paper/glow/cinema）统一走类似「角色典藏画廊」的清爽横向滑移
+  // - 仅「洛琪希手记」(roxy) 在封闭卡片内保留便签斜滑；跟随外观走清爽横向滑移
   // - 「晴空画集」(cel) 走方向感知的横向清透滑移 + 光学棱镜折射 / 清玻镜面反光
+  // - 「暖色纸本 / 封面柔光 / 夜间影院」各走自己的换页手感（纸页揭起落下 / 柔光显影 / 暗场划像）
   const useRoxyMemoSlip = mode === "roxy" && !opts.frameless;
   const isCelMode = mode === "cel";
+  const themedMode = THEMED_SWAP_MODES[mode] ? mode : "";
 
   let memoSheet = null;
   if (hostEl.childElementCount > 0 && prevH > 24 && !opts.noGhost) {
@@ -760,7 +980,9 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       const clsList = [
         dir < 0 ? "is-reverse" : "",
         useRoxyMemoSlip ? "" : "is-frameless",
-        isCelMode ? "is-cel-glide" : ""
+        isCelMode ? "is-cel-glide" : "",
+        themedMode ? `bm8-${themedMode}-out` : "",
+        themedMode && dir < 0 ? "is-rev" : ""
       ]
         .filter(Boolean)
         .join(" ");
@@ -789,10 +1011,10 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
       hostClone.style.width = "100%";
       hostClone.style.boxSizing = "border-box";
       hostClone.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
-      hostClone.querySelectorAll(".bm8-memo-slip-sheet, .bm8-cel-optics-stage").forEach((n) => n.remove());
+      hostClone.querySelectorAll(".bm8-memo-slip-sheet, .bm8-cel-optics-stage, .bm8-fx-bloomwrap, .bm8-fx-wipe").forEach((n) => n.remove());
       hostClone
         .querySelectorAll(
-          ".bm8-paper-under-reveal, .is-frameless-in, .is-frameless-in-rev, .is-cel-in, .is-cel-in-rev"
+          ".bm8-paper-under-reveal, .is-frameless-in, .is-frameless-in-rev, .is-cel-in, .is-cel-in-rev, .bm8-paper-in, .bm8-glow-in, .bm8-cinema-in"
         )
         .forEach((n) => {
           n.classList.remove(
@@ -800,7 +1022,8 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
             "is-frameless-in",
             "is-frameless-in-rev",
             "is-cel-in",
-            "is-cel-in-rev"
+            "is-cel-in-rev",
+            ...THEMED_SWAP_CLASSES
           );
         });
       memoSheet.appendChild(hostClone);
@@ -828,12 +1051,14 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   const revealedChildren = [];
   Array.from(hostEl.children).forEach((ch) => {
     if (ch === memoSheet) return;
+    if (ch.classList.contains("bm8-fx-bloomwrap") || ch.classList.contains("bm8-fx-wipe")) return;
     ch.classList.remove(
       "bm8-paper-under-reveal",
       "is-frameless-in",
       "is-frameless-in-rev",
       "is-cel-in",
-      "is-cel-in-rev"
+      "is-cel-in-rev",
+      ...THEMED_SWAP_CLASSES
     );
     let hadBaseAnim = false;
     try {
@@ -844,6 +1069,9 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     ch.classList.add("bm8-paper-under-reveal");
     if (isCelMode) {
       ch.classList.add(dir < 0 ? "is-cel-in-rev" : "is-cel-in");
+    } else if (themedMode) {
+      ch.classList.add(`bm8-${themedMode}-in`);
+      if (dir < 0) ch.classList.add("is-rev");
     } else if (!useRoxyMemoSlip) {
       ch.classList.add(dir < 0 ? "is-frameless-in-rev" : "is-frameless-in");
     }
@@ -857,6 +1085,10 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
   if (isCelMode) {
     const opticsHost = opts.celStageHost || hostEl;
     spawnCelOpticalSweep(opticsHost, dir, { variant: celFx });
+  } else if (themedMode === "glow") {
+    spawnPanelBloom(hostEl, dir);
+  } else if (themedMode === "cinema") {
+    spawnCinemaWipe(hostEl, dir);
   }
 
   if (prevH > 20 && nextH > 20 && Math.abs(nextH - prevH) > 4 && !opts.skipHeight) {
@@ -870,7 +1102,7 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
     restoreScrollAncestors(savedScroll);
   }
 
-  const settleMs = isCelMode ? 480 : 330;
+  const settleMs = isCelMode ? 480 : themedMode ? 440 : 330;
   hostEl._bm8SlipTid = scheduleAfterAnimations(hostEl, settleMs, () => {
     if (memoSheet && memoSheet.parentNode) memoSheet.remove();
     revealedChildren.forEach(({ el, hadBaseAnim }) => {
@@ -880,7 +1112,8 @@ function paperSlipSwap(hostEl, renderNext, opts = {}) {
         "is-frameless-in",
         "is-frameless-in-rev",
         "is-cel-in",
-        "is-cel-in-rev"
+        "is-cel-in-rev",
+        ...THEMED_SWAP_CLASSES
       );
     });
     hostEl.style.height = "";
@@ -4381,6 +4614,580 @@ const MOTION_AND_LENS_CSS = String.raw`
   margin: 0 !important;
   display: block !important;
 }
+
+/* =====================================================================
+ * v0.9.1 外观定调的切换动效（只走 transform / opacity）
+ * ===================================================================== */
+
+/* ---- 顶层大页签：特效层只覆盖当前屏幕可见的一段 ---- */
+.bm8-fx-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  overflow: hidden;
+  pointer-events: none;
+  contain: paint;
+}
+
+/* 暖色纸本：新一页带一点角度落回桌面 + 一道纸影从上往下扫过 */
+.bm8-ws-paper-next {
+  transform-origin: 0% 0%;
+  animation: bm8-ws-paper-in .42s cubic-bezier(.2, .9, .25, 1) both;
+}
+.bm8-ws-paper-prev {
+  transform-origin: 100% 0%;
+  animation: bm8-ws-paper-in-rev .42s cubic-bezier(.2, .9, .25, 1) both;
+}
+@keyframes bm8-ws-paper-in {
+  0% { opacity: .3; transform: translate3d(14px, 16px, 0) rotate(.45deg); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-ws-paper-in-rev {
+  0% { opacity: .3; transform: translate3d(-14px, 16px, 0) rotate(-.45deg); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+.bm8-fx-papershade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 100%;
+  animation: bm8-fx-paper-pass .44s cubic-bezier(.3, .1, .3, 1) forwards;
+}
+.bm8-fx-papershade::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 130px;
+  background: linear-gradient(180deg, transparent 0%, rgb(96 70 34 / .10) 55%, rgb(96 70 34 / .03) 85%, transparent 100%);
+}
+.theme-dark .bm8-fx-papershade::before {
+  background: linear-gradient(180deg, transparent 0%, rgb(0 0 0 / .26) 55%, rgb(0 0 0 / .08) 85%, transparent 100%);
+}
+@keyframes bm8-fx-paper-pass {
+  0% { transform: translate3d(0, -130px, 0); opacity: 1; }
+  100% { transform: translate3d(0, 100%, 0); opacity: .25; }
+}
+
+/* 封面柔光：新页面从微缩中显影 + 封面色柔光从进入的一侧晕开 */
+.bm8-ws-glow-next {
+  transform-origin: 70% 0%;
+  animation: bm8-ws-glow-in .4s cubic-bezier(.22, .9, .3, 1) both;
+}
+.bm8-ws-glow-prev {
+  transform-origin: 30% 0%;
+  animation: bm8-ws-glow-in-rev .4s cubic-bezier(.22, .9, .3, 1) both;
+}
+@keyframes bm8-ws-glow-in {
+  0% { opacity: .45; transform: translate3d(10px, 0, 0) scale(.985); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-ws-glow-in-rev {
+  0% { opacity: .45; transform: translate3d(-10px, 0, 0) scale(.985); }
+  100% { opacity: 1; transform: none; }
+}
+.bm8-fx-band.is-glow .bm8-fx-bloom {
+  position: absolute;
+  top: -35%;
+  width: 72%;
+  height: 150%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--bm7-ambient) 56%, transparent) 0%, color-mix(in srgb, var(--bm7-ambient-2) 26%, transparent) 55%, transparent 100%);
+  opacity: 0;
+  animation: bm8-fx-bloom .56s cubic-bezier(.22, .8, .3, 1) forwards;
+}
+.bm8-fx-band.is-glow .bm8-fx-bloom.is-b2 {
+  top: 8%;
+  width: 42%;
+  height: 84%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--bm7-ambient-3) 36%, transparent) 0%, transparent 100%);
+  animation-delay: .06s;
+}
+.bm8-fx-band.is-glow.is-from-right .bm8-fx-bloom { right: -22%; }
+.bm8-fx-band.is-glow.is-from-right .bm8-fx-bloom.is-b2 { right: 8%; }
+.bm8-fx-band.is-glow.is-from-left .bm8-fx-bloom { left: -22%; }
+.bm8-fx-band.is-glow.is-from-left .bm8-fx-bloom.is-b2 { left: 8%; }
+@keyframes bm8-fx-bloom {
+  0% { opacity: 0; transform: scale(.6); }
+  38% { opacity: .9; }
+  100% { opacity: 0; transform: scale(1.22); }
+}
+
+/* 夜间影院：上下遮幅向两边拉开 + 中缝一线放映暖光 */
+.bm8-ws-cinema-in {
+  animation: bm8-ws-cinema-in .5s cubic-bezier(.2, .8, .2, 1) both;
+}
+@keyframes bm8-ws-cinema-in {
+  0% { opacity: .7; transform: scale(1.014); }
+  100% { opacity: 1; transform: none; }
+}
+.bm8-fx-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 50.5%;
+  background: var(--bm7-bg, #141210);
+}
+.bm8-fx-bar.is-top {
+  top: 0;
+  box-shadow: 0 8px 22px rgb(0 0 0 / .45);
+  animation: bm8-fx-bar-up .5s cubic-bezier(.7, 0, .2, 1) forwards;
+}
+.bm8-fx-bar.is-bot {
+  bottom: 0;
+  box-shadow: 0 -8px 22px rgb(0 0 0 / .45);
+  animation: bm8-fx-bar-down .5s cubic-bezier(.7, 0, .2, 1) forwards;
+}
+.bm8-fx-slit {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--bm7-accent) 80%, #fff) 28%, #fff6e2 50%, color-mix(in srgb, var(--bm7-accent) 80%, #fff) 72%, transparent 100%);
+  opacity: 0;
+  animation: bm8-fx-slit .36s ease-out forwards;
+}
+@keyframes bm8-fx-bar-up {
+  0%, 16% { transform: none; }
+  100% { transform: translate3d(0, -104%, 0); }
+}
+@keyframes bm8-fx-bar-down {
+  0%, 16% { transform: none; }
+  100% { transform: translate3d(0, 104%, 0); }
+}
+@keyframes bm8-fx-slit {
+  0% { opacity: 0; transform: scaleX(.15); }
+  30% { opacity: 1; transform: scaleX(1); }
+  100% { opacity: 0; transform: scaleX(1); }
+}
+
+/* 洛琪希手记：翻到下一页 + 书脊折影顺翻页方向扫过 */
+.bm8-ws-roxy-next {
+  animation: bm8-ws-roxy-in .44s cubic-bezier(.22, 1, .36, 1) both;
+}
+.bm8-ws-roxy-prev {
+  animation: bm8-ws-roxy-in-rev .44s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes bm8-ws-roxy-in {
+  0% { opacity: .4; transform: translate3d(18px, 0, 0); }
+  45% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-ws-roxy-in-rev {
+  0% { opacity: .4; transform: translate3d(-18px, 0, 0); }
+  45% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+.bm8-fx-track {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  animation: bm8-fx-track-rtl .44s cubic-bezier(.3, .1, .25, 1) forwards;
+}
+.bm8-fx-band.is-back .bm8-fx-track {
+  animation-name: bm8-fx-track-ltr;
+}
+.bm8-fx-crease {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -120px;
+  width: 120px;
+  background: linear-gradient(90deg, transparent 0%, rgb(68 52 28 / .08) 45%, rgb(68 52 28 / .16) 78%, transparent 100%);
+}
+.theme-dark .bm8-fx-crease {
+  background: linear-gradient(90deg, transparent 0%, rgb(150 170 245 / .08) 45%, rgb(150 170 245 / .15) 78%, transparent 100%);
+}
+@keyframes bm8-fx-track-rtl {
+  0% { transform: translate3d(calc(100% + 120px), 0, 0); opacity: 1; }
+  100% { transform: translate3d(0, 0, 0); opacity: .2; }
+}
+@keyframes bm8-fx-track-ltr {
+  0% { transform: translate3d(0, 0, 0); opacity: 1; }
+  100% { transform: translate3d(calc(100% + 120px), 0, 0); opacity: .2; }
+}
+
+/* ---- 面板内切换：paper / glow / cinema（roxy / cel / follow 保持原有动效） ---- */
+.bm8-memo-slip-sheet.is-frameless.bm8-paper-out,
+.bm8-swap-stage .bm8-paper-out {
+  transform-origin: 30% 0%;
+  animation: bm8-paper-lift-out .2s cubic-bezier(.4, 0, .9, 1) forwards !important;
+}
+.bm8-memo-slip-sheet.is-frameless.bm8-paper-out.is-rev,
+.bm8-swap-stage .bm8-paper-out.is-rev {
+  transform-origin: 70% 0%;
+  animation-name: bm8-paper-lift-out-rev !important;
+}
+.bm8-paper-under-reveal.bm8-paper-in,
+.bm8-paper-in {
+  animation: bm8-paper-settle-in .32s cubic-bezier(.2, .9, .3, 1) .06s both;
+}
+.bm8-paper-under-reveal.bm8-paper-in.is-rev,
+.bm8-paper-in.is-rev {
+  animation-name: bm8-paper-settle-in-rev;
+}
+@keyframes bm8-paper-lift-out {
+  0% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translate3d(-12px, -8px, 0) rotate(-.6deg); }
+}
+@keyframes bm8-paper-lift-out-rev {
+  0% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translate3d(12px, -8px, 0) rotate(.6deg); }
+}
+@keyframes bm8-paper-settle-in {
+  0% { opacity: 0; transform: translate3d(9px, 10px, 0) rotate(.3deg); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-paper-settle-in-rev {
+  0% { opacity: 0; transform: translate3d(-9px, 10px, 0) rotate(-.3deg); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+
+.bm8-memo-slip-sheet.is-frameless.bm8-glow-out,
+.bm8-swap-stage .bm8-glow-out {
+  transform-origin: 50% 40%;
+  animation: bm8-glow-dissolve-out .18s ease-in forwards !important;
+}
+.bm8-paper-under-reveal.bm8-glow-in,
+.bm8-glow-in {
+  transform-origin: 50% 40%;
+  animation: bm8-glow-develop-in .32s cubic-bezier(.22, .9, .3, 1) .04s both;
+}
+.bm8-paper-under-reveal.bm8-glow-in.is-rev,
+.bm8-glow-in.is-rev {
+  animation-name: bm8-glow-develop-in-rev;
+}
+@keyframes bm8-glow-dissolve-out {
+  0% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: scale(1.012); }
+}
+@keyframes bm8-glow-develop-in {
+  0% { opacity: 0; transform: translate3d(6px, 0, 0) scale(.985); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-glow-develop-in-rev {
+  0% { opacity: 0; transform: translate3d(-6px, 0, 0) scale(.985); }
+  100% { opacity: 1; transform: none; }
+}
+.bm8-fx-bloomwrap {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.bm8-fx-pbloom {
+  position: absolute;
+  top: -40%;
+  width: 70%;
+  height: 180%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--bm7-ambient) 34%, transparent) 0%, color-mix(in srgb, var(--bm7-ambient-2) 14%, transparent) 60%, transparent 100%);
+  opacity: 0;
+  animation: bm8-fx-pbloom-rtl .5s cubic-bezier(.3, .1, .3, 1) forwards;
+}
+.bm8-fx-bloomwrap.is-from-right .bm8-fx-pbloom { right: -30%; }
+.bm8-fx-bloomwrap.is-from-left .bm8-fx-pbloom {
+  left: -30%;
+  animation-name: bm8-fx-pbloom-ltr;
+}
+@keyframes bm8-fx-pbloom-rtl {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.7); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(-60%, 0, 0) scale(1.1); }
+}
+@keyframes bm8-fx-pbloom-ltr {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.7); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(60%, 0, 0) scale(1.1); }
+}
+
+.bm8-memo-slip-sheet.is-frameless.bm8-cinema-out,
+.bm8-swap-stage .bm8-cinema-out {
+  animation: bm8-cinema-ghost-out .12s linear .05s forwards !important;
+}
+.bm8-paper-under-reveal.bm8-cinema-in,
+.bm8-cinema-in {
+  animation: none;
+}
+@keyframes bm8-cinema-ghost-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.bm8-fx-wipe {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.bm8-fx-wipe-track {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  animation: bm8-fx-wipe-ltr .42s cubic-bezier(.6, 0, .25, 1) forwards;
+}
+.bm8-fx-wipe.is-rev .bm8-fx-wipe-track {
+  animation-name: bm8-fx-wipe-rtl;
+}
+.bm8-fx-wipe-panel {
+  position: absolute;
+  inset: 0;
+  background: var(--bm7-panel-bg, var(--bm7-surface));
+}
+.bm8-fx-wipe-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -14px;
+  width: 14px;
+  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--bm7-accent) 55%, transparent) 70%, color-mix(in srgb, var(--bm7-accent) 85%, #fff4dc) 100%);
+}
+.bm8-fx-wipe.is-rev .bm8-fx-wipe-edge {
+  left: auto;
+  right: -14px;
+  background: linear-gradient(270deg, transparent 0%, color-mix(in srgb, var(--bm7-accent) 55%, transparent) 70%, color-mix(in srgb, var(--bm7-accent) 85%, #fff4dc) 100%);
+}
+@keyframes bm8-fx-wipe-ltr {
+  0% { opacity: 0; transform: translate3d(0, 0, 0); }
+  16% { opacity: 1; transform: translate3d(0, 0, 0); }
+  100% { opacity: 1; transform: translate3d(calc(100% + 16px), 0, 0); }
+}
+@keyframes bm8-fx-wipe-rtl {
+  0% { opacity: 0; transform: translate3d(0, 0, 0); }
+  16% { opacity: 1; transform: translate3d(0, 0, 0); }
+  100% { opacity: 1; transform: translate3d(calc(-100% - 16px), 0, 0); }
+}
+
+/* ---- 抽屉展开：由外观定调（JS 挂 .bm8-dw-in；旧版统计 / 游戏抽屉同步按外观换装） ---- */
+.bm8-dw-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  border-radius: inherit;
+  overflow: hidden;
+}
+.bm8-dw-in[data-bm8-dw-side="right"] { animation: bm8-dw-r-follow .28s cubic-bezier(.2, .9, .3, 1) both; }
+.bm8-dw-in[data-bm8-dw-side="bottom"] { animation: bm8-dw-b-follow .28s cubic-bezier(.2, .9, .3, 1) both; }
+.bm8-dw-out[data-bm8-dw-side="right"] { animation: bm8-dw-r-out .2s cubic-bezier(.4, 0, 1, 1) both; }
+.bm8-dw-out[data-bm8-dw-side="bottom"] { animation: bm8-dw-b-out .2s cubic-bezier(.4, 0, 1, 1) both; }
+.bm8-dw-lite-in { animation: bm8-dw-lite-in .2s ease-out both; }
+.bm8-dw-lite-out { animation: bm8-dw-lite-out .15s ease-in both; }
+
+.bm7-root[data-bm7-theme="paper"] .bm8-dw-in[data-bm8-dw-side="right"],
+.bm7-drawer[data-bm7-theme="paper"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+  transform-origin: 100% 0%;
+  animation: bm8-dw-r-paper .36s cubic-bezier(.2, .85, .25, 1) both;
+}
+.bm7-root[data-bm7-theme="glow"] .bm8-dw-in[data-bm8-dw-side="right"],
+.bm7-drawer[data-bm7-theme="glow"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+  transform-origin: 100% 40%;
+  animation: bm8-dw-r-glow .36s cubic-bezier(.22, .9, .3, 1) both;
+}
+.bm7-root[data-bm7-theme="cinema"] .bm8-dw-in[data-bm8-dw-side="right"],
+.bm7-drawer[data-bm7-theme="cinema"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+  animation: bm8-dw-r-cinema .38s cubic-bezier(.2, .8, .2, 1) both;
+}
+.bm7-root[data-bm7-theme="roxy"] .bm8-dw-in[data-bm8-dw-side="right"],
+.bm7-drawer[data-bm7-theme="roxy"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+  transform-origin: 100% 50%;
+  animation: bm8-dw-r-roxy .4s cubic-bezier(.22, .9, .28, 1) both;
+}
+.bm7-root[data-bm7-theme="cel"] .bm8-dw-in[data-bm8-dw-side="right"],
+.bm7-drawer[data-bm7-theme="cel"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+  animation: bm8-dw-r-follow .34s cubic-bezier(.2, .9, .3, 1) both;
+}
+
+.bm7-root[data-bm7-theme="paper"] .bm8-dw-in[data-bm8-dw-side="bottom"] {
+  transform-origin: 50% 100%;
+  animation: bm8-dw-b-paper .36s cubic-bezier(.2, .85, .25, 1) both;
+}
+.bm7-root[data-bm7-theme="glow"] .bm8-dw-in[data-bm8-dw-side="bottom"] {
+  transform-origin: 50% 100%;
+  animation: bm8-dw-b-glow .36s cubic-bezier(.22, .9, .3, 1) both;
+}
+.bm7-root[data-bm7-theme="cinema"] .bm8-dw-in[data-bm8-dw-side="bottom"] {
+  animation: bm8-dw-b-follow .38s cubic-bezier(.2, .8, .2, 1) both;
+}
+.bm7-root[data-bm7-theme="roxy"] .bm8-dw-in[data-bm8-dw-side="bottom"] {
+  transform-origin: 50% 100%;
+  animation: bm8-dw-b-roxy .4s cubic-bezier(.22, .9, .28, 1) both;
+}
+.bm7-root[data-bm7-theme="cel"] .bm8-dw-in[data-bm8-dw-side="bottom"] {
+  animation: bm8-dw-b-follow .34s cubic-bezier(.2, .9, .3, 1) both;
+}
+@media (max-width: 560px) {
+  .bm7-drawer[data-bm7-theme="paper"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+    transform-origin: 50% 100%;
+    animation-name: bm8-dw-b-paper;
+  }
+  .bm7-drawer[data-bm7-theme="glow"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+    transform-origin: 50% 100%;
+    animation-name: bm8-dw-b-glow;
+  }
+  .bm7-drawer[data-bm7-theme="cinema"][data-bm7-motion-tier="full"] .bm7-drawer-sheet,
+  .bm7-drawer[data-bm7-theme="cel"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+    animation-name: bm8-dw-b-follow;
+  }
+  .bm7-drawer[data-bm7-theme="roxy"][data-bm7-motion-tier="full"] .bm7-drawer-sheet {
+    transform-origin: 50% 100%;
+    animation-name: bm8-dw-b-roxy;
+  }
+}
+.bm7-drawer[data-bm7-motion-tier="off"] .bm7-drawer-sheet,
+.bm7-drawer[data-bm7-motion-tier="off"] .bm7-drawer-scrim {
+  animation: none !important;
+}
+
+/* 各外观附带的一层光影（.bm8-dw-fx，仅「丰富」档） */
+.bm7-root[data-bm7-theme="paper"] .bm8-dw-in > .bm8-dw-fx {
+  background: linear-gradient(90deg, rgb(96 70 34 / .16) 0px, transparent 26px);
+  animation: bm8-fx-fade-out .36s ease-out forwards;
+}
+.bm7-root[data-bm7-theme="paper"] .bm8-dw-in[data-bm8-dw-side="bottom"] > .bm8-dw-fx {
+  background: linear-gradient(180deg, rgb(96 70 34 / .16) 0px, transparent 26px);
+}
+.bm7-root[data-bm7-theme="glow"] .bm8-dw-in > .bm8-dw-fx {
+  background: radial-gradient(70% 55% at 0% 8%, color-mix(in srgb, var(--bm7-ambient) 40%, transparent) 0%, transparent 72%),
+    radial-gradient(50% 40% at 100% 0%, color-mix(in srgb, var(--bm7-ambient-3) 26%, transparent) 0%, transparent 70%);
+  animation: bm8-fx-glow-breath .52s ease-out forwards;
+}
+.bm7-root[data-bm7-theme="cinema"] .bm8-dw-in > .bm8-dw-fx {
+  inset: 0 -40% 0 0;
+  background: linear-gradient(90deg, var(--bm7-bg, #141210) 0%, var(--bm7-bg, #141210) 38%, transparent 72%);
+  animation: bm8-fx-spot-r .44s cubic-bezier(.5, 0, .25, 1) forwards;
+}
+.bm7-root[data-bm7-theme="cinema"] .bm8-dw-in[data-bm8-dw-side="bottom"] > .bm8-dw-fx {
+  inset: 0 0 -40% 0;
+  background: linear-gradient(180deg, var(--bm7-bg, #141210) 0%, var(--bm7-bg, #141210) 38%, transparent 72%);
+  animation-name: bm8-fx-spot-b;
+}
+.bm7-root[data-bm7-theme="roxy"] .bm8-dw-in > .bm8-dw-fx {
+  background: linear-gradient(270deg, rgb(68 52 28 / .2) 0px, rgb(68 52 28 / .06) 18px, transparent 46px);
+  animation: bm8-fx-fade-out .4s ease-out forwards;
+}
+.theme-dark .bm7-root[data-bm7-theme="roxy"] .bm8-dw-in > .bm8-dw-fx,
+.theme-dark .bm7-root[data-bm7-theme="paper"] .bm8-dw-in > .bm8-dw-fx {
+  background: linear-gradient(90deg, rgb(0 0 0 / .32) 0px, transparent 30px);
+}
+.bm7-root[data-bm7-theme="cel"] .bm8-dw-in > .bm8-dw-fx::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  background: linear-gradient(105deg, transparent 30%, rgb(255 255 255 / .5) 46%, rgb(170 218 255 / .32) 53%, transparent 66%);
+  transform: translate3d(-100%, 0, 0);
+  animation: bm8-fx-glint .5s cubic-bezier(.3, .1, .3, 1) .08s forwards;
+}
+.theme-dark .bm7-root[data-bm7-theme="cel"] .bm8-dw-in > .bm8-dw-fx::after {
+  background: linear-gradient(105deg, transparent 30%, rgb(190 225 255 / .16) 46%, rgb(120 190 255 / .12) 53%, transparent 66%);
+}
+
+@keyframes bm8-dw-r-follow {
+  0% { opacity: 0; transform: translate3d(28px, 0, 0); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-b-follow {
+  0% { opacity: 0; transform: translate3d(0, 48px, 0); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-r-out {
+  0% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translate3d(24px, 0, 0); }
+}
+@keyframes bm8-dw-b-out {
+  0% { opacity: 1; transform: none; }
+  100% { opacity: 0; transform: translate3d(0, 60px, 0); }
+}
+@keyframes bm8-dw-lite-in {
+  0% { opacity: 0; transform: translate3d(0, 8px, 0); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-lite-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes bm8-dw-r-paper {
+  0% { opacity: 0; transform: translate3d(34px, 6px, 0) rotate(1.1deg); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-b-paper {
+  0% { opacity: 0; transform: translate3d(0, 56px, 0) rotate(-1deg); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-r-glow {
+  0% { opacity: 0; transform: translate3d(14px, 0, 0) scale(.955); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-b-glow {
+  0% { opacity: 0; transform: translate3d(0, 22px, 0) scale(.96); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-r-cinema {
+  0% { opacity: 0; transform: translate3d(20px, 0, 0); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-r-roxy {
+  0% { opacity: 0; transform: perspective(1400px) translate3d(18px, 0, 0) rotateY(-16deg); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-dw-b-roxy {
+  0% { opacity: 0; transform: perspective(1200px) translate3d(0, 30px, 0) rotateX(10deg); }
+  55% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes bm8-fx-fade-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes bm8-fx-glow-breath {
+  0% { opacity: 0; }
+  35% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes bm8-fx-spot-r {
+  0% { opacity: 1; transform: translate3d(0, 0, 0); }
+  100% { opacity: 0; transform: translate3d(62%, 0, 0); }
+}
+@keyframes bm8-fx-spot-b {
+  0% { opacity: 1; transform: translate3d(0, 0, 0); }
+  100% { opacity: 0; transform: translate3d(0, 62%, 0); }
+}
+@keyframes bm8-fx-glint {
+  0% { transform: translate3d(-100%, 0, 0); }
+  100% { transform: translate3d(100%, 0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bm8-fx-band, .bm8-fx-bloomwrap, .bm8-fx-wipe, .bm8-dw-fx { display: none !important; }
+  .bm8-ws-paper-next, .bm8-ws-paper-prev, .bm8-ws-glow-next, .bm8-ws-glow-prev, .bm8-ws-cinema-in,
+  .bm8-ws-roxy-next, .bm8-ws-roxy-prev, .bm8-paper-in, .bm8-glow-in, .bm8-cinema-in,
+  .bm8-paper-out, .bm8-glow-out, .bm8-cinema-out, .bm8-dw-in, .bm8-dw-out, .bm8-dw-lite-in, .bm8-dw-lite-out,
+  .bm7-drawer .bm7-drawer-sheet {
+    animation: none !important;
+  }
+}
 `;
 
 module.exports = {
@@ -4392,6 +5199,7 @@ module.exports = {
   paperSlipSwap,
   scrollUnrollMorph,
   animateWorkspaceGlide,
+  animateDrawerReveal,
   registerThemePanelTransition,
   spawnCelOpticalSweep,
   createPageJumpLink,

@@ -303,6 +303,8 @@ function prefersReducedMotion() {
 
 /** 返回当前节点所处的动效档位："full"（丰富）| "lite"（轻巧）| "off"（关闭） */
 function motionTier(fromEl) {
+  // 系统开启「减少动态效果」时一律视为关闭，优先级高于插件内的外观动效档位
+  if (prefersReducedMotion()) return "off";
   const root =
     (fromEl && fromEl.closest ? fromEl.closest("[data-bm7-motion-tier], [data-bm7-motion]") : null) ||
     (typeof document !== "undefined" ? document.querySelector(".bm7-root[data-bm7-motion-tier], .bm7-root[data-bm7-motion]") : null);

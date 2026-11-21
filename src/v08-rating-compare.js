@@ -44,6 +44,7 @@ const {
   applyAmbient
 } = require("./v07-core.js");
 const multiSiteRatingService = require("./multisite-rating-service.js");
+const { paperSlipSwap, animateDrawerReveal } = require("./v08-motion-and-lens.js");
 
 const RATING_COMPARE_STYLE_ID = "bm9-rating-compare-styles";
 
@@ -110,13 +111,73 @@ const CSS = String.raw`
 .bm9rc-prog-txt{position:relative;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto;}
 .bm9rc-prog .bm9rc-act{position:relative;flex-shrink:0;}
 
-/* ---------- 主区：排行 + 换算尺 ---------- */
-.bm9rc-main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.04fr);gap:16px;align-items:start;min-width:0;}
-.bm9rc-board,.bm9rc-stage,.bm9rc-insight{position:relative;min-width:0;border-radius:var(--bm7-radius,16px);border:1px solid var(--bm7-line);background:var(--bm7-panel-bg);box-shadow:var(--bm7-shadow);-webkit-backdrop-filter:blur(var(--bm7-blur,0px));backdrop-filter:blur(var(--bm7-blur,0px));}
-.bm9rc-board{padding:0 0 10px;overflow:hidden;}
-.bm9rc-stage{position:sticky;top:12px;overflow:hidden;}
+/* ---------- 筛选条（时间 / 状态 / 外站评分，同时作用于榜单和统计卡） ---------- */
+.bm9rc-fbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;padding:8px 12px;border-radius:12px;background:var(--rc-faint);min-width:0;transition:background .2s ease;}
+.bm9rc-fbar.is-active{background:color-mix(in srgb,var(--bm7-accent) 7%,var(--rc-faint));}
+.bm9rc-fgroup{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;}
+.bm9rc-flabel{font-size:12px;font-weight:650;color:var(--bm7-ink-3);white-space:nowrap;flex-shrink:0;}
+.bm9rc-seg{display:flex;gap:2px;padding:3px;border-radius:10px;background:var(--bm7-seg-bg);min-width:0;max-width:100%;overflow-x:auto;scrollbar-width:none;}
+.bm9rc-seg::-webkit-scrollbar{display:none;}
+.bm9rc .bm9rc-segbtn{display:inline-flex;align-items:center;gap:5px;height:26px !important;padding:0 10px;border-radius:7px;font-size:12.5px;font-weight:600;color:var(--bm7-ink-2);white-space:nowrap;flex-shrink:0;transition:background .16s ease,color .16s ease,box-shadow .16s ease;}
+.bm9rc .bm9rc-segbtn em{font-style:normal;font-size:12px;font-weight:500;color:var(--bm7-ink-3);}
+.bm9rc .bm9rc-segbtn:hover{color:var(--bm7-ink);}
+.bm9rc .bm9rc-segbtn.is-on{background:var(--bm7-seg-active-bg) !important;color:var(--bm7-seg-active-ink,var(--bm7-ink));box-shadow:var(--bm7-seg-active-shadow) !important;}
+.bm9rc .bm9rc-timebtn{display:inline-flex;align-items:center;gap:6px;height:32px !important;max-width:100%;padding:0 9px 0 10px;border-radius:9px;font-size:12.5px;font-weight:650;white-space:nowrap;color:var(--bm7-ink);background:var(--bm7-seg-bg) !important;transition:background .16s ease,color .16s ease;}
+.bm9rc .bm9rc-timebtn span{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.bm9rc .bm9rc-timebtn svg{flex-shrink:0;opacity:.7;}
+.bm9rc .bm9rc-timebtn:hover{background:color-mix(in srgb,var(--bm7-ink) 10%,var(--bm7-seg-bg)) !important;}
+.bm9rc .bm9rc-timebtn.is-on{color:var(--bm7-accent);background:color-mix(in srgb,var(--bm7-accent) 14%,transparent) !important;}
+.bm9rc-fsum{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--bm7-ink-2);white-space:nowrap;}
+.bm9rc-fsum b{color:var(--bm7-ink);font-weight:750;}
+.bm9rc .bm9rc-clear{padding:4px 2px;font-size:12.5px;font-weight:650;color:var(--bm7-accent);}
+.bm9rc .bm9rc-clear:hover{text-decoration:underline;}
+.bm9rc-vseg{display:none;}
+.bm9rc[data-narrow] .bm9rc-vseg{display:block;}
+.bm9rc-seg.is-view{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));}
+.bm9rc-seg.is-view .bm9rc-segbtn{justify-content:center;height:32px !important;font-size:13px;}
 
-.bm9rc-bar{display:flex;align-items:flex-end;padding:6px 14px 0;border-bottom:1px solid var(--rc-line);min-width:0;}
+/* ---------- 主区：左栏定高榜单 | 右栏统计卡 + 浮出详情抽屉 ---------- */
+.bm9rc-main{--rc-h:clamp(500px,calc(100vh - 300px),980px);display:grid;grid-template-columns:minmax(0,1.06fr) minmax(0,1fr);gap:16px;align-items:stretch;min-width:0;}
+.bm9rc-boardcell{position:relative;min-width:0;min-height:var(--rc-h);}
+.bm9rc-board,.bm9rc-card,.bm9rc-drawer{position:relative;min-width:0;border-radius:var(--bm7-radius,16px);border:1px solid var(--bm7-line);background:var(--bm7-panel-bg);box-shadow:var(--bm7-shadow);-webkit-backdrop-filter:blur(var(--bm7-blur,0px));backdrop-filter:blur(var(--bm7-blur,0px));}
+.bm9rc-board{position:absolute;inset:0;display:flex;flex-direction:column;overflow:hidden;}
+.bm9rc-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:10px;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--bm7-ink) 22%,transparent) transparent;}
+.bm9rc-side{position:relative;min-width:0;display:flex;flex-direction:column;}
+.bm9rc-insight{display:flex;flex-direction:column;gap:14px;min-width:0;transform-origin:50% 0;transition:opacity .28s ease,transform .32s cubic-bezier(.22,.8,.24,1);}
+.bm9rc-side.is-open .bm9rc-insight{opacity:.28;transform:scale(.985);pointer-events:none;}
+.bm9rc-scope{display:none;}
+.bm9rc-card-t{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;min-width:0;}
+.bm9rc-scopetag{display:inline-block;max-width:100%;padding:1px 9px;border-radius:999px;font-size:12px;font-weight:650;line-height:1.6;color:var(--bm7-accent);background:color-mix(in srgb,var(--bm7-accent) 12%,transparent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bm9rc-count{margin-left:auto;padding:0 2px 10px 10px;font-size:12px;color:var(--bm7-ink-3);white-space:nowrap;align-self:flex-end;}
+
+/* 详情抽屉：比榜单和统计卡高一层（更实的底色、更重的投影、左缘压进栏间距一点点） */
+.bm9rc-drawer{position:absolute;top:0;bottom:0;left:-8px;right:0;z-index:12;display:flex;flex-direction:column;overflow:hidden;background:var(--bm7-surface);border-color:color-mix(in srgb,var(--bm7-ink) 14%,var(--bm7-line));box-shadow:var(--bm7-shadow-lift),0 34px 70px -34px rgb(0 0 0 / .42);}
+.bm9rc-drawer[hidden]{display:none !important;}
+.bm7-root[data-bm7-theme="glow"] .bm9rc-drawer{background:color-mix(in srgb,var(--bm7-bg) 80%,transparent);-webkit-backdrop-filter:blur(26px);backdrop-filter:blur(26px);}
+.bm7-root[data-bm7-theme="cel"] .bm9rc-drawer{background:var(--bm7-surface);}
+.bm9rc-dnav{position:relative;display:flex;align-items:center;gap:6px;flex-shrink:0;min-width:0;padding:8px 10px 8px 12px;border-bottom:1px solid var(--rc-line);background:color-mix(in srgb,var(--bm7-ink) 2.5%,transparent);}
+.bm9rc-dgrab{display:none;}
+.bm9rc-dpos{flex:1 1 auto;min-width:0;padding:0 4px;font-size:12.5px;color:var(--bm7-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.bm9rc-dpos b{color:var(--bm7-ink);font-weight:750;}
+.bm9rc .bm9rc-dbtn{display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;height:30px !important;min-width:30px;padding:0 10px 0 7px;border-radius:8px;font-size:12.5px;font-weight:650;color:var(--bm7-ink-2);background:var(--rc-faint) !important;transition:background .15s ease,color .15s ease,opacity .15s ease;}
+.bm9rc .bm9rc-dbtn:hover:not(:disabled){color:var(--bm7-ink);background:color-mix(in srgb,var(--bm7-ink) 10%,transparent) !important;}
+.bm9rc .bm9rc-dbtn:disabled{opacity:.38;}
+.bm9rc .bm9rc-dbtn.is-up svg{transform:rotate(90deg);}
+.bm9rc .bm9rc-dbtn.is-down svg{transform:rotate(-90deg);}
+.bm9rc .bm9rc-dbtn.is-close{padding:0;width:30px;}
+.bm9rc-dscroll{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:calc(var(--rc-safe-b,0px) + 6px);container:bm9rcd / inline-size;scrollbar-width:thin;}
+
+/* 窄屏底部抽屉（挂在 body 上，避开容器裁切与右下挂件） */
+.bm7-drawer.bm9rc-portal{position:fixed;inset:0;z-index:47;display:flex;align-items:flex-end;justify-content:center;background:transparent !important;}
+.bm9rc-scrim{position:absolute;inset:0;background:rgb(10 10 14 / .36);animation:bm9rc-fade .22s ease both;transition:opacity .2s ease;}
+.bm9rc-portal.is-leaving .bm9rc-scrim{opacity:0;}
+.bm9rc.bm9rc-sheetwrap{position:relative;display:block;width:100%;max-width:720px;height:min(88vh,100%);gap:0;}
+.bm9rc-drawer.is-sheet{inset:0;left:0;border-radius:18px 18px 0 0;border-bottom:none;padding-bottom:env(safe-area-inset-bottom,0px);}
+.bm9rc-drawer.is-sheet .bm9rc-dnav{padding-top:16px;touch-action:none;}
+.bm9rc-drawer.is-sheet .bm9rc-dgrab{display:block;position:absolute;left:50%;top:6px;width:38px;height:4px;margin-left:-19px;border-radius:2px;background:color-mix(in srgb,var(--bm7-ink) 22%,transparent);}
+@keyframes bm9rc-fade{from{opacity:0;}}
+
+.bm9rc-bar{display:flex;align-items:flex-end;padding:6px 14px 0;border-bottom:1px solid var(--rc-line);min-width:0;flex-shrink:0;}
 .bm9rc-tabs{display:flex;gap:2px;min-width:0;overflow-x:auto;scrollbar-width:none;}
 .bm9rc-tabs::-webkit-scrollbar{display:none;}
 .bm9rc .bm9rc-tab{position:relative;height:40px !important;padding:0 11px;font-size:13px;font-weight:650;color:var(--bm7-ink-3);white-space:nowrap;flex-shrink:0;transition:color .16s ease;}
@@ -126,7 +187,7 @@ const CSS = String.raw`
 .bm9rc-tab::before{content:"";position:absolute;left:50%;bottom:1px;border:4px solid transparent;border-bottom-color:var(--bm7-ink);transform:translateX(-50%) scale(0);transform-origin:50% 100%;transition:transform .22s ease;}
 .bm9rc-tab.is-on::after{transform:scaleX(1);}
 .bm9rc-tab.is-on::before{transform:translateX(-50%) scale(1);}
-.bm9rc-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px 6px;min-width:0;}
+.bm9rc-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 14px 6px;min-width:0;flex-shrink:0;}
 .bm9rc-search{position:relative;display:flex;align-items:center;flex:1 1 170px;min-width:0;}
 .bm9rc-search svg{position:absolute;left:10px;color:var(--bm7-ink-3);pointer-events:none;}
 .bm9rc .bm9rc-search input{width:100%;min-width:0;height:32px !important;padding:0 10px 0 31px !important;border-radius:9px !important;border:1px solid transparent !important;background:var(--rc-faint) !important;color:var(--bm7-ink) !important;font-size:12.5px;box-shadow:none !important;}
@@ -140,7 +201,7 @@ const CSS = String.raw`
 .bm9rc-wbar i{display:block;height:100%;min-width:1px;background:var(--c);transition:flex-grow .2s ease;}
 
 .bm9rc-list{display:flex;flex-direction:column;gap:1px;padding:2px 8px 0;min-width:0;}
-.bm9rc .bm9rc-row{position:relative;display:grid;grid-template-columns:22px 34px minmax(0,1fr) minmax(110px,1.05fr) 60px;grid-template-areas:"rank thumb name strip val";align-items:center;gap:10px;width:100%;min-width:0;padding:7px 8px;border-radius:10px;transition:background .15s ease;}
+.bm9rc .bm9rc-row{position:relative;display:grid;grid-template-columns:22px 34px minmax(0,1.2fr) minmax(96px,1fr) 58px;grid-template-areas:"rank thumb name strip val";align-items:center;gap:10px;width:100%;min-width:0;padding:7px 8px;border-radius:10px;transition:background .15s ease;}
 .bm9rc .bm9rc-row:hover{background:var(--rc-faint) !important;}
 .bm9rc .bm9rc-row.is-sel{background:color-mix(in srgb,var(--bm7-accent) 10%,transparent) !important;}
 .bm9rc-row::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--bm7-accent);transform:scaleY(0);transition:transform .2s ease;}
@@ -201,7 +262,7 @@ const CSS = String.raw`
 .bm9rc .bm9rc-pt.is-sel{z-index:4;width:34px;height:34px !important;margin:-17px 0 0 -17px;box-shadow:0 0 0 2.5px var(--bm7-surface),0 0 0 4.5px var(--bm7-ink),0 8px 20px -6px rgb(0 0 0 / .4) !important;}
 .bm9rc .bm9rc-pt.is-sel:hover{transform:none;}
 .bm9rc-pt .bm7-cover{width:100%;height:100%;border-radius:50%;}
-.bm9rc-pt-tag{position:absolute;left:calc(100% + 9px);top:50%;transform:translateY(-50%);max-width:150px;padding:3px 8px;border-radius:6px;background:var(--bm7-ink);color:var(--bm7-bg);font-size:12px;font-weight:700;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;}
+.bm9rc-pt-tag{position:absolute;left:calc(100% + 9px);top:50%;transform:translateY(-50%);max-width:150px;padding:3px 8px;border-radius:6px;background:var(--bm7-ink);color:var(--bm7-surface);font-size:12px;font-weight:700;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;}
 .bm9rc-pt.is-flip .bm9rc-pt-tag{left:auto;right:calc(100% + 9px);}
 @keyframes bm9rc-pop{from{transform:scale(0);opacity:0;}to{transform:scale(1);opacity:1;}}
 .bm9rc-gcols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:2px;}
@@ -261,10 +322,10 @@ const CSS = String.raw`
 .bm9rc-comprail{transition:transform .64s cubic-bezier(.22,.8,.24,1) .1s,opacity .3s ease;}
 .bm9rc-comprail.is-off,.bm9rc-merail.is-off{opacity:0;}
 .bm9rc-cline{position:absolute;left:-1px;top:calc(var(--g) - 3px);bottom:calc(var(--g) - 3px);width:2px;border-radius:1px;background:var(--bm7-ink);opacity:.85;}
-.bm9rc-ctag{position:absolute;left:0;top:2px;transform:translateX(-50%);padding:1px 7px;border-radius:6px;font-size:12px;font-weight:750;line-height:17px;white-space:nowrap;background:var(--bm7-ink);color:var(--bm7-bg);}
+.bm9rc-ctag{position:absolute;left:0;top:2px;transform:translateX(-50%);padding:1px 7px;border-radius:6px;font-size:12px;font-weight:750;line-height:17px;white-space:nowrap;background:var(--bm7-ink);color:var(--bm7-surface);}
 .bm9rc-merail{transition:transform .64s cubic-bezier(.22,.8,.24,1) .16s,opacity .3s ease;}
 .bm9rc-mline{position:absolute;left:-.75px;top:var(--g);bottom:calc(var(--g) - 3px);width:0;border-left:1.5px dashed var(--bm7-accent);}
-.bm9rc-mtag{position:absolute;left:0;bottom:2px;transform:translateX(-50%);padding:1px 7px;border-radius:6px;font-size:12px;font-weight:750;line-height:17px;white-space:nowrap;color:var(--bm7-accent);background:color-mix(in srgb,var(--bm7-accent) 14%,var(--bm7-bg));}
+.bm9rc-mtag{position:absolute;left:0;bottom:2px;transform:translateX(-50%);padding:1px 7px;border-radius:6px;font-size:12px;font-weight:750;line-height:17px;white-space:nowrap;color:var(--bm7-accent);background:color-mix(in srgb,var(--bm7-accent) 14%,var(--bm7-surface));}
 .bm9rc-rail.is-l .bm9rc-ctag,.bm9rc-rail.is-l .bm9rc-mtag{transform:translateX(-6px);}
 .bm9rc-rail.is-r .bm9rc-ctag,.bm9rc-rail.is-r .bm9rc-mtag{transform:translateX(calc(-100% + 6px));}
 .bm9rc-currail{opacity:0;transition:opacity .15s ease;}
@@ -306,17 +367,18 @@ const CSS = String.raw`
 .bm9rc-bind-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}
 .bm9rc-bind-foot p{margin:0 0 0 auto;font-size:12px;color:var(--bm7-ink-3);}
 
-/* ---------- 底部：给分习惯 + 口味契合 ---------- */
-.bm9rc-insight{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);}
-.bm9rc-card{min-width:0;padding:16px 18px 18px;}
-.bm9rc-card + .bm9rc-card{border-left:1px solid var(--rc-line);}
-.bm9rc-card-h{margin-bottom:10px;}
+/* ---------- 右栏：给分习惯 + 口味契合（两张独立卡片） ---------- */
+.bm9rc-card{min-width:0;padding:14px 18px 15px;}
+.bm9rc-acts{border-bottom:1px solid var(--rc-line);}
+.bm9rc-dscroll .bm9rc-rule{margin-top:10px;}
+.bm9rc-dscroll .bm9rc-bind{padding-top:12px;border-bottom:1px solid var(--rc-line);}
+.bm9rc-card-h{margin-bottom:8px;}
 .bm9rc-card-h h3{margin:0;font-size:15px;font-weight:800;line-height:1.35;}
 .bm9rc-card-h span{display:block;margin-top:3px;font-size:12px;line-height:1.55;color:var(--bm7-ink-3);}
 .bm9rc-slab{display:flex;flex-direction:column;min-width:0;}
 .bm9rc-slab b{font-size:12.5px;font-weight:800;color:var(--c);line-height:1.25;}
 .bm9rc-slab span{font-size:12px;color:var(--bm7-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.bm9rc-hrow{display:grid;grid-template-columns:84px minmax(0,1fr) 92px;align-items:center;gap:10px;min-height:38px;}
+.bm9rc-hrow{display:grid;grid-template-columns:84px minmax(0,1fr) 92px;align-items:center;gap:10px;min-height:35px;}
 .bm9rc-swarm{position:relative;height:32px;min-width:0;overflow:hidden;}
 .bm9rc-sw-m{position:absolute;top:0;bottom:0;left:7px;right:7px;}
 .bm9rc-sw-base{position:absolute;left:-7px;right:-7px;top:50%;height:1px;background:var(--rc-line);}
@@ -330,14 +392,14 @@ const CSS = String.raw`
 .bm9rc-haxis{display:grid;grid-template-columns:84px minmax(0,1fr) 92px;gap:10px;}
 .bm9rc-haxis-m{position:relative;height:16px;margin:0 7px;}
 .bm9rc-haxis-m span{position:absolute;top:0;transform:translateX(-50%);font-size:12px;color:var(--bm7-ink-3);}
-.bm9rc-say{margin:12px 0 0;font-size:13px;line-height:1.7;color:var(--bm7-ink-2);}
+.bm9rc-say{margin:9px 0 0;font-size:12.5px;line-height:1.65;color:var(--bm7-ink-2);}
 .bm9rc-say b{color:var(--bm7-ink);font-weight:750;}
-.bm9rc-trow{display:grid;grid-template-columns:84px minmax(0,1fr) 46px;align-items:center;column-gap:10px;row-gap:2px;padding:6px 0;}
+.bm9rc-trow{display:grid;grid-template-columns:84px minmax(0,1fr) 46px;align-items:center;column-gap:10px;row-gap:1px;padding:4px 0;}
 .bm9rc-tbar{height:8px;border-radius:4px;background:var(--rc-faint);overflow:hidden;}
 .bm9rc-tbar i{display:block;height:100%;border-radius:inherit;background:var(--c);transform-origin:left center;transform:scaleX(var(--v,0));animation:bm9rc-grow .8s cubic-bezier(.22,.8,.24,1) backwards;}
 @keyframes bm9rc-grow{from{transform:scaleX(0);}}
 .bm9rc-tval{font-size:15px;font-weight:800;text-align:right;}
-.bm9rc-tsub{grid-column:2 / 4;font-size:12px;color:var(--bm7-ink-3);line-height:1.5;}
+.bm9rc-tsub{grid-column:2 / 4;min-width:0;font-size:12px;color:var(--bm7-ink-3);line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* ---------- 权重推子（弹出层 Portal 内，不依赖 .bm9rc 作用域） ---------- */
 .bm9rc-mixer{display:flex;flex-direction:column;gap:12px;color:var(--bm7-ink);font-variant-numeric:tabular-nums;}
@@ -361,13 +423,51 @@ const CSS = String.raw`
 .bm9rc-fd-name{font-size:12px;font-weight:800;color:var(--c);}
 .bm9rc-mx-note{margin:0;font-size:12px;line-height:1.55;color:var(--bm7-ink-3);}
 
+/* ---------- 时间筛选弹层（年份 × 四个季度的小表格） ---------- */
+.bm9rc-tp{display:flex;flex-direction:column;gap:10px;color:var(--bm7-ink);font-variant-numeric:tabular-nums;}
+.bm9rc-tp-h{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.bm9rc-tp-h b{font-size:14px;font-weight:800;}
+.bm9rc-tp-list{display:flex;flex-direction:column;gap:3px;max-height:min(400px,56vh);overflow-y:auto;overscroll-behavior:contain;margin:0 -6px;padding:0 6px 2px;scrollbar-width:thin;}
+.bm9rc-tp-row{display:grid;grid-template-columns:minmax(64px,1.2fr) repeat(4,minmax(0,1fr));gap:4px;align-items:stretch;}
+.bm9rc-tp-row.is-head{position:sticky;top:0;z-index:1;padding:2px 0 4px;background:var(--bm7-pop-bg,var(--bm7-surface));}
+.bm9rc-tp-row.is-head span{font-size:12px;font-weight:650;color:var(--bm7-ink-3);text-align:center;}
+.bm9rc-tp-row.is-head span:first-child{text-align:left;padding-left:8px;}
+.bm9rc-tp button.bm9rc-tp-c{appearance:none;-webkit-appearance:none;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;margin:0;min-width:0;height:34px !important;padding:0 4px !important;border:none !important;border-radius:8px !important;background:color-mix(in srgb,var(--bm7-ink) 5%,transparent) !important;box-shadow:none !important;color:var(--bm7-ink);font:inherit;font-size:12.5px;font-weight:650;line-height:1.15;cursor:pointer;transition:background .14s ease,color .14s ease;}
+.bm9rc-tp button.bm9rc-tp-c:hover{background:color-mix(in srgb,var(--bm7-ink) 10%,transparent) !important;}
+.bm9rc-tp button.bm9rc-tp-c.is-on{background:var(--bm7-accent) !important;color:var(--bm7-accent-ink);}
+.bm9rc-tp button.bm9rc-tp-c.is-year{align-items:flex-start;padding:0 8px !important;}
+.bm9rc-tp button.bm9rc-tp-c.is-year b{font-size:13px;font-weight:800;}
+.bm9rc-tp button.bm9rc-tp-c.is-year small{font-size:12px;font-weight:500;opacity:.72;}
+.bm9rc-tp button.bm9rc-tp-c.is-all{height:28px !important;padding:0 10px !important;flex-direction:row;}
+.bm9rc-tp button.bm9rc-tp-c.is-chip{height:26px !important;padding:0 9px !important;flex-direction:row;font-weight:600;}
+.bm9rc-tp-none{border-radius:8px;background:repeating-linear-gradient(135deg,transparent 0 5px,color-mix(in srgb,var(--bm7-ink) 4%,transparent) 5px 6px);}
+.bm9rc-tp-extra{display:flex;flex-wrap:wrap;gap:4px;padding:0 0 4px 0;}
+.bm9rc-tp-note{margin:0;font-size:12px;line-height:1.5;color:var(--bm7-ink-3);}
+
 /* ---------- 自适应 ---------- */
+/* 窄屏（JS 按根宽度 < 820px 挂 data-narrow）：「作品榜单 | 给分统计」两页切换，榜单回到页面自然滚动 */
+.bm9rc[data-narrow] .bm9rc-main{display:block;}
+.bm9rc[data-narrow] .bm9rc-boardcell{min-height:0;}
+.bm9rc[data-narrow] .bm9rc-board{position:relative;inset:auto;overflow:visible;}
+.bm9rc[data-narrow] .bm9rc-scroll{overflow:visible;flex:none;}
+.bm9rc[data-narrow][data-view="list"] .bm9rc-side{display:none;}
+.bm9rc[data-narrow][data-view="stats"] .bm9rc-boardcell{display:none;}
+.bm9rc[data-narrow] .bm9rc-side.is-open .bm9rc-insight{opacity:1;transform:none;pointer-events:auto;}
+.bm9rc[data-narrow] .bm9rc-fsum{margin-left:0;}
+@container bm9rc (max-width: 1180px){
+  .bm9rc-leg span{display:none;}
+  .bm9rc-titles{flex-basis:260px;}
+  .bm9rc-slab span{display:none;}
+  .bm9rc-hrow,.bm9rc-haxis{grid-template-columns:48px minmax(0,1fr) 76px;}
+  .bm9rc-hrow{min-height:32px;}
+  .bm9rc-trow{grid-template-columns:48px minmax(0,1fr) 46px;}
+}
 @container bm9rc (max-width: 940px){
-  .bm9rc-main{grid-template-columns:minmax(0,1fr);}
-  .bm9rc-stage{position:relative;top:auto;order:-1;}
-  .bm9rc-insight{grid-template-columns:minmax(0,1fr);}
-  .bm9rc-card + .bm9rc-card{border-left:none;border-top:1px solid var(--rc-line);}
   .bm9rc-tools{justify-content:flex-start;}
+}
+@container bm9rc (max-width: 1080px){
+  .bm9rc .bm9rc-dbtn:not(.is-close) span{display:none;}
+  .bm9rc .bm9rc-dbtn:not(.is-close){padding:0;width:30px;}
 }
 @container bm9rc (max-width: 560px){
   .bm9rc-title{font-size:19px;}
@@ -381,15 +481,37 @@ const CSS = String.raw`
   .bm9rc-sync{width:100%;}
   .bm9rc-sync .bm9rc-act{flex:1 1 auto;}
   .bm9rc-prog{max-width:100%;width:100%;}
+  .bm9rc-fbar{padding:10px;gap:8px;}
+  .bm9rc-fgroup{width:100%;}
+  .bm9rc-flabel{width:48px;}
+  .bm9rc-fgroup .bm9rc-seg{flex:1 1 auto;}
+  .bm9rc-fgroup .bm9rc-seg .bm9rc-segbtn{padding:0 8px;}
+  .bm9rc-fgroup .bm9rc-seg .bm9rc-segbtn em{display:none;}
+  .bm9rc-fgroup .bm9rc-timebtn{flex:1 1 auto;justify-content:flex-start;}
+  .bm9rc-fgroup .bm9rc-timebtn span{flex:1 1 auto;text-align:left;}
+  .bm9rc-fsum{width:100%;justify-content:space-between;}
   .bm9rc-bar{padding:4px 6px 0;}
   .bm9rc-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%;overflow:visible;}
   .bm9rc .bm9rc-tab{padding:0 2px;font-size:12.5px;text-align:center;}
   .bm9rc-tab::after{left:6px;right:6px;}
+  .bm9rc-count{display:none;}
   .bm9rc-filters{padding:10px 10px 6px;}
   .bm9rc-list{padding:2px 4px 0;}
   .bm9rc .bm9rc-row{grid-template-columns:20px 32px minmax(0,1fr) 56px;grid-template-areas:"rank thumb name val" "rank thumb strip strip";row-gap:4px;column-gap:9px;}
   .bm9rc-thumb{width:32px;align-self:start;}
   .bm9rc-rank{align-self:start;padding-top:3px;}
+  .bm9rc-plot{aspect-ratio:1 / 1;}
+  .bm9rc-plotwrap{padding:26px 4px 46px 26px;}
+  .bm9rc-pt-tag{max-width:120px;}
+  .bm9rc-map{padding:6px 12px 8px;}
+  .bm9rc-gcols{grid-template-columns:minmax(0,1fr);gap:8px;}
+  .bm9rc-card{padding:14px 14px 16px;}
+  .bm9rc-hrow,.bm9rc-haxis{grid-template-columns:44px minmax(0,1fr) 66px;gap:8px;}
+  .bm9rc-trow{grid-template-columns:44px minmax(0,1fr) 42px;column-gap:8px;}
+  .bm9rc-slab span{display:none;}
+}
+/* 详情抽屉按自身宽度收紧（右栏较窄的中窄窗、手机底部抽屉） */
+@container bm9rcd (max-width: 480px){
   .bm9rc-shead{grid-template-columns:52px minmax(0,1fr);grid-template-areas:"cover title" "cover big" "chips chips";column-gap:12px;row-gap:6px;padding:14px 14px 10px;}
   .bm9rc-scover{width:52px;}
   .bm9rc-big{flex-direction:row;align-items:baseline;gap:8px;align-self:start;}
@@ -401,21 +523,15 @@ const CSS = String.raw`
   .bm9rc-rval b{font-size:15px;}
   .bm9rc-rm,.bm9rc-rover-m{left:12px;right:12px;}
   .bm9rc-rkey{padding:4px 14px 12px;}
+  .bm9rc-facts4{grid-template-columns:minmax(0,1fr);}
+  .bm9rc-fact:nth-child(odd){border-right:none;}
+  .bm9rc-fact:nth-child(-n+3){border-bottom:1px solid var(--rc-line);}
   .bm9rc-fact{padding:9px 12px 10px;}
-  .bm9rc-acts{padding:12px 12px 14px;}
+  .bm9rc-acts{padding:10px 12px 12px;}
   .bm9rc .bm9rc-fix{margin-left:0;}
   .bm9rc-bind{padding:0 12px 14px;}
   .bm9rc-bind-grid{grid-template-columns:minmax(0,1fr);}
   .bm9rc-bind-foot p{margin:0;flex-basis:100%;}
-  .bm9rc-plot{aspect-ratio:1 / 1;}
-  .bm9rc-plotwrap{padding:26px 4px 46px 26px;}
-  .bm9rc-pt-tag{max-width:120px;}
-  .bm9rc-map{padding:6px 12px 8px;}
-  .bm9rc-gcols{grid-template-columns:minmax(0,1fr);gap:8px;}
-  .bm9rc-card{padding:14px 14px 16px;}
-  .bm9rc-hrow,.bm9rc-haxis{grid-template-columns:44px minmax(0,1fr) 66px;gap:8px;}
-  .bm9rc-trow{grid-template-columns:44px minmax(0,1fr) 42px;column-gap:8px;}
-  .bm9rc-slab span{display:none;}
 }
 @media (prefers-reduced-motion: reduce){
   .bm9rc *,.bm9rc *::before,.bm9rc *::after,.bm9rc-mixer *{transition:none !important;animation:none !important;}
@@ -590,6 +706,21 @@ function hashOffset(key, spread) {
   const s = String(key || "");
   for (let i = 0; i < s.length; i++) x = (x * 33 + s.charCodeAt(i)) >>> 0;
   return ((x % 1000) / 1000 - 0.5) * 2 * spread;
+}
+
+/** 把条目里的季度文字（「10月新番」「秋」等）归到 1 / 4 / 7 / 10 月四个季度；认不出返回 0 */
+function quarterOf(season) {
+  const s = String(season || "");
+  const m = s.match(/(\d{1,2})\s*月/);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 1 && n <= 12) return n <= 3 ? 1 : n <= 6 ? 4 : n <= 9 ? 7 : 10;
+  }
+  if (/冬/.test(s)) return 1;
+  if (/春/.test(s)) return 4;
+  if (/夏/.test(s)) return 7;
+  if (/秋/.test(s)) return 10;
+  return 0;
 }
 
 function orderProfiles(lens, profiles) {
@@ -837,26 +968,34 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     container._bm9RcV9State = {
       lens: "rank",
       search: "",
-      onlySynced: false,
+      filter: { time: "", state: "", sync: "all" },
+      view: "list",
       selectedKey: "",
+      drawerOpen: false,
       bindOpenKey: "",
       bindDraft: {},
       syncingOneKey: "",
-      limit: 60,
+      limit: 80,
       draftWeights: null,
       batchHere: false,
       lastFinishedAt: 0
     };
   }
   const st = container._bm9RcV9State;
+  if (!st.filter || typeof st.filter !== "object") st.filter = { time: "", state: "", sync: "all" };
+  if (st.onlySynced) {
+    st.filter.sync = "synced";
+    delete st.onlySynced;
+  }
   if (!LENSES.some((l) => l.id === st.lens)) st.lens = "rank";
   st.draftWeights = null;
-  let pendingFocusScroll = false;
+  let pendingFocus = false;
   if (ctx.focusItem) {
     st.selectedKey = svc.getAnimeRatingCacheKey(ctx.focusItem);
     if (st.lens === "gap") st.lens = "rank";
     st.search = "";
-    pendingFocusScroll = true;
+    st.view = "list";
+    pendingFocus = true;
   }
 
   if (container._bm9RcUnsub) {
@@ -865,19 +1004,50 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     } catch (_) {}
     container._bm9RcUnsub = null;
   }
+  if (typeof container._bm9RcTeardown === "function") {
+    try {
+      container._bm9RcTeardown();
+    } catch (_) {}
+  }
   const token = {};
   container._bm9RcToken = token;
   const alive = () => container._bm9RcToken === token;
+  const teardowns = [];
+  container._bm9RcTeardown = () => {
+    teardowns.splice(0).forEach((fn) => {
+      try {
+        fn();
+      } catch (_) {}
+    });
+  };
 
-  /* ---------- 骨架 ---------- */
+  /* ---------- 骨架 ----------
+   * 桌面：顶部标题与筛选条 → 左栏定高独立滚动的作品榜单 | 右栏两张统计卡；
+   *       点作品后，详情抽屉从右栏浮出盖住统计卡（榜单仍可继续点选、上下切换）。
+   * 窄屏（< 820px）：「榜单 | 统计」两页切换，详情改为从底部升起的抽屉。
+   */
   clear(container);
   const root = h("div.bm9rc");
   const headEl = h("header.bm9rc-head");
+  const fbarEl = h("div.bm9rc-fbar", { attr: { role: "group", "aria-label": "筛选作品" } });
+  const vsegEl = h("div.bm9rc-vseg");
   const boardEl = h("section.bm9rc-board", { attr: { "aria-label": "作品列表" } });
-  const stageEl = h("section.bm9rc-stage", { attr: { "aria-label": "四站评分详情" } });
+  const boardCell = h("div.bm9rc-boardcell", [boardEl]);
   const insightEl = h("section.bm9rc-insight", { attr: { "aria-label": "四站给分习惯与口味契合" } });
-  root.append(headEl, h("div.bm9rc-main", [boardEl, stageEl]), insightEl);
+  const drawerEl = h("aside.bm9rc-drawer", { attr: { "aria-label": "单部作品的四站评分", hidden: true } });
+  const sideCell = h("div.bm9rc-side", [insightEl, drawerEl]);
+  const mainEl = h("div.bm9rc-main", [boardCell, sideCell]);
+  root.append(headEl, fbarEl, vsegEl, mainEl);
+  root.dataset.view = st.view === "stats" ? "stats" : "list";
   container.appendChild(root);
+  document.querySelectorAll("body > .bm9rc-portal").forEach((n) => n.remove());
+
+  let narrow = false;
+  const measureNarrow = () => {
+    const w = root.getBoundingClientRect().width || container.getBoundingClientRect().width || 0;
+    if (!w) return null;
+    return w < 820;
+  };
 
   /* ---------- 数据模型 ---------- */
   let model = null;
@@ -892,32 +1062,35 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       profiles.push(p);
     }
     const win = computeWindow(profiles);
+    const f = st.filter;
+    const scoped = svc.filterRatingProfiles(profiles, {
+      seasonFilter: f.time || "",
+      stateFilter: f.state || "",
+      syncFilter: f.sync || "all"
+    });
     model = {
       analytics,
       weights,
       profiles,
       byKey: new Map(profiles.map((p) => [p.cacheKey, p])),
       win,
-      listWin: computeListWindow(profiles, win)
+      listWin: computeListWindow(profiles, win),
+      facets: svc.collectRatingFilterFacets(profiles),
+      scoped,
+      scopedAnalytics: scoped.length === profiles.length ? analytics : svc.computeRatingAnalyticsFromProfiles(scoped, weights)
     };
   };
+  const filterActive = () => Boolean(st.filter.time || st.filter.state || (st.filter.sync && st.filter.sync !== "all"));
   const ensureSelection = () => {
     if (st.selectedKey && model.byKey.has(st.selectedKey)) return;
-    const first = orderProfiles("rank", model.profiles)[0];
+    const first = orderProfiles("rank", model.scoped)[0] || orderProfiles("rank", model.profiles)[0];
     st.selectedKey = first ? first.cacheKey : "";
+    if (!first) st.drawerOpen = false;
   };
+  /** 时间 / 状态 / 外站数据三项筛选同时作用于榜单和统计卡；搜索只用来在榜单里找作品 */
   const getFiltered = () => {
-    let list = model.profiles;
-    if (st.onlySynced) list = list.filter((p) => p.hasExternalSync);
-    const q = st.search.trim().toLowerCase();
-    if (q) {
-      list = list.filter(
-        (p) =>
-          String(p.item.name || "").toLowerCase().includes(q) ||
-          String(p.item.japaneseName || "").toLowerCase().includes(q)
-      );
-    }
-    return list;
+    const q = st.search.trim();
+    return q ? svc.filterRatingProfiles(model.scoped, { search: q }) : model.scoped;
   };
 
   /* ---------- 刷新调度（rAF 合并） ---------- */
@@ -934,9 +1107,10 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       computeModel();
       ensureSelection();
       if (p.all || p.header) renderHeader();
-      if (p.all || p.board || p.weights) renderBoard(Boolean(p.weights && !p.all && !p.board));
-      if (p.all || p.stage || p.weights) renderStage();
-      if (p.all || p.insight) renderInsights();
+      if (p.all || p.filters) renderFilterBar();
+      if (p.all || p.board || p.weights || p.filters) renderBoard(Boolean(p.weights && !p.all && !p.board && !p.filters));
+      if (p.all || p.stage || p.weights || p.filters) renderStage();
+      if (p.all || p.insight || p.filters) renderInsights();
     });
   };
 
@@ -996,32 +1170,225 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     }
   };
 
-  /* ---------- 选择 ---------- */
+  /* ---------- 选择与详情抽屉 ---------- */
   const rowCache = new Map();
-  const maybeScrollStage = () => {
-    try {
-      const sticky = getComputedStyle(stageEl).position === "sticky";
-      const r = stageEl.getBoundingClientRect();
-      const vh = window.innerHeight || document.documentElement.clientHeight || 800;
-      const behavior = motionOn() ? "smooth" : "auto";
-      if (sticky) {
-        if (r.top < -20 || r.top > vh * 0.6) stageEl.scrollIntoView({ block: "nearest", behavior });
-      } else if (r.top < -20 || r.top > vh * 0.45) {
-        stageEl.scrollIntoView({ block: "start", behavior });
-      }
-    } catch (_) {}
+  let portalEl = null;
+  let stageDir = 0;
+  /** 抽屉里「上一部 / 下一部」的顺序 = 当前榜单（视角 + 筛选 + 搜索）的顺序；温差图视角按综合排行 */
+  const currentOrder = () => {
+    const list = getFiltered();
+    return orderProfiles(st.lens === "gap" ? "rank" : st.lens, list);
   };
-  const select = (key, opts = {}) => {
+  const markRows = () => {
+    rowCache.forEach((r, k) => {
+      const on = st.drawerOpen && k === st.selectedKey;
+      r.el.classList.toggle("is-sel", on);
+      r.el.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+  };
+  const ensureRowRendered = (key) => {
+    if (st.lens === "gap") return;
+    const idx = currentOrder().findIndex((p) => p.cacheKey === key);
+    if (idx >= st.limit) {
+      st.limit = idx + 20;
+      renderBoard(false);
+    }
+  };
+  /** 只滚动榜单自己的滚动区，不牵动整页 */
+  const revealRow = (key, smooth = true) => {
+    if (narrow) return;
+    const r = rowCache.get(key);
+    if (!r || !r.el.isConnected || !scrollEl) return;
+    const sr = scrollEl.getBoundingClientRect();
+    const rr = r.el.getBoundingClientRect();
+    if (!sr.height) return;
+    let next = null;
+    if (rr.top < sr.top + 6) next = scrollEl.scrollTop + (rr.top - sr.top) - 6;
+    else if (rr.bottom > sr.bottom - 6) next = scrollEl.scrollTop + (rr.bottom - sr.bottom) + 6;
+    if (next === null) return;
+    try {
+      scrollEl.scrollTo({ top: Math.max(0, next), behavior: smooth && motionOn() ? "smooth" : "auto" });
+    } catch (_) {
+      scrollEl.scrollTop = Math.max(0, next);
+    }
+  };
+  const themeRootAttrs = () => {
+    const src = container.closest(".bm7-root");
+    const get = (k, d) => (src && src.getAttribute(k)) || d;
+    const motion = get("data-bm7-motion", "on");
+    return {
+      "data-bm7-theme": get("data-bm7-theme", "follow"),
+      "data-bm7-motion": motion,
+      "data-bm7-motion-tier": get("data-bm7-motion-tier", motion === "off" ? "off" : "full"),
+      "data-bm8-cel-fx": get("data-bm8-cel-fx", "prism")
+    };
+  };
+  /** 宽屏：抽屉浮在右栏上；窄屏：搬进 body 级底部抽屉（逃离容器查询与遮挡） */
+  const placeDrawer = () => {
+    if (portalEl && !portalEl.isConnected) portalEl = null;
+    if (narrow) {
+      if (!portalEl) {
+        portalEl = h("div.bm7-root.bm7-drawer.bm9rc-portal", {
+          attr: Object.assign({ role: "dialog", "aria-modal": "true", "aria-label": "单部作品的四站评分" }, themeRootAttrs())
+        });
+        const srcRoot = container.closest(".bm7-root");
+        const amb = srcRoot && srcRoot.style ? srcRoot.style.getPropertyValue("--bm7-ambient") : "";
+        if (amb) portalEl.style.setProperty("--bm7-ambient", amb);
+        portalEl.append(h("div.bm9rc-scrim", { on: { click: () => closeDrawer() } }), h("div.bm9rc.bm9rc-sheetwrap"));
+        document.body.appendChild(portalEl);
+      }
+      const wrap = portalEl.querySelector(".bm9rc-sheetwrap");
+      if (drawerEl.parentNode !== wrap) wrap.appendChild(drawerEl);
+      drawerEl.classList.add("is-sheet");
+    } else {
+      if (drawerEl.parentNode !== sideCell) sideCell.appendChild(drawerEl);
+      drawerEl.classList.remove("is-sheet");
+      if (portalEl) {
+        portalEl.remove();
+        portalEl = null;
+      }
+    }
+  };
+  teardowns.push(() => {
+    if (portalEl) portalEl.remove();
+    portalEl = null;
+  });
+
+  /** 右下角洛琪希挂件会盖住抽屉底部时，给抽屉滚动区留出等高的底部空白 */
+  const updateSafeArea = () => {
+    if (!dscroll) return;
+    let pad = 0;
+    if (st.drawerOpen && !narrow) {
+      const w = document.querySelector(".curator-roxy-widget");
+      if (w) {
+        const cs = getComputedStyle(w);
+        const dr = drawerEl.getBoundingClientRect();
+        const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+        const visibleBottom = Math.min(dr.bottom, vh);
+        // 立绘本体 + 正在显示的对话气泡，取最高处
+        const boxes = [w, ...w.querySelectorAll(".curator-roxy-bubble:not(.is-hidden)")]
+          .map((n) => n.getBoundingClientRect())
+          .filter((r) => r.width > 0 && r.height > 0 && r.left < dr.right && r.right > dr.left && r.top < visibleBottom);
+        if (cs.display !== "none" && cs.visibility !== "hidden" && boxes.length) {
+          pad = Math.max(0, visibleBottom - Math.min(...boxes.map((r) => r.top)));
+        }
+      }
+    }
+    dscroll.style.setProperty("--rc-safe-b", `${Math.round(pad)}px`);
+  };
+  let safeRaf = 0;
+  const onViewportChange = () => {
+    if (safeRaf || !st.drawerOpen) return;
+    safeRaf = requestAnimationFrame(() => {
+      safeRaf = 0;
+      if (alive()) updateSafeArea();
+    });
+  };
+  window.addEventListener("resize", onViewportChange);
+  document.addEventListener("scroll", onViewportChange, true);
+  teardowns.push(() => {
+    window.removeEventListener("resize", onViewportChange);
+    document.removeEventListener("scroll", onViewportChange, true);
+    if (safeRaf) cancelAnimationFrame(safeRaf);
+  });
+
+  const openDrawer = (key, opts = {}) => {
     if (!model.byKey.has(key)) return;
+    const wasOpen = st.drawerOpen && !drawerEl.hidden && drawerEl.isConnected && (!narrow || Boolean(portalEl && portalEl.isConnected));
     if (st.bindOpenKey && st.bindOpenKey !== key) st.bindOpenKey = "";
     st.selectedKey = key;
-    rowCache.forEach((r, k) => {
-      r.el.classList.toggle("is-sel", k === key);
-      r.el.setAttribute("aria-pressed", k === key ? "true" : "false");
-    });
+    st.drawerOpen = true;
+    if (drawerEl._bm9CloseTid) {
+      clearTimeout(drawerEl._bm9CloseTid);
+      drawerEl._bm9CloseTid = 0;
+    }
+    placeDrawer();
+    drawerEl.hidden = false;
+    sideCell.classList.add("is-open");
+    if (portalEl) portalEl.classList.remove("is-leaving");
+    markRows();
     if (st.lens === "gap") renderBoard(false);
+    stageDir = wasOpen ? opts.dir || 0 : 0;
     renderStage();
-    if (opts.scroll) maybeScrollStage();
+    if (!wasOpen) {
+      if (dscroll) dscroll.scrollTop = 0;
+      animateDrawerReveal(drawerEl, { side: narrow ? "bottom" : "right" });
+      requestAnimationFrame(() => alive() && updateSafeArea());
+    } else if (dscroll && opts.dir) {
+      dscroll.scrollTop = 0;
+    }
+    if (opts.reveal !== false) {
+      ensureRowRendered(key);
+      requestAnimationFrame(() => alive() && revealRow(key, opts.smooth !== false));
+    }
+  };
+  const closeDrawer = () => {
+    if (!st.drawerOpen) return;
+    st.drawerOpen = false;
+    st.bindOpenKey = "";
+    markRows();
+    sideCell.classList.remove("is-open");
+    if (portalEl) portalEl.classList.add("is-leaving");
+    const ms = animateDrawerReveal(drawerEl, { side: narrow ? "bottom" : "right", closing: true });
+    const finish = () => {
+      drawerEl._bm9CloseTid = 0;
+      if (st.drawerOpen || !alive()) return;
+      drawerEl.hidden = true;
+      drawerEl.style.transform = "";
+      if (portalEl) {
+        portalEl.remove();
+        portalEl = null;
+      }
+    };
+    if (ms) drawerEl._bm9CloseTid = setTimeout(finish, ms);
+    else finish();
+    if (st.lens === "gap") renderBoard(false);
+  };
+  const stepDrawer = (delta) => {
+    const order = currentOrder();
+    if (!order.length) return;
+    const i = order.findIndex((p) => p.cacheKey === st.selectedKey);
+    const ni = i < 0 ? 0 : clamp(i + delta, 0, order.length - 1);
+    if (ni === i) return;
+    openDrawer(order[ni].cacheKey, { dir: delta });
+  };
+  const toggleRow = (key) => {
+    if (st.drawerOpen && st.selectedKey === key && drawerEl.isConnected) closeDrawer();
+    else openDrawer(key, { reveal: false });
+  };
+
+  const onKey = (e) => {
+    if (!alive() || !container.isConnected || !st.drawerOpen || drawerEl.hidden) return;
+    if (!portalEl && container.offsetParent === null) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ""))) return;
+    if (document.querySelector(".bm7-pop:not(.is-leaving)")) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDrawer();
+    } else if (e.key === "ArrowDown" || e.key === "j") {
+      e.preventDefault();
+      stepDrawer(1);
+    } else if (e.key === "ArrowUp" || e.key === "k") {
+      e.preventDefault();
+      stepDrawer(-1);
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  teardowns.push(() => document.removeEventListener("keydown", onKey, true));
+
+  const applyNarrow = (next) => {
+    if (next === null || next === undefined) return;
+    if (next === narrow && root.hasAttribute("data-narrow") === next) return;
+    narrow = next;
+    root.toggleAttribute("data-narrow", narrow);
+    if (st.drawerOpen) {
+      placeDrawer();
+      drawerEl.hidden = false;
+      drawerEl.setAttribute("data-bm8-dw-side", narrow ? "bottom" : "right");
+    }
   };
 
   /* ============================== 顶部 ============================== */
@@ -1125,6 +1492,203 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     headEl.append(titles, h("div.bm9rc-tools", [srcEl, syncEl]));
   };
 
+  /* ============================== 筛选条 ============================== */
+  const setFilter = (patch) => {
+    Object.assign(st.filter, patch);
+    st.limit = 80;
+    // 换筛选条件时收起详情，让刷新后的统计卡直接露出来
+    if (st.drawerOpen) closeDrawer();
+    if (scrollEl && !narrow) scrollEl.scrollTop = 0;
+    schedule({ filters: true });
+  };
+  const timeLabel = () => {
+    const t = st.filter.time;
+    if (!t) return "全部时间";
+    if (t.startsWith("year:")) return `${t.slice(5)} 年`;
+    const s = model.facets.seasons.find((x) => x.key === t);
+    if (!s) return t;
+    const q = quarterOf(s.season);
+    return q ? `${s.year} 年 ${q} 月` : s.label;
+  };
+  const segBtn = (label, count, on, onClick, title) =>
+    h(
+      "button.bm9rc-b.bm9rc-segbtn",
+      {
+        cls: on ? "is-on" : "",
+        title: title || "",
+        attr: { type: "button", role: "radio", "aria-checked": on ? "true" : "false" },
+        on: { click: onClick }
+      },
+      [h("span", { text: label }), count !== undefined && count !== null ? h("em", { text: String(count) }) : null]
+    );
+
+  const openTimePicker = (anchor) => {
+    popover(
+      anchor,
+      (inner, close) => {
+        const fc = model.facets;
+        const box = h("div.bm9rc-tp");
+        const pick = (key) => {
+          close();
+          if (st.filter.time === key) return;
+          setFilter({ time: key });
+        };
+        const cur = st.filter.time;
+        box.appendChild(
+          h("div.bm9rc-tp-h", [
+            h("b", { text: "按播出时间筛选" }),
+            h("button.bm9rc-tp-c.is-all", { cls: cur ? "" : "is-on", attr: { type: "button" }, text: "全部时间", on: { click: () => pick("") } })
+          ])
+        );
+        const byYear = new Map();
+        for (const s of fc.seasons) {
+          if (!byYear.has(s.year)) byYear.set(s.year, []);
+          byYear.get(s.year).push(s);
+        }
+        const list = h("div.bm9rc-tp-list");
+        list.appendChild(h("div.bm9rc-tp-row.is-head", [h("span", { text: "年份" }), ...[1, 4, 7, 10].map((q) => h("span", { text: `${q} 月` }))]));
+        let curRow = null;
+        for (const y of fc.years) {
+          const slots = { 1: null, 4: null, 7: null, 10: null };
+          const extras = [];
+          for (const s of byYear.get(y.year) || []) {
+            const q = quarterOf(s.season);
+            if (!q) extras.push(s);
+            else if (!slots[q]) slots[q] = s;
+            else if (s.count > slots[q].count) {
+              extras.push(slots[q]);
+              slots[q] = s;
+            } else extras.push(s);
+          }
+          const yearOn = cur === y.key;
+          const row = h("div.bm9rc-tp-row", [
+            h(
+              "button.bm9rc-tp-c.is-year",
+              { cls: yearOn ? "is-on" : "", title: `${y.year} 年全年 · ${y.count} 部`, attr: { type: "button" }, on: { click: () => pick(y.key) } },
+              [h("b", { text: y.year }), h("small", { text: `${y.count} 部` })]
+            ),
+            ...[1, 4, 7, 10].map((q) => {
+              const s = slots[q];
+              if (!s) return h("span.bm9rc-tp-none", { attr: { "aria-hidden": "true" } });
+              return h("button.bm9rc-tp-c", {
+                cls: cur === s.key ? "is-on" : "",
+                title: `${s.label} · ${s.count} 部`,
+                attr: { type: "button", "aria-label": `${y.year} 年 ${q} 月，${s.count} 部` },
+                text: String(s.count),
+                on: { click: () => pick(s.key) }
+              });
+            })
+          ]);
+          list.appendChild(row);
+          if (yearOn || [1, 4, 7, 10].some((q) => slots[q] && slots[q].key === cur)) curRow = row;
+          if (extras.length) {
+            const ex = h(
+              "div.bm9rc-tp-extra",
+              extras.map((s) =>
+                h("button.bm9rc-tp-c.is-chip", {
+                  cls: cur === s.key ? "is-on" : "",
+                  attr: { type: "button" },
+                  text: `${s.season} · ${s.count}`,
+                  on: { click: () => pick(s.key) }
+                })
+              )
+            );
+            list.appendChild(ex);
+            if (extras.some((s) => s.key === cur)) curRow = ex;
+          }
+        }
+        if (!fc.years.length) list.appendChild(h("p.bm9rc-tp-note", { text: "条目里还没有放送年份信息。" }));
+        box.appendChild(list);
+        box.appendChild(h("p.bm9rc-tp-note", { text: "数字是那一季的作品数，点年份筛整年。" }));
+        inner.appendChild(box);
+        if (curRow) {
+          requestAnimationFrame(() => {
+            try {
+              list.scrollTop = Math.max(0, curRow.offsetTop - list.offsetTop - 40);
+            } catch (_) {}
+          });
+        }
+      },
+      { width: 340 }
+    );
+  };
+
+  const renderFilterBar = () => {
+    clear(fbarEl);
+    const fc = model.facets;
+    const f = st.filter;
+    const timeBtn = h(
+      "button.bm9rc-b.bm9rc-timebtn",
+      {
+        cls: f.time ? "is-on" : "",
+        title: "按播出年份或季度筛选",
+        attr: { type: "button", "aria-haspopup": "dialog" },
+        on: { click: () => openTimePicker(timeBtn) }
+      },
+      [icon("calendar", 14), h("span", { text: timeLabel() }), icon("chevronDown", 13)]
+    );
+    const stateSeg = h("div.bm9rc-seg", { attr: { role: "radiogroup", "aria-label": "观看状态" } });
+    stateSeg.appendChild(segBtn("全部", null, !f.state, () => f.state && setFilter({ state: "" })));
+    for (const o of fc.states) {
+      stateSeg.appendChild(segBtn(o.label, o.count, f.state === o.key, () => f.state !== o.key && setFilter({ state: o.key })));
+    }
+    const syncSeg = h("div.bm9rc-seg", { attr: { role: "radiogroup", "aria-label": "外站评分" } });
+    const syncOpts = [
+      { key: "all", label: "全部", title: "不限外站评分" },
+      { key: "synced", label: "已同步", count: fc.coverage.syncedCount, title: "至少拉到一个外站评分的作品" },
+      { key: "quartet", label: "四站齐全", count: fc.coverage.fullQuartetCount, title: "四个站都有评分的作品" }
+    ];
+    for (const o of syncOpts) {
+      syncSeg.appendChild(segBtn(o.label, o.count, (f.sync || "all") === o.key, () => (f.sync || "all") !== o.key && setFilter({ sync: o.key }), o.title));
+    }
+    const active = filterActive();
+    fbarEl.classList.toggle("is-active", active);
+    put(
+      fbarEl,
+      h("div.bm9rc-fgroup", [h("span.bm9rc-flabel", { text: "时间" }), timeBtn]),
+      h("div.bm9rc-fgroup", [h("span.bm9rc-flabel", { text: "状态" }), stateSeg]),
+      h("div.bm9rc-fgroup", [h("span.bm9rc-flabel", { text: "外站评分" }), syncSeg]),
+      active
+        ? h("div.bm9rc-fsum", [
+            h("span", ["筛出 ", h("b", { text: String(model.scoped.length) }), ` / ${model.profiles.length} 部`]),
+            h("button.bm9rc-b.bm9rc-clear", {
+              attr: { type: "button" },
+              text: "清除筛选",
+              on: { click: () => setFilter({ time: "", state: "", sync: "all" }) }
+            })
+          ])
+        : null
+    );
+  };
+
+  /* 窄屏：「作品榜单 | 给分统计」两页切换（沿用当前外观的面板切换动效） */
+  const renderViewSeg = () => {
+    clear(vsegEl);
+    const seg = h("div.bm9rc-seg.is-view", { attr: { role: "tablist", "aria-label": "切换榜单与统计" } });
+    const mk = (id, label) =>
+      h(
+        "button.bm9rc-b.bm9rc-segbtn",
+        {
+          cls: st.view === id ? "is-on" : "",
+          attr: { type: "button", role: "tab", "aria-selected": st.view === id ? "true" : "false" },
+          on: {
+            click: () => {
+              if (st.view === id) return;
+              const dir = id === "stats" ? 1 : -1;
+              st.view = id;
+              renderViewSeg();
+              paperSlipSwap(mainEl, () => {
+                root.dataset.view = id;
+              }, { dir, frameless: true, anchorScroll: false });
+            }
+          }
+        },
+        [h("span", { text: label })]
+      );
+    seg.append(mk("list", "作品榜单"), mk("stats", "给分统计"));
+    vsegEl.appendChild(seg);
+  };
+
   /* ============================== 排行板 ============================== */
   const tabBtns = {};
   const tabsEl = h("div.bm9rc-tabs", { attr: { role: "tablist", "aria-label": "对比视角" } });
@@ -1138,8 +1702,9 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
           click: () => {
             if (st.lens === L.id) return;
             st.lens = L.id;
-            st.limit = 60;
+            st.limit = 80;
             renderBoard(false);
+            if (scrollEl && !narrow) scrollEl.scrollTop = 0;
           }
         }
       },
@@ -1149,48 +1714,47 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     tabsEl.appendChild(b);
   }
   const searchInput = h("input", {
-    attr: { type: "search", placeholder: "搜索番名或日文原名", "aria-label": "搜索作品", spellcheck: "false" },
+    attr: { type: "search", placeholder: "在榜单里搜番名、日文名", "aria-label": "搜索作品", spellcheck: "false" },
     on: {
       input: (e) => {
         st.search = e.target.value;
-        st.limit = 60;
+        st.limit = 80;
         renderBoard(false);
       }
     }
   });
   searchInput.value = st.search;
-  const syncedChip = h(
-    "button.bm9rc-b.bm9rc-chip",
-    {
-      title: "只显示已经拉到外站评分的作品",
-      attr: { type: "button" },
-      on: {
-        click: () => {
-          st.onlySynced = !st.onlySynced;
-          st.limit = 60;
-          renderBoard(false);
-        }
-      }
-    },
-    [icon("check", 13), h("span", { text: "只看已同步" })]
-  );
   const weightBtn = h("button.bm9rc-b.bm9rc-chip", {
     title: "调整综合分里四个站各占多少",
     attr: { type: "button", "aria-haspopup": "dialog" },
     on: { click: () => openMixer(weightBtn) }
   });
+  const countEl = h("span.bm9rc-count");
   const listEl = h("div.bm9rc-list");
   const moreEl = h("div.bm9rc-more");
   const mapEl = h("div.bm9rc-map");
   const boardEmpty = h("div.bm9rc-empty");
+  const scrollEl = h("div.bm9rc-scroll", [listEl, moreEl, mapEl, boardEmpty]);
   boardEl.append(
-    h("div.bm9rc-bar", [tabsEl]),
-    h("div.bm9rc-filters", [h("label.bm9rc-search", [icon("search", 14), searchInput]), syncedChip, weightBtn]),
-    listEl,
-    moreEl,
-    mapEl,
-    boardEmpty
+    h("div.bm9rc-bar", [tabsEl, countEl]),
+    h("div.bm9rc-filters", [h("label.bm9rc-search", [icon("search", 14), searchInput]), weightBtn]),
+    scrollEl
   );
+  if (typeof IntersectionObserver === "function") {
+    // 滚到榜单底部时自动续上下一批，不必再点「再显示」
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!alive() || moreEl.style.display === "none") return;
+        if (entries.some((en) => en.isIntersecting)) {
+          st.limit += 60;
+          renderBoard(false);
+        }
+      },
+      { root: null, rootMargin: "0px 0px 160px 0px" }
+    );
+    io.observe(moreEl);
+    teardowns.push(() => io.disconnect());
+  }
 
   const paintWeightChip = () => {
     clear(weightBtn);
@@ -1260,7 +1824,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     const key = p.cacheKey;
     const el = h("button.bm9rc-b.bm9rc-row", {
       attr: { type: "button" },
-      on: { click: () => select(key, { scroll: true }) }
+      on: { click: () => toggleRow(key) }
     });
     const rankEl = h("span.bm9rc-rank");
     const nameB = h("b");
@@ -1279,7 +1843,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     r = {
       el,
       update(prof, index, lens) {
-        const sel = prof.cacheKey === st.selectedKey;
+        const sel = st.drawerOpen && prof.cacheKey === st.selectedKey;
         el.classList.toggle("is-sel", sel);
         el.classList.toggle("is-top", index < 3);
         el.setAttribute("aria-pressed", sel ? "true" : "false");
@@ -1355,8 +1919,6 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       tabBtns[L.id].classList.toggle("is-on", on);
       tabBtns[L.id].setAttribute("aria-selected", on ? "true" : "false");
     }
-    syncedChip.classList.toggle("is-on", st.onlySynced);
-    syncedChip.setAttribute("aria-pressed", st.onlySynced ? "true" : "false");
     paintWeightChip();
 
     if (fromWeights) {
@@ -1381,23 +1943,31 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       listEl.style.display = "none";
       moreEl.style.display = "none";
       mapEl.style.display = "";
+      countEl.textContent = "";
       renderMap(filtered);
       return;
     }
     mapEl.style.display = "none";
     listEl.style.display = "";
     const ordered = orderProfiles(st.lens, filtered);
+    countEl.textContent = ordered.length ? `${ordered.length} 部` : "";
     if (!ordered.length) {
       flipReorder([]);
       moreEl.style.display = "none";
       boardEmpty.style.display = "";
       let msg = "还没有收录动画。";
       if (st.search.trim()) msg = `没有找到「${st.search.trim()}」相关的作品`;
+      else if (filterActive() && !model.scoped.length) msg = "当前筛选条件下没有作品。";
       else if (st.lens === "split") msg = "至少要有两个站都有评分，才能比较分歧。先同步一下外站评分吧。";
       else if (st.lens === "mine") msg = "还没有可以比较的个人评分。给作品打过分、并且有综合分以后，这里会列出你和大家看法差得最多的作品。";
-      else if (st.onlySynced) msg = "还没有作品拉到外站评分。";
       boardEmpty.appendChild(h("span", { text: msg }));
-      if (!st.search.trim() && (st.lens === "split" || st.onlySynced) && model.analytics.syncedCount === 0) {
+      if (filterActive() && !st.search.trim()) {
+        boardEmpty.appendChild(
+          h("button.bm9rc-b.bm9rc-act", { attr: { type: "button" }, on: { click: () => setFilter({ time: "", state: "", sync: "all" }) } }, [
+            h("span", { text: "清除筛选" })
+          ])
+        );
+      } else if (!st.search.trim() && st.lens === "split" && model.analytics.syncedCount === 0) {
         boardEmpty.appendChild(
           h(
             "button.bm9rc-b.bm9rc-act.is-solid",
@@ -1537,7 +2107,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       .sort((a, b) => (a.p.cacheKey === st.selectedKey ? 1 : 0) - (b.p.cacheKey === st.selectedKey ? 1 : 0));
     ordered.forEach((r, i) => {
       const { p, g } = r;
-      const sel = p.cacheKey === st.selectedKey;
+      const sel = st.drawerOpen && p.cacheKey === st.selectedKey;
       const x = pct(r.e);
       plot.appendChild(
         h(
@@ -1549,7 +2119,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
             style: { left: `${x}%`, top: `${100 - pct(r.w)}%`, "--i": String(Math.min(i, 40)) },
             title: `${p.item.name}\n中日均分 ${r.e.toFixed(2)} · 欧美均分 ${r.w.toFixed(2)} · 温差 ${signed(g)}${cal ? "（已扣除各站习惯）" : ""}`,
             attr: { type: "button", "aria-label": p.item.name },
-            on: { click: () => select(p.cacheKey, { scroll: true }) }
+            on: { click: () => (st.drawerOpen && st.selectedKey === p.cacheKey ? closeDrawer() : openDrawer(p.cacheKey, { reveal: false })) }
           },
           sel ? [coverEl(getCover(p.item), p.item.name), h("span.bm9rc-pt-tag", { text: p.item.name })] : null
         )
@@ -1564,7 +2134,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
           ? list.map((r) =>
               h(
                 "button.bm9rc-b.bm9rc-grow",
-                { attr: { type: "button" }, title: r.p.item.name, on: { click: () => select(r.p.cacheKey, { scroll: true }) } },
+                { attr: { type: "button" }, title: r.p.item.name, on: { click: () => openDrawer(r.p.cacheKey, { reveal: false }) } },
                 [h("span", { text: r.p.item.name }), h("b", { text: signed(r.g) })]
               )
             )
@@ -1577,7 +2147,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     );
   };
 
-  /* ============================== 换算尺舞台 ============================== */
+  /* ============================== 详情抽屉（换算尺） ============================== */
   const sHead = h("div.bm9rc-shead");
   const rule = createSlideRule(svc);
   const ruleKey = h("div.bm9rc-rkey");
@@ -1585,7 +2155,58 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
   const actsEl = h("div.bm9rc-acts");
   const bindEl = h("div.bm9rc-bind");
   const stageEmpty = h("div.bm9rc-empty-in");
-  stageEl.append(sHead, rule.el, ruleKey, factsEl, actsEl, bindEl, stageEmpty);
+  const dPos = h("span.bm9rc-dpos");
+  const dUp = h(
+    "button.bm9rc-b.bm9rc-dbtn.is-up",
+    { title: "上一部（↑）", attr: { type: "button", "aria-label": "上一部" }, on: { click: () => stepDrawer(-1) } },
+    [icon("chevronLeft", 15), h("span", { text: "上一部" })]
+  );
+  const dDown = h(
+    "button.bm9rc-b.bm9rc-dbtn.is-down",
+    { title: "下一部（↓）", attr: { type: "button", "aria-label": "下一部" }, on: { click: () => stepDrawer(1) } },
+    [icon("chevronLeft", 15), h("span", { text: "下一部" })]
+  );
+  const dClose = h(
+    "button.bm9rc-b.bm9rc-dbtn.is-close",
+    { title: "关闭（Esc）", attr: { type: "button", "aria-label": "关闭详情" }, on: { click: () => closeDrawer() } },
+    [icon("close", 15)]
+  );
+  const dnav = h("div.bm9rc-dnav", [h("span.bm9rc-dgrab", { attr: { "aria-hidden": "true" } }), dUp, dDown, dPos, dClose]);
+  const dscroll = h("div.bm9rc-dscroll", [sHead, actsEl, bindEl, rule.el, ruleKey, factsEl, stageEmpty]);
+  drawerEl.append(dnav, dscroll);
+
+  // 底部抽屉：按住顶栏往下拖可关闭
+  let sheetDrag = null;
+  dnav.addEventListener("pointerdown", (e) => {
+    if (!drawerEl.classList.contains("is-sheet") || (e.target && e.target.closest && e.target.closest("button"))) return;
+    sheetDrag = { id: e.pointerId, y: e.clientY, dy: 0 };
+    try {
+      dnav.setPointerCapture(e.pointerId);
+    } catch (_) {}
+  });
+  dnav.addEventListener("pointermove", (e) => {
+    if (!sheetDrag || e.pointerId !== sheetDrag.id) return;
+    sheetDrag.dy = Math.max(0, e.clientY - sheetDrag.y);
+    drawerEl.style.transform = `translate3d(0, ${sheetDrag.dy}px, 0)`;
+  });
+  const endSheetDrag = () => {
+    if (!sheetDrag) return;
+    const dy = sheetDrag.dy;
+    sheetDrag = null;
+    if (dy > 90) {
+      drawerEl.style.transform = "";
+      closeDrawer();
+      return;
+    }
+    drawerEl.style.transition = "transform .2s ease";
+    drawerEl.style.transform = "";
+    setTimeout(() => {
+      drawerEl.style.transition = "";
+    }, 220);
+  };
+  dnav.addEventListener("pointerup", endSheetDrag);
+  dnav.addEventListener("pointercancel", endSheetDrag);
+
   let headKey = "";
   let headRefs = null;
 
@@ -1607,9 +2228,10 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
       headKey = p.cacheKey;
       applyAmbient(sHead, url, p.item.name);
       if (motionOn() && typeof sHead.animate === "function") {
+        const dy = stageDir > 0 ? 10 : stageDir < 0 ? -10 : 4;
         sHead.animate(
           [
-            { opacity: 0.35, transform: "translateY(4px)" },
+            { opacity: 0.35, transform: `translateY(${dy}px)` },
             { opacity: 1, transform: "none" }
           ],
           { duration: 280, easing: "cubic-bezier(.22,.8,.24,1)" }
@@ -1768,9 +2390,25 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
     );
   };
 
+  const paintNav = () => {
+    const order = currentOrder();
+    const i = order.findIndex((x) => x.cacheKey === st.selectedKey);
+    const lensLabel = (LENSES.find((l) => l.id === (st.lens === "gap" ? "rank" : st.lens)) || LENSES[0]).label;
+    clear(dPos);
+    if (i >= 0) {
+      dPos.append("第 ", h("b", { text: String(i + 1) }), ` / ${order.length} 部 · ${lensLabel}`);
+    } else {
+      dPos.textContent = "不在当前榜单里";
+    }
+    dUp.disabled = i <= 0;
+    dDown.disabled = i < 0 || i >= order.length - 1;
+  };
+
   const renderStage = () => {
+    if (!st.drawerOpen) return;
     const p = model.byKey.get(st.selectedKey);
     const parts = [sHead, rule.el, ruleKey, factsEl, actsEl, bindEl];
+    paintNav();
     if (!p) {
       parts.forEach((el) => (el.style.display = "none"));
       stageEmpty.style.display = "";
@@ -1964,7 +2602,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
         box.append(
           h("div.bm9rc-mx-h", [
             h("b", { text: "综合分里各站占多少" }),
-            h("span", { text: "上下拖动推子，左侧排行和右侧换算尺会马上跟着变" })
+            h("span", { text: "上下拖动推子，榜单排序和详情里的换算尺会马上跟着变" })
           ]),
           pre,
           fds,
@@ -1980,14 +2618,30 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
   /* ============================== 给分习惯 + 口味契合 ============================== */
   const renderInsights = () => {
     clear(insightEl);
-    const a = model.analytics;
+    // 统计卡跟随时间 / 状态 / 外站评分筛选（搜索框只用于在榜单里找作品，不影响统计）
+    const a = model.scopedAnalytics;
+    const scopedProfiles = model.scoped;
     const pct = makePct(model.win);
-    const total = model.profiles.length;
+    const total = scopedProfiles.length;
+    let scopeText = "";
+    if (filterActive()) {
+      const bits = [];
+      if (st.filter.time) bits.push(timeLabel());
+      if (st.filter.state) bits.push(st.filter.state);
+      if (st.filter.sync === "synced") bits.push("已同步");
+      else if (st.filter.sync === "quartet") bits.push("四站齐全");
+      scopeText = `按筛选：${bits.join(" · ")} · ${total} 部`;
+    }
+    const cardTitle = (text) =>
+      h("div.bm9rc-card-t", [
+        h("h3", { text }),
+        scopeText ? h("span.bm9rc-scopetag", { title: "统计卡跟随上方筛选条件；搜索框只用于在榜单里找作品", text: scopeText }) : null
+      ]);
 
     const habit = h("div.bm9rc-card", [
       h("div.bm9rc-card-h", [
-        h("h3", { text: "四个站的给分习惯" }),
-        h("span", { text: "每个点是你馆藏里的一部作品（已折算成 10 分制），色带是均分上下一个标准差，竖线是均分。点一下可以查看那部作品。" })
+        cardTitle("四个站的给分习惯"),
+        h("span", { text: "每个点是一部作品（已折算成 10 分制），色带是均分上下一个标准差，竖线和右侧数字是均分。" })
       ])
     ]);
     for (const sid of CORE) {
@@ -1999,7 +2653,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
           const r = pct(stt.mean10 + stt.stdDev);
           m.appendChild(h("span.bm9rc-sw-band", { style: { left: `${l}%`, width: `${r - l}%` } }));
         }
-        for (const p of model.profiles) {
+        for (const p of scopedProfiles) {
           const s = p.sites[sid];
           if (!s.available || s.normalized10 === null) continue;
           m.appendChild(
@@ -2018,7 +2672,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
           on: {
             click: (e) => {
               const k = e.target && e.target.dataset ? e.target.dataset.k : "";
-              if (k) select(k, { scroll: true });
+              if (k) openDrawer(k);
             }
           }
         },
@@ -2029,8 +2683,8 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
           h("div.bm9rc-slab", [h("b", { text: SITE_SHORT[sid] }), h("span", { text: `${SITE_REGION[sid]} · ${SITE_SCALE[sid]}` })]),
           swarm,
           h("div.bm9rc-hstat", [
-            h("b", { text: stt.count ? stt.mean10.toFixed(2) : "—" }),
-            h("span", { text: stt.count ? `均分 · ${stt.count}/${total} 部` : "暂无数据" })
+            h("b", { title: "均分（折算 10 分制）", text: stt.count ? stt.mean10.toFixed(2) : "—" }),
+            h("span", { title: "有这个站评分的作品数", text: stt.count ? `${stt.count}/${total} 部` : "暂无数据" })
           ])
         ])
       );
@@ -2053,7 +2707,7 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
         h("b", { text: SITE_NAME[bottom.id] }),
         ` 最严格（均分 ${bottom.mean10.toFixed(2)}）。`
       );
-      const gaps = model.profiles.filter((p) => p.eastWestGap !== null);
+      const gaps = scopedProfiles.filter((p) => p.eastWestGap !== null);
       if (gaps.length >= 2) {
         const avg = gaps.reduce((acc, p) => acc + p.eastWestGap, 0) / gaps.length;
         say.append(
@@ -2071,9 +2725,9 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
 
     const taste = h("div.bm9rc-card", [
       h("div.bm9rc-card-h", [
-        h("h3", { text: "哪个站和你口味最像" }),
+        cardTitle("哪个站和你口味最像"),
         h("span", {
-          text: "只用你打过分、而且这个站也有评分的作品来算。契合度同时看高低顺序是否一致（相关系数）和分数差多少（平均误差）。"
+          text: "只算你打过分、且这个站也有评分的作品：既看高低顺序像不像，也看分数差多少。"
         })
       ])
     ]);
@@ -2141,11 +2795,37 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
 
   computeModel();
   ensureSelection();
+  applyNarrow(measureNarrow() === null ? false : measureNarrow());
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(() => {
+      if (alive()) applyNarrow(measureNarrow());
+    });
+    ro.observe(root);
+    teardowns.push(() => ro.disconnect());
+  }
   renderHeader();
+  renderFilterBar();
+  renderViewSeg();
   renderBoard(false);
-  renderStage();
   renderInsights();
-  if (pendingFocusScroll) requestAnimationFrame(() => alive() && maybeScrollStage());
+  if (pendingFocus && st.selectedKey && model.byKey.has(st.selectedKey)) {
+    st.drawerOpen = false;
+    requestAnimationFrame(() => alive() && openDrawer(st.selectedKey, { smooth: false }));
+  } else if (st.drawerOpen && model.byKey.has(st.selectedKey) && !(narrow && !container.offsetParent)) {
+    // 回到本页时保持上次打开的详情（不重播展开动画）
+    placeDrawer();
+    drawerEl.hidden = false;
+    sideCell.classList.add("is-open");
+    markRows();
+    renderStage();
+    requestAnimationFrame(() => {
+      if (!alive()) return;
+      updateSafeArea();
+      revealRow(st.selectedKey, false);
+    });
+  } else {
+    st.drawerOpen = false;
+  }
 }
 
 module.exports = {
