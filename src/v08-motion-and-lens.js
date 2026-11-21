@@ -864,26 +864,27 @@ function animateWorkspaceGlide(paneEl, dir = 1) {
 const ROXY_TURN_DURATION_MS = 550;
 const ROXY_TURN_EASING = "cubic-bezier(0.36, 0.06, 0.20, 1)";
 const ROXY_TURN_STYLE_PROPS = [
+  "display",
   "position",
   "top",
   "left",
   "right",
   "width",
   "height",
-  "minHeight",
-  "maxHeight",
-  "paddingTop",
-  "paddingRight",
-  "paddingBottom",
-  "paddingLeft",
-  "borderRadius",
-  "clipPath",
+  "min-height",
+  "max-height",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "border-radius",
+  "clip-path",
   "overflow",
-  "zIndex",
-  "pointerEvents",
-  "boxSizing",
-  "contain",
-  "willChange"
+  "z-index",
+  "pointer-events",
+  "box-sizing",
+  "will-change",
+  "--rx-card-h"
 ];
 
 function abortRoxyWorkspaceTurn(workspaceStage) {
@@ -908,10 +909,16 @@ function waitNextAnimationFrame() {
 }
 
 function waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted) {
-  if (!nextPane || isAborted()) return Promise.resolve();
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const makeRes = (timedOut, pendingImgs) => ({
+    timedOut: Boolean(timedOut),
+    pendingImgs: pendingImgs || [],
+    elapsedMs: (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt
+  });
+  if (!nextPane || isAborted()) return Promise.resolve(makeRes(false, []));
   const budget = Math.max(40, Math.min(240, Number(maxWaitMs) || 160));
   return waitNextAnimationFrame().then(() => {
-    if (isAborted() || !nextPane.isConnected) return;
+    if (isAborted() || !nextPane.isConnected) return makeRes(false, []);
     let imgs = [];
     try {
       const allImgs = Array.from(nextPane.querySelectorAll("img"));
@@ -927,8 +934,9 @@ function waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted) {
       imgs = [];
     }
     if (!imgs.length) {
-      return waitNextAnimationFrame();
+      return waitNextAnimationFrame().then(() => makeRes(false, []));
     }
+    let timedOut = false;
     const perImg = imgs.map(
       (img) =>
         new Promise((res) => {
@@ -948,10 +956,16 @@ function waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted) {
           if (img.complete) done();
         })
     );
-    const timeoutP = new Promise((res) => setTimeout(res, budget));
+    const timeoutP = new Promise((res) =>
+      setTimeout(() => {
+        timedOut = true;
+        res();
+      }, budget)
+    );
     return Promise.race([Promise.all(perImg), timeoutP]).then(() => {
-      if (isAborted()) return;
-      return waitNextAnimationFrame();
+      if (isAborted()) return makeRes(timedOut, []);
+      const stillPending = imgs.filter((img) => img.isConnected && !(img.complete && img.naturalWidth > 0));
+      return waitNextAnimationFrame().then(() => makeRes(timedOut, stillPending));
     });
   });
 }
@@ -1011,7 +1025,7 @@ function transitionRoxyWorkspacePane(opts = {}) {
 
   abortRoxyWorkspaceTurn(workspaceStage);
   workspaceStage.classList.remove(...WS_SWITCH_CLASSES);
-  workspaceStage.querySelectorAll(":scope > .bm8-fx-band, :scope > .bm8-rxturn-overlay").forEach((n) => n.remove());
+  workspaceStage.querySelectorAll(":scope > .bm8-fx-band, :scope > .bm8-rxturn-overlay, :scope > .bm8-rxturn-sketch-veil").forEach((n) => n.remove());
   if (workspaceStage._bm8WsTid) {
     clearTimeout(workspaceStage._bm8WsTid);
     workspaceStage._bm8WsTid = 0;
@@ -1025,7 +1039,7 @@ function transitionRoxyWorkspacePane(opts = {}) {
 
   // 轻巧档：直接渲染并播低显存轻巧短滑
   if (tier === "lite") {
-    applyStateAndRender();
+    applyStateAndRender(null);
     if (typeof onAfterRender === "function") onAfterRender();
     animateWorkspaceGlide(workspaceStage, dir);
     return true;
@@ -1038,29 +1052,47 @@ function transitionRoxyWorkspacePane(opts = {}) {
   if (stageRectBefore.width < 40 || prevPaneRectBefore.height < 24) return false;
 
   const stageCSBefore = getComputedStyle(workspaceStage);
+  const prevCSBefore = getComputedStyle(prevPane);
+  const prevDisplayBefore = prevCSBefore.display || "block";
+  const ownPadL = parseFloat(prevCSBefore.paddingLeft) || 0;
+  const ownPadR = parseFloat(prevCSBefore.paddingRight) || 0;
+  const ownPadT = parseFloat(prevCSBefore.paddingTop) || 0;
+  const ownPadB = parseFloat(prevCSBefore.paddingBottom) || 0;
+  const borderLBefore = parseFloat(stageCSBefore.borderLeftWidth) || 0;
+  const borderTBefore = parseFloat(stageCSBefore.borderTopWidth) || 0;
   const savedScroll = captureScrollAncestors(workspaceStage);
-  const vpBefore = findScrollViewportRect(workspaceStage);
+  const scrolledDown = savedScroll.some((s) => s && s.top > 16);
+  const deskRootEl = workspaceStage.closest ? workspaceStage.closest(".curator-desk-root") : null;
+  const savedDeskRootMinH = deskRootEl ? deskRootEl.style.minHeight || "" : "";
 
   const padL = Math.max(0, prevPaneRectBefore.left - stageRectBefore.left);
   const padR = Math.max(0, stageRectBefore.right - prevPaneRectBefore.right);
   const padT = Math.max(0, prevPaneRectBefore.top - stageRectBefore.top);
   const padB = Math.max(0, stageRectBefore.bottom - prevPaneRectBefore.bottom);
+  const exactContentW = prevPaneRectBefore.width;
   const prevRadius = stageCSBefore.borderRadius || "0px";
   const prevIsDesk = prevMode === "desk";
   const targetIsDesk = targetMode === "desk";
 
-  // 备份旧页和舞台将被临时写入的行内样式
+  // 备份旧页和舞台将被临时写入的行内样式（连同 !important 优先级一并还原）
   const savedPrevInline = {};
   for (const prop of ROXY_TURN_STYLE_PROPS) {
-    savedPrevInline[prop] = prevPane.style[prop] || "";
+    savedPrevInline[prop] = {
+      val: prevPane.style.getPropertyValue(prop),
+      prio: prevPane.style.getPropertyPriority(prop)
+    };
   }
-  const savedStageMinH = workspaceStage.style.minHeight || "";
   const savedStagePos = workspaceStage.style.position || "";
+
+  const setImp = (el, prop, val) => {
+    el.style.setProperty(prop, String(val), "important");
+  };
 
   const seq = (workspaceStage._bm8RoxyTurnSeq = (workspaceStage._bm8RoxyTurnSeq || 0) + 1);
   let finished = false;
   let finishTid = 0;
   let overlayEl = null;
+  let sketchVeilEl = null;
   const animations = [];
 
   const cleanup = () => {
@@ -1080,18 +1112,29 @@ function transitionRoxyWorkspacePane(opts = {}) {
       overlayEl.remove();
     }
     overlayEl = null;
+    if (sketchVeilEl && sketchVeilEl.parentNode) {
+      sketchVeilEl.remove();
+    }
+    sketchVeilEl = null;
 
-    prevPane.classList.remove("bm8-rxturn-leaving", "is-from-desk", "is-from-card");
+    prevPane.classList.remove("bm8-rxturn-leaving", "is-from-desk", "is-from-card", "is-short-card");
     for (const prop of ROXY_TURN_STYLE_PROPS) {
-      prevPane.style[prop] = savedPrevInline[prop];
+      const prev = savedPrevInline[prop];
+      if (prev && prev.val) {
+        prevPane.style.setProperty(prop, prev.val, prev.prio || "");
+      } else {
+        prevPane.style.removeProperty(prop);
+      }
     }
     prevPane.classList.remove("is-workspace-pane-active");
     prevPane.classList.add("is-workspace-pane-hidden");
 
     nextPane.classList.remove("bm8-rxturn-entering");
     workspaceStage.classList.remove("bm8-rxturn-stage", "is-roxy-from-desk", "is-roxy-to-desk");
-    workspaceStage.style.minHeight = savedStageMinH;
     workspaceStage.style.position = savedStagePos;
+    if (deskRootEl && scrolledDown) {
+      deskRootEl.style.minHeight = savedDeskRootMinH;
+    }
 
     if (workspaceStage._bm8RoxyTurn && workspaceStage._bm8RoxyTurn.seq === seq) {
       workspaceStage._bm8RoxyTurn = null;
@@ -1100,28 +1143,48 @@ function transitionRoxyWorkspacePane(opts = {}) {
 
   workspaceStage._bm8RoxyTurn = { seq, cancel: cleanup };
 
-  // Step 1: 锁住舞台最小高度防止切换瞬间滚条跳顶，并在下层同步切换状态与渲染新页
-  const preLockMinH = Math.max(
-    prevPaneRectBefore.height,
-    Math.min(stageRectBefore.height, Math.max(240, vpBefore.bottom - Math.max(stageRectBefore.top, vpBefore.top)))
-  );
+  // Step 1: 仅当页面滚动在中段时，在外层底板锁最小高度防跳顶（绝不拉长 workspaceStage 白色卡片框！）
+  if (scrolledDown && deskRootEl) {
+    deskRootEl.style.minHeight = `${Math.ceil(deskRootEl.getBoundingClientRect().height)}px`;
+  }
   if (getComputedStyle(workspaceStage).position === "static") {
     workspaceStage.style.position = "relative";
   }
   workspaceStage.classList.add("bm8-rxturn-stage");
   if (prevIsDesk) workspaceStage.classList.add("is-roxy-from-desk");
   if (targetIsDesk) workspaceStage.classList.add("is-roxy-to-desk");
-  workspaceStage.style.minHeight = `${Math.ceil(preLockMinH)}px`;
 
-  // 同步执行状态更新与新页渲染（期间新页位于真实宽度下层，ResizeObserver / sticky 均可一次算准）
-  applyStateAndRender();
-
-  // 立即把旧页保持可见并固定在上层，完全不挪动 DOM 父子关系
-  prevPane.classList.remove("is-workspace-pane-hidden");
+  // 关键防突变：在 applyStateAndRender 之前就以 !important 锁定旧页的 display 与精确内边距（包含自身 ownPad），
+  // 彻底压制 v08-halls-aesthetic.js 中 padding: 4px 0 18px !important 导致的 -17/-15/+34 宽度突变重排，
+  // 同时避免旧页进 display:none 导致 Android WebView 销毁封面 GPU 纹理白闪透底！
+  const isNarrowBefore = stageRectBefore.width < 680;
+  const edgeBleedX = prevIsDesk && !targetIsDesk && !isNarrowBefore ? 1 : 0;
   prevPane.classList.add("bm8-rxturn-leaving", prevIsDesk ? "is-from-desk" : "is-from-card");
-  nextPane.classList.add("bm8-rxturn-entering");
+  setImp(prevPane, "display", prevDisplayBefore === "none" ? "block" : prevDisplayBefore);
+  setImp(prevPane, "position", "absolute");
+  setImp(prevPane, "box-sizing", "border-box");
+  setImp(prevPane, "z-index", "26");
+  setImp(prevPane, "pointer-events", "none");
+  setImp(prevPane, "overflow", "hidden");
+  setImp(prevPane, "will-change", "clip-path");
+  prevPane.style.setProperty("clip-path", "inset(0px 0% 0px 0%)");
+  setImp(prevPane, "left", `${-borderLBefore - edgeBleedX}px`);
+  setImp(prevPane, "top", `${-borderTBefore}px`);
+  setImp(prevPane, "width", `${stageRectBefore.width + edgeBleedX * 2}px`);
+  setImp(prevPane, "padding-left", `${padL + edgeBleedX + ownPadL}px`);
+  setImp(prevPane, "padding-right", `${padR + edgeBleedX + ownPadR}px`);
+  setImp(prevPane, "padding-top", `${padT + ownPadT}px`);
+  setImp(prevPane, "padding-bottom", `${padB + ownPadB}px`);
+  setImp(prevPane, "border-radius", prevIsDesk ? (targetIsDesk ? "0px" : "16px") : prevRadius);
 
-  restoreScrollAncestors(savedScroll);
+  // 同步执行状态更新与新页渲染：传入 prevPane 防止调用方对旧页写入 is-workspace-pane-hidden
+  const renderT0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+  applyStateAndRender(prevPane);
+  const syncRenderMs = (typeof performance !== "undefined" ? performance.now() : Date.now()) - renderT0;
+
+  prevPane.classList.remove("is-workspace-pane-hidden");
+  nextPane.classList.add("bm8-rxturn-entering");
+  if (scrolledDown) restoreScrollAncestors(savedScroll);
 
   const stageRectAfter = workspaceStage.getBoundingClientRect();
   const stageCSAfter = getComputedStyle(workspaceStage);
@@ -1130,67 +1193,103 @@ function transitionRoxyWorkspacePane(opts = {}) {
   const vp = findScrollViewportRect(workspaceStage);
 
   const isNarrowStage = stageRectAfter.width < 680;
-  const edgeBleedX = prevIsDesk && !targetIsDesk && !isNarrowStage ? 1 : 0;
-  const baseLeft = -borderL - edgeBleedX;
-  const turnW = stageRectAfter.width + edgeBleedX * 2;
-  const visTop = Math.max(0, vp.top - stageRectAfter.top);
-  const maxVpH = Math.max(240, vp.bottom - Math.max(stageRectAfter.top, vp.top));
+  const turnW = Math.max(stageRectBefore.width, stageRectAfter.width) + edgeBleedX * 2;
+  const baseLeft = stageRectBefore.left - (stageRectAfter.left + borderL) - edgeBleedX;
+  const baseTop = stageRectBefore.top - (stageRectAfter.top + borderT);
+  const visTop = Math.max(0, vp.top - stageRectBefore.top);
+  const maxVpH = Math.max(240, vp.bottom - Math.max(stageRectBefore.top, vp.top));
   const oldAvailH = Math.max(0, prevPaneRectBefore.height - visTop);
-  const newPaneRect = nextPane.getBoundingClientRect();
-  const newAvailH = Math.max(0, newPaneRect.height - visTop);
-  const turnH = Math.min(maxVpH + 16, Math.max(oldAvailH, newAvailH, 260));
-  const leavingHeight = Math.ceil(visTop + turnH + 4);
+  const newStageVisH = Math.max(0, stageRectAfter.height - visTop);
+  const turnH = Math.min(maxVpH + 12, Math.max(oldAvailH, newStageVisH, 260));
+  const leavingHeight = Math.ceil(visTop + turnH + 2);
 
-  // 让舞台最小高度覆盖整个翻页视窗（短页切长页或长页切短页均不跳动不露馅）
-  workspaceStage.style.minHeight = `${Math.ceil(Math.max(newPaneRect.height, visTop + turnH))}px`;
+  // 将旧页像素级锚定回切换前的原屏幕坐标，内容区宽度恒等 exactContentW - ownPadL - ownPadR（0.0px 位移、零重排）
+  setImp(prevPane, "left", `${baseLeft}px`);
+  setImp(prevPane, "top", `${baseTop}px`);
+  setImp(prevPane, "width", `${turnW}px`);
+  setImp(prevPane, "height", `${leavingHeight}px`);
+  setImp(prevPane, "max-height", `${leavingHeight}px`);
+  setImp(prevPane, "padding-left", `${padL + edgeBleedX + ownPadL}px`);
+  setImp(prevPane, "padding-right", `${Math.max(0, turnW - (padL + edgeBleedX) - exactContentW) + ownPadR}px`);
+  setImp(prevPane, "padding-top", `${padT + ownPadT}px`);
+  setImp(prevPane, "padding-bottom", `${padB + ownPadB}px`);
+  setImp(prevPane, "border-radius", prevIsDesk ? (targetIsDesk ? "0px" : stageCSAfter.borderRadius || "16px") : prevRadius);
 
-  // 将旧页像素级对齐回切换前的原位置，并用不透明羊皮纸背板严密遮盖整个首屏视窗（零顶边溢出）
-  prevPane.style.position = "absolute";
-  prevPane.style.boxSizing = "border-box";
-  prevPane.style.left = `${baseLeft}px`;
-  prevPane.style.top = `${-borderT}px`;
-  prevPane.style.width = `${turnW}px`;
-  prevPane.style.height = `${leavingHeight}px`;
-  prevPane.style.maxHeight = `${leavingHeight}px`;
-  prevPane.style.paddingLeft = `${padL + edgeBleedX}px`;
-  prevPane.style.paddingRight = `${padR + edgeBleedX}px`;
-  prevPane.style.paddingTop = `${padT}px`;
-  prevPane.style.paddingBottom = `${padB}px`;
-  prevPane.style.borderRadius = prevIsDesk ? (targetIsDesk ? "0px" : stageCSAfter.borderRadius || "16px") : prevRadius;
-  prevPane.style.overflow = "hidden";
-  prevPane.style.zIndex = "26";
-  prevPane.style.pointerEvents = "none";
-  prevPane.style.contain = "layout style paint";
-  prevPane.style.willChange = "clip-path";
-  prevPane.style.clipPath = "inset(0px 0% 0px 0%)";
+  // 若旧页是短卡片（如音声/画册）而新页更高（如全部番剧/评分对比），旧页下半段延展遮罩绘为羊皮纸底色，
+  // 保证翻页前 0ms 短卡片下方不会突然闪烁变白
+  const syncShortCardSplit = (h) => {
+    if (!prevIsDesk && h > stageRectBefore.height + 16) {
+      prevPane.classList.add("is-short-card");
+      prevPane.style.setProperty("--rx-card-h", `${Math.round(stageRectBefore.height)}px`);
+    } else {
+      prevPane.classList.remove("is-short-card");
+      prevPane.style.removeProperty("--rx-card-h");
+    }
+  };
+  syncShortCardSplit(leavingHeight);
 
   const d = dir < 0 ? -1 : 1;
   const isAborted = () => finished || !workspaceStage.isConnected || workspaceStage._bm8RoxyTurnSeq !== seq;
 
-  // Step 2: 等待新页完成布局与首屏图片就绪（短超时兜底，绝不卡死）
-  waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted).then(() => {
+  // Step 2: 等待新页完成布局与首屏图片就绪（短超时兜底，检测到卡顿/慢图时自动衔接绘本淡彩显影）
+  waitPaneVisualReady(nextPane, vp, maxWaitMs, isAborted).then((readyInfo) => {
     if (isAborted()) return;
 
-    // 就绪后再校准一次新页高度（例如画册/评分对比首帧布局后高度变化）
     const readyStageRect = workspaceStage.getBoundingClientRect();
     const readyVp = findScrollViewportRect(workspaceStage);
-    const readyVisTop = Math.max(0, readyVp.top - readyStageRect.top);
-    const readyMaxVpH = Math.max(240, readyVp.bottom - Math.max(readyStageRect.top, readyVp.top));
-    const readyNewH = Math.max(0, nextPane.getBoundingClientRect().height - readyVisTop);
-    const readyTurnH = Math.min(readyMaxVpH + 16, Math.max(oldAvailH, readyNewH, 260));
-    const readyLeavingH = Math.ceil(readyVisTop + readyTurnH + 4);
+    const readyVisTop = Math.max(0, readyVp.top - stageRectBefore.top);
+    const readyMaxVpH = Math.max(240, readyVp.bottom - Math.max(stageRectBefore.top, readyVp.top));
+    const readyNewH = Math.max(0, readyStageRect.height - readyVisTop);
+    const readyTurnH = Math.min(readyMaxVpH + 12, Math.max(oldAvailH, readyNewH, 260));
+    const readyLeavingH = Math.ceil(readyVisTop + readyTurnH + 2);
 
     if (readyLeavingH > leavingHeight) {
-      prevPane.style.height = `${readyLeavingH}px`;
-      prevPane.style.maxHeight = `${readyLeavingH}px`;
+      setImp(prevPane, "height", `${readyLeavingH}px`);
+      setImp(prevPane, "max-height", `${readyLeavingH}px`);
+      syncShortCardSplit(readyLeavingH);
     }
-    workspaceStage.style.minHeight = `${Math.ceil(Math.max(nextPane.getBoundingClientRect().height, readyVisTop + readyTurnH))}px`;
+
+    // 慢图温柔显影：仍在解码中的首屏图片以柔和淡入呈现，避免突然白框闪蹦
+    const pendingImgs = (readyInfo && readyInfo.pendingImgs) || [];
+    for (const img of pendingImgs) {
+      if (!img || !img.isConnected) continue;
+      img.classList.add("bm8-rxturn-img-sketch");
+      const clearSketch = () => {
+        img.classList.remove("bm8-rxturn-img-sketch");
+        img.classList.add("bm8-rxturn-img-ready");
+        setTimeout(() => img.classList.remove("bm8-rxturn-img-ready"), 340);
+      };
+      img.addEventListener("load", clearSketch, { once: true });
+      img.addEventListener("error", clearSketch, { once: true });
+      if (img.complete && img.naturalWidth > 0) clearSketch();
+    }
+
+    // 卡顿感知兜底：若主线程渲染阻塞明显或首屏资源超时，叠一层轻透绘本淡彩显影幕（仅纯 opacity 柔现，零 scale 跳动）
+    const totalPrepMs = syncRenderMs + ((readyInfo && readyInfo.elapsedMs) || 0);
+    if ((readyInfo && readyInfo.timedOut) || totalPrepMs > 155) {
+      sketchVeilEl = h("div.bm8-rxturn-sketch-veil", { attr: { "aria-hidden": "true" } });
+      sketchVeilEl.style.left = `${baseLeft}px`;
+      sketchVeilEl.style.top = `${baseTop + readyVisTop}px`;
+      sketchVeilEl.style.width = `${turnW}px`;
+      sketchVeilEl.style.height = `${Math.ceil(Math.min(readyTurnH, Math.max(readyNewH, 160)))}px`;
+      sketchVeilEl.style.borderRadius = !targetIsDesk ? stageCSAfter.borderRadius || "16px" : "12px";
+      workspaceStage.appendChild(sketchVeilEl);
+      const veilAnim = sketchVeilEl.animate(
+        [
+          { opacity: 0.42, offset: 0 },
+          { opacity: 0.34, offset: 0.38 },
+          { opacity: 0, offset: 1 }
+        ],
+        { duration: ROXY_TURN_DURATION_MS + 140, easing: "cubic-bezier(0.22, 1, 0.36, 1)", fill: "forwards" }
+      );
+      animations.push(veilAnim);
+    }
 
     // Step 3: 挂载与旧页完全同坐标系的立体纸背卷边 + 压页投影 + 折页水蓝墨韵覆盖层
     const parts = createRoxyPageTurnOverlay(d, { compact: isNarrowStage });
     overlayEl = parts.overlay;
     overlayEl.style.left = `${baseLeft}px`;
-    overlayEl.style.top = `${readyVisTop - borderT}px`;
+    overlayEl.style.top = `${baseTop + readyVisTop}px`;
     overlayEl.style.width = `${turnW}px`;
     overlayEl.style.height = `${Math.ceil(readyTurnH)}px`;
     const activeRadius = !targetIsDesk ? stageCSAfter.borderRadius || "16px" : prevRadius !== "0px" ? prevRadius : "12px";
@@ -1235,25 +1334,15 @@ function transitionRoxyWorkspacePane(opts = {}) {
       { opacity: 0, transform: "scaleX(0.68)", offset: 1 }
     ];
 
-    const nextShift = isNarrowStage ? 6 : 10;
-    const nextKeyframes = [
-      { transform: `translate3d(${d > 0 ? nextShift : -nextShift}px, 0, 0) scale(0.996)` },
-      { transform: "translate3d(0, 0, 0) scale(1)" }
-    ];
-
+    // 注意：下层新页 nextPane 保持原位稳如泰山（不做 scale / translate 动画），彻底根治翻页后缩放回弹突变！
     const prevAnim = prevPane.animate(prevKeyframes, commonOpts);
     const trackAnim = parts.track.animate(trackKeyframes, commonOpts);
     const curlAnim = parts.curl.animate(curlKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
     const castAnim = parts.cast.animate(shadeKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
     const innerShadeAnim = parts.innerShade.animate(shadeKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
     const inkWashAnim = parts.inkwash.animate(inkWashKeyframes, { duration: ROXY_TURN_DURATION_MS, easing: "linear", fill: "forwards" });
-    const nextAnim = nextPane.animate(nextKeyframes, {
-      duration: ROXY_TURN_DURATION_MS,
-      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-      fill: "none"
-    });
 
-    animations.push(prevAnim, trackAnim, curlAnim, castAnim, innerShadeAnim, inkWashAnim, nextAnim);
+    animations.push(prevAnim, trackAnim, curlAnim, castAnim, innerShadeAnim, inkWashAnim);
 
     // 对齐同一 timeline 起始时刻，确保旧页裁切边界与卷边/阴影 0.00ms 锁定
     try {
@@ -5642,12 +5731,44 @@ const MOTION_AND_LENS_CSS = String.raw`
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .28 0 0 0 0 .18 0 0 0 .038 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E") !important;
   box-shadow: inset 0 0 0 1px var(--bm7-line, #ddd0b8) !important;
 }
+.bm8-rxturn-leaving.is-from-card.is-short-card {
+  background-color: var(--bm7-bg, #f3ecdd) !important;
+  background-image:
+    linear-gradient(to right, var(--bm7-line, #ddd0b8), var(--bm7-line, #ddd0b8)),
+    linear-gradient(to right, var(--bm7-line, #ddd0b8), var(--bm7-line, #ddd0b8)),
+    linear-gradient(to right, var(--bm7-line, #ddd0b8), var(--bm7-line, #ddd0b8)),
+    linear-gradient(
+      to bottom,
+      var(--bm7-surface, #fbf7ee) 0px,
+      var(--bm7-surface, #fbf7ee) calc(var(--rx-card-h, 400px) - 1px),
+      var(--bm7-line, #ddd0b8) calc(var(--rx-card-h, 400px) - 1px),
+      var(--bm7-line, #ddd0b8) var(--rx-card-h, 400px),
+      var(--bm7-bg, #f3ecdd) var(--rx-card-h, 400px),
+      var(--bm7-bg, #f3ecdd) 100%
+    ) !important;
+  background-size:
+    100% 1px,
+    1px var(--rx-card-h, 400px),
+    1px var(--rx-card-h, 400px),
+    100% 100% !important;
+  background-position:
+    0 0,
+    0 0,
+    100% 0,
+    0 0 !important;
+  background-repeat: no-repeat !important;
+  box-shadow: none !important;
+}
 .theme-dark .bm8-rxturn-leaving.is-from-desk {
   background-color: var(--bm7-bg, #151927) !important;
 }
 .theme-dark .bm8-rxturn-leaving.is-from-card {
   background-color: var(--bm7-surface, #1b2031) !important;
   box-shadow: inset 0 0 0 1px var(--bm7-line, #2f3654) !important;
+}
+.theme-dark .bm8-rxturn-leaving.is-from-card.is-short-card {
+  background-color: var(--bm7-bg, #151927) !important;
+  box-shadow: none !important;
 }
 .bm8-rxturn-entering {
   position: relative;
@@ -5963,8 +6084,35 @@ const MOTION_AND_LENS_CSS = String.raw`
   100% { opacity: 0; transform: scale(.58) rotate(22deg); }
 }
 
+/* 卡顿/慢图感知兜底：绘本羊皮纸淡彩柔现幕与延迟图片温柔显影（纯 opacity，零缩放跳动） */
+.bm8-rxturn-sketch-veil {
+  position: absolute;
+  z-index: 12;
+  pointer-events: none;
+  background-color: var(--bm7-surface, #fbf7ee);
+  background-image:
+    radial-gradient(82% 52% at 18% 20%, rgb(61 85 176 / .08) 0%, transparent 72%),
+    radial-gradient(76% 48% at 84% 78%, rgb(138 176 226 / .07) 0%, transparent 72%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.88' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .28 0 0 0 0 .18 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  will-change: opacity;
+}
+.theme-dark .bm8-rxturn-sketch-veil {
+  background-color: var(--bm7-surface, #1b2031);
+  background-image:
+    radial-gradient(82% 52% at 18% 20%, rgb(143 162 240 / .10) 0%, transparent 72%),
+    radial-gradient(76% 48% at 84% 78%, rgb(96 146 228 / .08) 0%, transparent 72%);
+}
+.bm8-rxturn-img-sketch {
+  opacity: .06 !important;
+  transition: opacity .30s cubic-bezier(.22, 1, .36, 1) !important;
+}
+.bm8-rxturn-img-ready {
+  opacity: 1 !important;
+  transition: opacity .30s cubic-bezier(.22, 1, .36, 1) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .bm8-fx-band, .bm8-fx-bloomwrap, .bm8-fx-wipe, .bm8-dw-fx, .bm8-rxturn-overlay { display: none !important; }
+  .bm8-fx-band, .bm8-fx-bloomwrap, .bm8-fx-wipe, .bm8-dw-fx, .bm8-rxturn-overlay, .bm8-rxturn-sketch-veil { display: none !important; }
   .bm8-ws-paper-next, .bm8-ws-paper-prev, .bm8-ws-glow-next, .bm8-ws-glow-prev, .bm8-ws-cinema-in,
   .bm8-ws-roxy-next, .bm8-ws-roxy-prev, .bm8-paper-in, .bm8-glow-in, .bm8-cinema-in,
   .bm8-paper-out, .bm8-glow-out, .bm8-cinema-out, .bm8-dw-in, .bm8-dw-out, .bm8-dw-lite-in, .bm8-dw-lite-out,

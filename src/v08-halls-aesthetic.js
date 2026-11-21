@@ -26,7 +26,8 @@ div.curator-desk-root,
   container-type: inline-size;
   container-name: curator-desk bmdesk;
   color: var(--bm7-text, var(--text-normal));
-  overflow-x: hidden !important;
+  overflow-x: clip !important;
+  overflow-y: visible !important;
 }
 
 .curator-unified-workspace {

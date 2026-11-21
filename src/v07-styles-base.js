@@ -134,6 +134,15 @@ module.exports = String.raw`
   --text-accent: var(--bm7-accent);
   background: var(--bm7-bg);
 }
+/* 带独立底色的番剧档案馆工作台：四角圆润、永远撑满可视区，外侧留白透明透出 Obsidian 宿主背景 */
+.curator-desk-root.bm7-root:not([data-bm7-theme="follow"]){
+  border-radius: 18px;
+}
+@media (max-width: 768px){
+  .curator-desk-root.bm7-root:not([data-bm7-theme="follow"]){
+    border-radius: 14px;
+  }
+}
 .bm7-root:not([data-bm7-theme="follow"]) .curator-desk-topbar,
 .bm7-root:not([data-bm7-theme="follow"]) .curator-workspace-mode-bar,
 .bm7-root:not([data-bm7-theme="follow"]) .curator-catalog-toolbar{

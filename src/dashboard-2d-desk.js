@@ -1885,6 +1885,12 @@ function renderCatalogSection(plugin, catalogMount, state, helpers) {
     } catch (e) {}
     catalogMount._catalogResizeObserver = null;
   }
+  if (typeof catalogMount._catalogBatchCancel === "function") {
+    try {
+      catalogMount._catalogBatchCancel();
+    } catch (e) {}
+    catalogMount._catalogBatchCancel = null;
+  }
 
   const allItems = state.items || [];
   if (allItems.length === 0) {
@@ -2350,12 +2356,36 @@ function createGalleryPrimaryQuietButton(plugin, item, docRef) {
  * 模式 A：画廊封面模式（纸本档案封套卡片，固定高度行高对齐，支持默认两排响应式折叠与展开）
  */
 function renderCatalogGalleryMode(plugin, container, items, state, helpers, catalogMount) {
+  if (catalogMount && typeof catalogMount._catalogBatchCancel === "function") {
+    try {
+      catalogMount._catalogBatchCancel();
+    } catch (_) {}
+    catalogMount._catalogBatchCancel = null;
+  }
+
   const grid = container.createDiv("curator-gallery-grid");
   const cardEls = [];
+  let builtCount = 0;
+  let batchCancelled = false;
+  let batchRafId = 0;
+  let batchTid = 0;
 
-  let itemIdx = 0;
-  for (const item of items) {
-    const curItemIdx = itemIdx++;
+  const cancelBatch = () => {
+    batchCancelled = true;
+    if (batchRafId && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(batchRafId);
+      batchRafId = 0;
+    }
+    if (batchTid) {
+      clearTimeout(batchTid);
+      batchTid = 0;
+    }
+  };
+  if (catalogMount) {
+    catalogMount._catalogBatchCancel = cancelBatch;
+  }
+
+  const appendGalleryCard = (item, curItemIdx) => {
     const edition = extractEditionInfo(item);
     const card = grid.createDiv("curator-gallery-card bangumi-grid-card");
     cardEls.push(card);
@@ -2684,7 +2714,19 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       e.stopPropagation();
       showGalleryCardMenu(e);
     };
-  }
+  };
+
+  const buildUpTo = (targetLimit) => {
+    const end = Math.min(items.length, Math.max(builtCount, targetLimit));
+    while (builtCount < end) {
+      appendGalleryCard(items[builtCount], builtCount);
+      builtCount += 1;
+    }
+  };
+
+  // 首帧仅同步渲染铺满首屏所需的卡片（4K 大屏与手机均瞬间满屏，< 8ms 零阻塞翻页）
+  const initialSyncBatch = state.catalogExpanded ? 32 : 28;
+  buildUpTo(initialSyncBatch);
 
   // 两排预览折叠条与 ResizeObserver 响应式列数计算
   const foldBar = container.createDiv("curator-catalog-fold-bar");
@@ -2728,19 +2770,67 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
     return Math.max(1, Math.floor((w + gap) / (minCardW + gap)));
   };
 
+  const scheduleRemainingCards = (startDelayMs = 120) => {
+    if (batchCancelled || !state.catalogExpanded || builtCount >= items.length) return;
+    if (batchTid || batchRafId) return;
+    const pump = () => {
+      batchRafId = 0;
+      if (batchCancelled || !grid.isConnected || !state.catalogExpanded) return;
+      const before = builtCount;
+      buildUpTo(builtCount + 44);
+      for (let i = before; i < builtCount; i++) {
+        cardEls[i].classList.remove("is-hidden-by-fold");
+      }
+      if (builtCount < items.length) {
+        if (typeof requestAnimationFrame === "function") {
+          batchRafId = requestAnimationFrame(pump);
+        } else {
+          batchTid = setTimeout(() => {
+            batchTid = 0;
+            pump();
+          }, 16);
+        }
+      }
+    };
+    if (startDelayMs > 0) {
+      batchTid = setTimeout(() => {
+        batchTid = 0;
+        if (!batchCancelled && grid.isConnected && state.catalogExpanded) {
+          if (typeof requestAnimationFrame === "function") {
+            batchRafId = requestAnimationFrame(pump);
+          } else {
+            pump();
+          }
+        }
+      }, startDelayMs);
+    } else if (typeof requestAnimationFrame === "function") {
+      batchRafId = requestAnimationFrame(pump);
+    } else {
+      pump();
+    }
+  };
+
   const applyGalleryTwoRowFold = () => {
     const cols = computeColumnsPerRow();
     const maxVisible = Math.max(2, cols * 2);
-    const total = cardEls.length;
+    const total = items.length;
     const hasMore = total > maxVisible;
     const isCollapsed = !state.catalogExpanded && hasMore;
+
+    if (isCollapsed && builtCount < maxVisible) {
+      buildUpTo(maxVisible);
+    }
 
     grid.classList.toggle("is-collapsed-2rows", isCollapsed);
     grid.dataset.columnsPerRow = String(cols);
     grid.dataset.twoRowLimit = String(maxVisible);
 
-    for (let i = 0; i < total; i++) {
+    for (let i = 0; i < cardEls.length; i++) {
       cardEls[i].classList.toggle("is-hidden-by-fold", isCollapsed && i >= maxVisible);
+    }
+
+    if (!isCollapsed && builtCount < total) {
+      scheduleRemainingCards(120);
     }
 
     if (!hasMore) {
@@ -2760,7 +2850,13 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
     e.preventDefault();
     scrollUnrollMorph(container, () => {
       state.catalogExpanded = !state.catalogExpanded;
+      if (state.catalogExpanded && builtCount < items.length) {
+        buildUpTo(Math.min(items.length, builtCount + 48));
+      }
       applyGalleryTwoRowFold();
+      if (state.catalogExpanded && builtCount < items.length) {
+        scheduleRemainingCards(16);
+      }
     });
   };
 
@@ -6393,7 +6489,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
     persistDeskPrefs(plugin, state);
 
-    const applyModeDomAndRender = () => {
+    const applyModeDomAndRender = (keepPaneEl = null) => {
       unifiedWorkspace.dataset.activeMode = targetMode;
       container.dataset.activeMode = targetMode;
       deskModeBtn.classList.toggle("is-active", targetMode === "desk");
@@ -6406,20 +6502,26 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
       workspaceStage.classList.remove("is-switching-to-catalog", "is-switching-to-desk");
 
-      deskMount.classList.toggle("is-workspace-pane-active", targetMode === "desk");
-      deskMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "desk");
-      catalogMount.classList.toggle("is-workspace-pane-active", targetMode === "catalog");
-      catalogMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "catalog");
-      ratingsMount.classList.toggle("is-workspace-pane-active", targetMode === "ratings");
-      ratingsMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "ratings");
-      characterMount.classList.toggle("is-workspace-pane-active", targetMode === "character");
-      characterMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "character");
-      galleryMount.classList.toggle("is-workspace-pane-active", targetMode === "gallery");
-      galleryMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "gallery");
-      voiceMount.classList.toggle("is-workspace-pane-active", targetMode === "voice");
-      voiceMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "voice");
-      gameMount.classList.toggle("is-workspace-pane-active", targetMode === "game");
-      gameMount.classList.toggle("is-workspace-pane-hidden", targetMode !== "game");
+      const syncPaneVis = (paneEl, modeKey) => {
+        if (!paneEl) return;
+        const isTarget = targetMode === modeKey;
+        if (keepPaneEl && paneEl === keepPaneEl && !isTarget) {
+          // 正在翻走的旧页保持在文档内且维持原活跃显示态，绝不进 display:none，避免重排与纹理销毁闪烁
+          paneEl.classList.remove("is-workspace-pane-hidden");
+          paneEl.classList.add("is-workspace-pane-active");
+          return;
+        }
+        paneEl.classList.toggle("is-workspace-pane-active", isTarget);
+        paneEl.classList.toggle("is-workspace-pane-hidden", !isTarget);
+      };
+
+      syncPaneVis(deskMount, "desk");
+      syncPaneVis(catalogMount, "catalog");
+      syncPaneVis(ratingsMount, "ratings");
+      syncPaneVis(characterMount, "character");
+      syncPaneVis(galleryMount, "gallery");
+      syncPaneVis(voiceMount, "voice");
+      syncPaneVis(gameMount, "game");
 
       if (targetMode === "catalog") {
         renderCatalogSection(plugin, catalogMount, state, runtimeHelpers);
@@ -6942,10 +7044,11 @@ function getCuratorDeskStyles() {
     /* 0. 消除 Obsidian ItemView 外层重复标题「动画仪表盘」与冗余留白，同时保留外层导航箭头与视图操作按钮 */
     ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-header{height:28px !important;min-height:28px !important;padding:0 10px !important;border-bottom:none !important;background:transparent !important;}",
     ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-header .view-header-title-container{visibility:hidden !important;pointer-events:none !important;}",
-    ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view{padding:4px 14px 28px !important;overflow-x:hidden !important;}",
-    /* 容器级响应式工作台（宽屏提升约 14% 有效编目面积，同时保留两侧纸本台面呼吸留白，绝不产生横向溢出） */
-    ".bangumi-score-dashboard{width:100%;max-width:100%;box-sizing:border-box;container-type:inline-size;container-name:curator-desk-outer;}",
-    ".curator-desk-root{width:min(98.5%, 2240px);max-width:2240px;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;container-type:inline-size;container-name:curator-desk;}",
+    ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view{padding:6px 10px 12px 14px !important;overflow-x:hidden !important;overflow-y:scroll !important;scrollbar-gutter:stable;}",
+    ".workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view::-webkit-scrollbar-track{background:transparent !important;}",
+    /* 容器级响应式工作台（满屏高度承接短页面底色 + 宽屏提升有效编目面积，绝不产生横向溢出） */
+    ".bangumi-score-dashboard{width:100%;max-width:100%;min-height:100%;display:flex;flex-direction:column;box-sizing:border-box;container-type:inline-size;container-name:curator-desk-outer;}",
+    ".curator-desk-root{width:min(98.5%, 2240px);max-width:2240px;flex:1 0 auto;min-height:100%;margin:0 auto;padding:6px 8px 42px;color:var(--text-normal);box-sizing:border-box;container-type:inline-size;container-name:curator-desk;}",
     ".is-wand-charging{user-select:none !important;-webkit-user-select:none !important;}",
     ".curator-mono{font-variant-numeric:tabular-nums;font-family:var(--font-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace);}",
     /* 1. 统一单一顶栏（支持 Obsidian 左右侧边栏单开/双开下的容器级自适应网格，彻底杜绝 6 行窄条高塔挤压） */
@@ -8132,10 +8235,10 @@ function getCuratorDeskStyles() {
     /* 容器窄宽度（左右侧边栏展开）与移动端窄屏触控自适应（置于级联末尾以确保覆盖子模块桌面间距） */
     ".curator-gallery-poster-wrap{aspect-ratio:2 / 3 !important;background:var(--bm7-surface-2, var(--background-secondary));}",
     "@container curator-desk-outer (max-width: 768px){",
-    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:6px 4px 104px !important;box-sizing:border-box !important;}",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:clip !important;overflow-y:visible !important;padding:6px 4px 104px !important;box-sizing:border-box !important;}",
     "}",
     "@container curator-desk (max-width: 760px){",
-    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
+    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow-x:clip !important;overflow-y:visible !important;}",
     "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:6px !important;padding:2px 0 8px !important;margin-bottom:0 !important;min-width:0 !important;}",
     "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;}",
     "  .curator-workspace-mode-btn{width:100% !important;min-height:38px !important;height:38px !important;justify-content:center !important;padding:0 6px !important;font-size:12px !important;gap:4px !important;}",
@@ -8150,9 +8253,9 @@ function getCuratorDeskStyles() {
     "  .curator-starter-desk{padding:15px 14px;}",
     "  .curator-starter-inline-row{flex-direction:column;align-items:stretch;}",
     "}",
-    "body.is-mobile .bangumi-score-dashboard-view.view-content{padding:6px 8px 0 !important;}",
+    "body.is-mobile .workspace-leaf-content[data-type='bangumi-score-dashboard-view'] > .view-content.bangumi-score-dashboard-view,body.is-mobile .bangumi-score-dashboard-view.view-content{padding:6px 6px 10px !important;overflow-y:auto !important;scrollbar-gutter:auto;}",
     "@media (max-width: 768px){",
-    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:hidden !important;padding:4px 2px calc(118px + env(safe-area-inset-bottom, 0px)) !important;box-sizing:border-box !important;}",
+    "  .curator-desk-root{max-width:100% !important;min-width:0 !important;overflow-x:clip !important;overflow-y:visible !important;padding:4px 2px calc(118px + env(safe-area-inset-bottom, 0px)) !important;box-sizing:border-box !important;}",
     "  .curator-desk-topbar{padding:8px 10px !important;margin-bottom:8px !important;border-radius:12px !important;gap:6px !important;}",
     "  .curator-brand-kicker{display:none !important;}",
     "  .curator-topbar-row1{display:flex !important;flex-direction:row !important;align-items:center !important;justify-content:space-between !important;flex-wrap:nowrap !important;gap:6px !important;}",
@@ -8164,7 +8267,7 @@ function getCuratorDeskStyles() {
     "  .curator-topbar-actions{display:flex !important;flex-wrap:nowrap !important;align-items:center !important;justify-content:flex-end !important;gap:5px !important;flex-shrink:0 !important;}",
     "  .curator-top-btn{height:32px !important;padding:0 9px !important;font-size:12px !important;gap:4px !important;white-space:nowrap !important;}",
     "  .curator-top-btn.is-mobile-more-btn{width:32px !important;padding:0 !important;}",
-    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow:hidden !important;}",
+    "  .curator-unified-workspace{max-width:100% !important;min-width:0 !important;padding:0 !important;overflow-x:clip !important;overflow-y:visible !important;}",
     "  .curator-workspace-mode-bar{flex-direction:column !important;align-items:stretch !important;gap:6px !important;padding:2px 0 8px !important;margin-bottom:4px !important;min-width:0 !important;}",
     "  .curator-workspace-mode-tabs{display:grid !important;grid-template-columns:repeat(3,minmax(0,1fr)) !important;width:100% !important;max-width:100% !important;min-width:0 !important;box-sizing:border-box !important;gap:4px !important;padding:4px !important;}",
     "  .curator-workspace-mode-btn{width:100% !important;min-width:0 !important;min-height:38px !important;height:38px !important;overflow:hidden !important;justify-content:center !important;padding:0 5px !important;gap:3px !important;font-size:12px !important;line-height:1.2 !important;}",
