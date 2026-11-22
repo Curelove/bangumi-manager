@@ -943,7 +943,7 @@ function renderAnimeStage(host, ctx) {
           );
         }
 
-        if (desktop && item.downloadPath && item.downloadPath !== "无" && actions.openFolder) {
+        if (desktop && ((item.downloadPath && item.downloadPath !== "无") || (local && local.hasAnyBinding)) && actions.openFolder) {
           box.appendChild(
             menuItem("folder", "打开本地番剧文件夹", () => {
               close();
@@ -952,21 +952,18 @@ function renderAnimeStage(host, ctx) {
           );
         }
 
-        if (
-          desktop &&
-          local &&
-          (local.hasAttentionNeeded || local.subfolderCount > 0 || local.extraCount > 0) &&
-          actions.openLocalDiagnostics
-        ) {
-          const diagLabel = local.hasAttentionNeeded
-            ? "核对重复剧集 / 本地目录异常"
-            : local.extraCount > 0
-            ? `查看子目录与特典视频（${local.extraCount} 项）`
-            : `管理子目录剧集（${local.subfolderCount} 集）`;
+        if (desktop && (actions.openLocalLinker || actions.openLocalDiagnostics)) {
+          const openLinkerFn = actions.openLocalLinker || actions.openLocalDiagnostics;
+          const linkerLabel =
+            local && local.hasMissingMedia
+              ? "关联本地视频（有路径待确认）"
+              : local && local.hasAttentionNeeded
+              ? "关联本地视频（有重集待确认）"
+              : "关联本地视频…";
           box.appendChild(
-            menuItem(local.hasAttentionNeeded ? "alert" : "package", diagLabel, () => {
+            menuItem(local && local.hasAttentionNeeded ? "alert" : "film", linkerLabel, () => {
               close();
-              actions.openLocalDiagnostics(item, () => {
+              openLinkerFn(item, () => {
                 if (onUpdated) onUpdated();
               });
             })
@@ -1471,26 +1468,29 @@ function renderAnimeStage(host, ctx) {
                   [icon("rss", 13), h("span", { text: "自动追更中" })]
                 )
               : null,
-            local && local.hasAttentionNeeded && actions.openLocalDiagnostics
+            local && local.hasAttentionNeeded && (actions.openLocalLinker || actions.openLocalDiagnostics)
               ? h(
                   "button.bm7-hero-local-alert",
                   {
                     attr: { type: "button" },
-                    title: "本地目录存在同集重复版本或路径异常，点击查看并处理",
+                    title: "本地视频存在多版本或路径待确认，点击打开「本地视频关联」处理",
                     on: {
                       click: (ev) => {
                         ev.stopPropagation();
-                        actions.openLocalDiagnostics(item, () => applyItemMutation(item, {}));
+                        const openLinkerFn = actions.openLocalLinker || actions.openLocalDiagnostics;
+                        openLinkerFn(item, () => applyItemMutation(item, {}));
                       }
                     }
                   },
                   [
                     icon("alert", 13),
-                    local.suspectedParent
-                      ? "目录层级待核对"
+                    local.hasMissingMedia
+                      ? "路径待确认"
+                      : local.suspectedParent
+                      ? "文件夹待确认"
                       : local.duplicateCount > 0
-                      ? `有重集 (${local.duplicateCount}话)`
-                      : "目录待核对"
+                      ? `有重集 (${local.duplicateCount}集)`
+                      : "本地视频待确认"
                   ]
                 )
               : null,

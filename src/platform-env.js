@@ -599,6 +599,230 @@ async function pickNativeFolderOnDesktop(options = {}) {
   return "";
 }
 
+/**
+ * 跨平台桌面原生视频/文件选择框（支持单选与多选，兼容 Windows / macOS / Linux，无需手敲路径）
+ */
+async function pickNativeFilesOnDesktop(options = {}) {
+  if (!isDesktopNodeAvailable()) return [];
+  const title = String(options.title || "选择视频文件").replace(/["'\r\n]/g, " ");
+  const initialDir = String(options.initialDir || "").trim();
+  const multi = options.multi !== false;
+  const exts = Array.isArray(options.extensions) && options.extensions.length > 0
+    ? options.extensions.map((e) => String(e || "").replace(/^\./, "").toLowerCase()).filter(Boolean)
+    : ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts"];
+
+  // 1. 尝试 Electron remote.dialog（如可用）
+  try {
+    const electron = tryRequireNode("electron");
+    const remote = electron?.remote || tryRequireNode("@electron/remote");
+    if (remote?.dialog && typeof remote.dialog.showOpenDialog === "function") {
+      const properties = multi ? ["openFile", "multiSelections"] : ["openFile"];
+      const res = await remote.dialog.showOpenDialog({
+        title,
+        defaultPath: initialDir || undefined,
+        properties,
+        filters: [
+          { name: "视频文件", extensions: exts },
+          { name: "所有文件", extensions: ["*"] }
+        ]
+      });
+      if (res && !res.canceled && Array.isArray(res.filePaths)) {
+        return res.filePaths.filter(Boolean);
+      }
+      if (res && res.canceled) return [];
+    }
+  } catch (_) {}
+
+  const cp = tryRequireNode("child_process");
+  const fsMod = tryRequireNode("fs");
+  const pathMod = tryRequireNode("path");
+  const plat = typeof process !== "undefined" ? process.platform : "";
+
+  const execFileAsync = (cmd, args, timeoutMs = 120000) =>
+    new Promise((resolve) => {
+      if (!cp || typeof cp.execFile !== "function") {
+        resolve({ ok: false, stdout: "" });
+        return;
+      }
+      try {
+        cp.execFile(
+          cmd,
+          args,
+          { encoding: "utf8", windowsHide: true, timeout: timeoutMs },
+          (err, stdout) => {
+            if (err) {
+              resolve({ ok: false, stdout: String(stdout || "") });
+              return;
+            }
+            resolve({ ok: true, stdout: String(stdout || "") });
+          }
+        );
+      } catch (_) {
+        resolve({ ok: false, stdout: "" });
+      }
+    });
+
+  // 2. Windows 原生 OpenFileDialog（强制 UTF-8，支持单选/多选）
+  if (plat === "win32" && cp) {
+    const safeInit =
+      initialDir && fsMod && fsMod.existsSync(initialDir)
+        ? pathMod.normalize(initialDir).replace(/'/g, "''")
+        : "";
+    const filterPattern = exts.map((e) => `*.${e}`).join(";");
+    const psScript = [
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;",
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$dlg = New-Object System.Windows.Forms.OpenFileDialog;",
+      `$dlg.Title = '${title.replace(/'/g, "''")}';`,
+      `$dlg.Multiselect = ${multi ? "$true" : "$false"};`,
+      `$dlg.Filter = '视频文件 (${filterPattern})|${filterPattern}|所有文件 (*.*)|*.*';`,
+      safeInit ? `$dlg.InitialDirectory = '${safeInit}';` : "",
+      "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dlg.FileNames | ForEach-Object { Write-Output $_ } }"
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const winRes = await execFileAsync("powershell.exe", ["-NoProfile", "-STA", "-Command", psScript]);
+    if (winRes.ok) {
+      return winRes.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  // 3. macOS Finder 原生文件选择框
+  if (plat === "darwin" && cp) {
+    const safeInit = initialDir && fsMod && fsMod.existsSync(initialDir) ? initialDir.replace(/"/g, '\\"') : "";
+    const multiClause = multi ? "with multiple selections allowed" : "";
+    const defaultClause = safeInit ? `default location (POSIX file "${safeInit}")` : "";
+    const osa = [
+      `set picked to choose file with prompt "${title}" ${defaultClause} ${multiClause}`,
+      multi
+        ? 'set out to ""\nrepeat with f in picked\nset out to out & POSIX path of f & linefeed\nend repeat\nreturn out'
+        : 'return POSIX path of picked'
+    ].join("\n");
+    const macRes = await execFileAsync("osascript", ["-e", osa]);
+    if (macRes.ok) {
+      return macRes.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [];
+  }
+
+  // 4. Linux Zenity / KDialog
+  if (plat === "linux" && cp) {
+    const zenArgs = ["--file-selection", `--title=${title}`];
+    if (multi) zenArgs.push("--multiple", "--separator=\n");
+    const zenRes = await execFileAsync("zenity", zenArgs);
+    if (zenRes.ok && zenRes.stdout.trim()) {
+      return zenRes.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    const kdRes = await execFileAsync("kdialog", ["--getopenfilename", initialDir || "."]);
+    if (kdRes.ok && kdRes.stdout.trim()) {
+      return [kdRes.stdout.trim()];
+    }
+  }
+
+  // 5. 兜底：HTML5 <input type="file">
+  if (typeof document !== "undefined") {
+    return await new Promise((resolve) => {
+      const inp = document.createElement("input");
+      inp.type = "file";
+      if (multi) inp.multiple = true;
+      inp.accept = exts.map((e) => `.${e}`).join(",");
+      let settled = false;
+      const done = (arr) => {
+        if (settled) return;
+        settled = true;
+        resolve(Array.isArray(arr) ? arr : []);
+      };
+      inp.onchange = () => {
+        const list = [];
+        const files = inp.files || [];
+        for (let i = 0; i < files.length; i++) {
+          const full = getNativeFilePathCrossPlatform(files[i]);
+          if (full) list.push(full);
+        }
+        done(list);
+      };
+      inp.oncancel = () => done([]);
+      inp.click();
+    });
+  }
+
+  return [];
+}
+
+/**
+ * 列出当前桌面环境可用盘符与常见媒体目录
+ */
+function listAvailableDrivesOnDesktop() {
+  if (!isDesktopNodeAvailable()) return [];
+  const fsMod = tryRequireNode("fs");
+  const pathMod = tryRequireNode("path");
+  const osMod = tryRequireNode("os");
+  if (!fsMod || !pathMod) return [];
+
+  const out = [];
+  const seen = new Set();
+  const plat = typeof process !== "undefined" ? process.platform : "";
+  const pushEntry = (rawPath, label, kind) => {
+    const clean = String(rawPath || "").trim();
+    if (!clean) return;
+    const normKey = plat === "win32" ? clean.toLowerCase() : clean;
+    if (seen.has(normKey)) return;
+    try {
+      if (!fsMod.existsSync(clean)) return;
+      seen.add(normKey);
+      out.push({ path: clean, label, kind });
+    } catch (_) {}
+  };
+
+  const homeDir = osMod && typeof osMod.homedir === "function" ? osMod.homedir() : "";
+
+  if (plat === "win32") {
+    for (let code = 67; code <= 90; code++) {
+      const letter = String.fromCharCode(code);
+      const rootPath = `${letter}:\\`;
+      pushEntry(rootPath, `${letter}: 盘`, "drive");
+    }
+    if (homeDir) {
+      pushEntry(pathMod.join(homeDir, "Downloads"), "系统下载", "quick");
+      pushEntry(pathMod.join(homeDir, "Videos"), "系统视频", "quick");
+      pushEntry(pathMod.join(homeDir, "Desktop"), "桌面", "quick");
+    }
+    for (const extra of ["D:\\Downloads", "E:\\Downloads", "D:\\Anime", "E:\\Anime"]) {
+      if (fsMod.existsSync(extra)) {
+        pushEntry(extra, extra.replace(/\\/g, "/"), "quick");
+      }
+    }
+  } else {
+    pushEntry("/", "根目录 /", "drive");
+    if (homeDir) {
+      pushEntry(homeDir, "主目录 ~", "quick");
+      pushEntry(pathMod.join(homeDir, "Downloads"), "下载 Downloads", "quick");
+      pushEntry(pathMod.join(homeDir, "Movies"), "影片 Movies", "quick");
+      pushEntry(pathMod.join(homeDir, "Videos"), "视频 Videos", "quick");
+    }
+    if (plat === "darwin" && fsMod.existsSync("/Volumes")) {
+      try {
+        for (const vol of fsMod.readdirSync("/Volumes")) {
+          if (!vol || vol.startsWith(".")) continue;
+          pushEntry(pathMod.join("/Volumes", vol), `卷 ${vol}`, "drive");
+        }
+      } catch (_) {}
+    }
+  }
+
+  return out;
+}
+
 function normalizeVaultRelPath(rawPath) {
   const posix = toPosixPath(rawPath).replace(/^\/+/, "").replace(/\/+$/, "");
   if (!posix) return "";
@@ -1057,6 +1281,8 @@ module.exports = {
   toExternalLocalMediaUrl,
   getNativeFilePathCrossPlatform,
   pickNativeFolderOnDesktop,
+  pickNativeFilesOnDesktop,
+  listAvailableDrivesOnDesktop,
   normalizeVaultRelPath,
   posixJoin,
   joinPosixPath,

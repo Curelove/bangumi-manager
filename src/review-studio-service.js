@@ -1,6 +1,7 @@
 const noteUtils = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const animeActivityService = require("./anime-activity-and-random-service.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 const v07Core = require("./v07-core.js");
 const {
   tryRequireNode,
@@ -363,13 +364,12 @@ function detectInstalledVideoPlayers(plugin) {
 /**
  * 在动画本地文件夹中查找指定集数对应的视频文件
  */
-function findLocalEpisodeVideoFile(item, targetEpisode = null) {
-  const rawPath = String(item?.downloadPath || "").trim();
-  if (!rawPath || rawPath === "无") {
+function findLocalEpisodeVideoFile(item, targetEpisode = null, plugin = null) {
+  const localResult = localMediaIndexService.resolveAnimeLocalMedia(plugin, item);
+  if (!localResult || !localResult.hasAnyBinding) {
     return { found: false, reason: "no_download_path", videoFile: null, localResult: null };
   }
-  const localResult = noteUtils.inspectLocalFolder(rawPath, item?.watchedEpisodes);
-  if (!localResult || localResult.error || !Array.isArray(localResult.videoFiles) || localResult.videoFiles.length === 0) {
+  if ((localResult.error && localResult.fileCount === 0) || !Array.isArray(localResult.videoFiles) || localResult.videoFiles.length === 0) {
     return {
       found: false,
       reason: localResult?.error || "no_video_files",
@@ -436,22 +436,28 @@ async function launchVideoAtEpisodeAndTimestamp(plugin, item, options = {}) {
     return { ok: false, fallbackCopied: Boolean(normTs), mobileEnv: true };
   }
 
-  const matchRes = findLocalEpisodeVideoFile(item, episode);
+  const matchRes = findLocalEpisodeVideoFile(item, episode, plugin);
   if (!matchRes.found || !matchRes.videoFile) {
     // 温和降级：复制时间码到剪贴板并给出友善轻提示，绝不报错打扰
     if (normTs && typeof navigator !== "undefined" && navigator.clipboard) {
       const copyPayload = episode ? `EP${String(episode).padStart(2, "0")} ${normTs}` : normTs;
       await navigator.clipboard.writeText(copyPayload).catch(() => {});
     }
-    if (NoticeClass) {
-      const epText = episode ? `第 ${String(episode).padStart(2, "0")} 话` : "对应剧集";
+    const missingItem =
+      (matchRes?.localResult?.missingItems || []).find((m) => Number(m.episode) === Number(episode)) ||
+      matchRes?.localResult?.missingItems?.[0] ||
+      null;
+    if (missingItem) {
+      localMediaIndexService.notifyMissingEpisodeWithRecovery(plugin, item, episode, missingItem);
+    } else if (NoticeClass) {
+      const epText = episode ? `第 ${String(episode).padStart(2, "0")} 集` : "对应剧集";
       if (normTs) {
         new NoticeClass(
           `本地暂未找到《${item?.name || "作品"}》${epText}视频文件，已将时间码 ${normTs} 复制到剪贴板。`,
           4500
         );
       } else {
-        new NoticeClass(`本地目录暂未找到《${item?.name || "作品"}》${epText}视频文件。`, 4000);
+        new NoticeClass(`本地暂未找到《${item?.name || "作品"}》${epText}视频文件。`, 4000);
       }
     }
     return { ok: false, fallbackCopied: Boolean(normTs), matchRes };
@@ -986,10 +992,9 @@ function openAnimeReviewStudioModal(plugin, item, options = {}) {
       const longCount = reviews.filter((r) => r.type === "long" && !r.isPlaceholder).length;
 
       const playerInfo = detectInstalledVideoPlayers(this.plugin);
-      const localRes =
-        this.item.downloadPath && this.item.downloadPath !== "无"
-          ? noteUtils.inspectLocalFolder(this.item.downloadPath, this.item.watchedEpisodes)
-          : null;
+      const localRes = isDesktopNodeAvailable()
+        ? localMediaIndexService.resolveAnimeLocalMedia(this.plugin, this.item)
+        : null;
 
       // ==================== 1. 顶部档案抬头栏 ====================
       const header = contentEl.createDiv("curator-rs-header");

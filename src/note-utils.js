@@ -3058,6 +3058,11 @@ function classifyWatchUrl(rawUrl) {
 }
 
 module.exports = {
+  VIDEO_EXTENSIONS,
+  SKIP_PURE_ASSET_DIRS,
+  EXTRA_SUBDIR_NAME_RX,
+  EXTRA_SUBDIR_SUFFIX_RX,
+  GENERIC_PARENT_ROOT_NAME_RX,
   cleanValue,
   parseFrontmatter,
   extractWatchedEpisodes,
@@ -3065,6 +3070,8 @@ module.exports = {
   classifyWatchUrl,
   expandTagEquivalents,
   matchesTagOrMetaQuery,
+  parseExplicitSeasonNumber,
+  isPackOrRangeTitle,
   inspectLocalFolder,
   getLocalStatusText,
   updateFrontmatterField,

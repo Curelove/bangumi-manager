@@ -153,6 +153,7 @@ const ICON_PATHS = {
   arrowUpRight: '<path d="M7 17 17 7"/><path d="M8 7h9v9"/>',
   pause: '<rect x="6.5" y="5.5" width="3.8" height="13" rx="1" fill="currentColor" stroke="none"/><rect x="13.7" y="5.5" width="3.8" height="13" rx="1" fill="currentColor" stroke="none"/>',
   volume: '<path d="M11 5.5 6.8 9H4.2a.7.7 0 0 0-.7.7v4.6a.7.7 0 0 0 .7.7h2.6L11 18.5z"/><path d="M14.8 9.2a4.2 4.2 0 0 1 0 5.6M17.6 6.8a7.6 7.6 0 0 1 0 10.4"/>',
+  volumeOff: '<path d="M11 5.5 6.8 9H4.2a.7.7 0 0 0-.7.7v4.6a.7.7 0 0 0 .7.7h2.6L11 18.5z"/><path d="m15.5 9.5 5 5M20.5 9.5l-5 5"/>',
   zoomIn: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2M11 8.5v5M8.5 11h5"/>',
   zoomOut: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2M8.5 11h5"/>',
   ruler: '<rect x="3.5" y="7.5" width="17" height="9" rx="1.8"/><path d="M7 7.5v3.2M10.5 7.5v2M14 7.5v3.2M17.5 7.5v2"/>',

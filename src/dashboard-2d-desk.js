@@ -4,6 +4,7 @@ const { setSamplePreviewActive } = require("./onboarding-sample-service.js");
 const { openLocalPathSafely, inspectLocalFolder, matchesTagOrMetaQuery } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const animeDownloadService = require("./anime-download-service.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 const reviewStudioService = require("./review-studio-service.js");
 const characterArchiveService = require("./character-archive-service.js");
 const multiHallArchiveService = require("./multi-hall-archive-service.js");
@@ -372,6 +373,7 @@ function computeLocalUpdatedItems(items, opts = {}) {
   if (!isDesktopNodeAvailable()) {
     return candidates;
   }
+  const pluginRef = opts && opts.plugin ? opts.plugin : null;
   const fsMod = tryRequireNode("fs");
   const preferCache = Boolean(opts && opts.preferCache);
   const maxAgeMs = Number(opts && opts.maxAgeMs) > 0 ? Number(opts.maxAgeMs) : 15000;
@@ -380,7 +382,10 @@ function computeLocalUpdatedItems(items, opts = {}) {
   for (const item of list) {
     try {
       const rawPath = String(item?.downloadPath || "").trim();
-      if (!rawPath || rawPath === "无") {
+      const hasPrimary = Boolean(rawPath && rawPath !== "无");
+      const extraRec = pluginRef ? localMediaIndexService.getAnimeBindingRecord(pluginRef, item) : null;
+      const hasExtra = localMediaIndexService.hasNonEmptyBindingRecord(extraRec);
+      if (!hasPrimary && !hasExtra) {
         if (item) {
           item._localInspect = null;
           item._localInspectPath = "";
@@ -390,17 +395,20 @@ function computeLocalUpdatedItems(items, opts = {}) {
       }
 
       const watchedNum = Number(item.watchedEpisodes) || 0;
+      const inspectKey = `${rawPath}::${extraRec?.updatedAt || 0}`;
       const canReuse =
         preferCache &&
         item._localInspect &&
-        item._localInspectPath === rawPath &&
+        item._localInspectPath === inspectKey &&
         item._localInspectWatched === watchedNum &&
         nowMs - (Number(item._localInspectAt) || 0) < maxAgeMs;
 
-      const localRes = canReuse ? item._localInspect : inspectLocalFolder(rawPath, item.watchedEpisodes);
-      if (!localRes || localRes.error) {
+      const localRes = canReuse
+        ? item._localInspect
+        : localMediaIndexService.resolveAnimeLocalMedia(pluginRef, item);
+      if (!localRes || (localRes.error && localRes.fileCount <= 0)) {
         item._localInspect = localRes || null;
-        item._localInspectPath = rawPath;
+        item._localInspectPath = inspectKey;
         item._localInspectWatched = watchedNum;
         item._localInspectAt = nowMs;
         continue;
@@ -413,7 +421,7 @@ function computeLocalUpdatedItems(items, opts = {}) {
       // 文件夹内无视频文件且无未看更新集数 -> 排除
       if (localRes.fileCount <= 0 && effectiveNewCount <= 0) {
         item._localInspect = localRes;
-        item._localInspectPath = rawPath;
+        item._localInspectPath = inspectKey;
         item._localInspectWatched = watchedNum;
         item._localInspectAt = nowMs;
         continue;
@@ -422,14 +430,14 @@ function computeLocalUpdatedItems(items, opts = {}) {
       // 已看完、抛弃或已弃的老番排除
       if (item.state === "抛弃" || item.state === "已弃" || (item.state === "已看" && effectiveNewCount <= 0)) {
         item._localInspect = localRes;
-        item._localInspectPath = rawPath;
+        item._localInspectPath = inspectKey;
         item._localInspectWatched = watchedNum;
         item._localInspectAt = nowMs;
         continue;
       }
 
-      let latestVideoMtime = Number(localRes.latestVideoMtime) || 0;
-      let latestUnwatchedMtime = 0;
+      let latestVideoMtime = Number(localRes.latestFileTimeMs || localRes.latestVideoMtime) || 0;
+      let latestUnwatchedMtime = Number(localRes.latestUnwatchedTimeMs) || 0;
       if (!canReuse && Array.isArray(localRes.videoFiles)) {
         for (const vf of localRes.videoFiles) {
           let t = Math.max(Number(vf.addedTimeMs) || 0, Number(vf.mtimeMs) || 0, Number(vf.birthtimeMs) || 0);
@@ -451,7 +459,7 @@ function computeLocalUpdatedItems(items, opts = {}) {
         newCount: effectiveNewCount,
         latestVideoMtime: latestUnwatchedMtime || latestVideoMtime
       };
-      item._localInspectPath = rawPath;
+      item._localInspectPath = inspectKey;
       item._localInspectWatched = watchedNum;
       item._localInspectAt = nowMs;
       candidates.push(item);
@@ -1069,8 +1077,8 @@ function renderActiveDeskSection(plugin, deskMount, state, helpers) {
     items.filter((it) => it.state === "想看"),
     "bgmScore_desc"
   );
-  // 真正基于本地视频文件夹剧集变化的「本地更新」列表（绝不混入无本地文件夹的完结老番）
-  const recentItems = computeLocalUpdatedItems(items);
+  // 真正基于本地视频文件夹剧集变化的「本地更新」列表（绝不混入无本地视频的完结老番）
+  const recentItems = computeLocalUpdatedItems(items, { plugin });
   const pinnedSeasons = getEffectivePinnedSeasons(plugin, items);
 
   const hasWatching = watchingItems.length > 0;
@@ -1500,13 +1508,13 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     plugin.openStateMenu(e, item);
   };
 
-  // 检测真实本地文件夹视频状态（仅桌面端可用，移动端保持清爽不误探桌面盘符）
+  // 检测真实本地视频状态（仅桌面端可用，移动端保持清爽不误探桌面盘符）
   const localResult =
-    isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无"
-      ? inspectLocalFolder(item.downloadPath, item.watchedEpisodes)
+    isDesktopNodeAvailable() && !item.isSamplePreviewItem
+      ? localMediaIndexService.resolveAnimeLocalMedia(plugin, item)
       : null;
 
-  if (localResult && !localResult.error && localResult.fileCount > 0) {
+  if (localResult && localResult.fileCount > 0) {
     const localPill = topMeta.createSpan({
       cls: `curator-local-ep-pill ${localResult.newCount > 0 ? "has-new" : "is-synced"}`,
       text:
@@ -1518,37 +1526,48 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
       localResult.anomalies?.subfolderStats?.totalInSubfolders > 0
         ? `（含子文件夹 ${localResult.anomalies.subfolderStats.totalInSubfolders} 集）`
         : "";
-    localPill.title = `本地文件夹共 ${localResult.fileCount} 集视频${subHint}，未看新集 ${localResult.newCount} 集（点击打开本地文件夹）`;
+    const primaryOpenDir =
+      (item.downloadPath && item.downloadPath !== "无" ? item.downloadPath : "") ||
+      localResult.folders?.find((f) => f.status === "ok")?.path ||
+      "";
+    localPill.title = `本地视频共 ${localResult.fileCount} 集${subHint}，未看新集 ${localResult.newCount} 集（点击${primaryOpenDir ? "打开本地文件夹" : "管理本地视频"}）`;
     localPill.onclick = async (e) => {
       e.preventDefault();
       e.stopPropagation();
-      await openLocalPathSafely(item.downloadPath);
+      if (primaryOpenDir) await openLocalPathSafely(primaryOpenDir);
+      else if (typeof plugin?.openLocalMediaLinkerModal === "function") await plugin.openLocalMediaLinkerModal(item);
     };
   }
   if (
     localResult &&
-    !localResult.error &&
     localResult.hasAttentionNeeded &&
-    typeof animeDownloadService?.openLocalFolderDiagnosticsModal === "function"
+    (typeof plugin?.openLocalMediaLinkerModal === "function" ||
+      typeof animeDownloadService?.openLocalFolderDiagnosticsModal === "function")
   ) {
     const dupCnt = Number(localResult.anomalies?.duplicateEpisodes?.length) || 0;
     const warnPill = topMeta.createSpan({
       cls: "curator-local-ep-pill is-warn",
-      text: localResult.anomalies?.suspectedParentContainer?.detected
-        ? "目录待核对"
+      text: localResult.hasMissingMedia
+        ? "路径待确认"
         : dupCnt > 0
         ? `重集 ×${dupCnt}`
-        : "目录待核对"
+        : "本地视频待确认"
     });
-    warnPill.title = "本地目录存在重复版本或路径层级待核对，点击打开详情处理";
+    warnPill.title = "本地视频存在多版本或路径待确认，点击打开「本地视频关联」处理";
     warnPill.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      animeDownloadService.openLocalFolderDiagnosticsModal(plugin, item, () => {
-        if (helpers.deskMount) {
-          renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
-        }
-      });
+      if (typeof plugin?.openLocalMediaLinkerModal === "function") {
+        plugin.openLocalMediaLinkerModal(item, {
+          onUpdated: () => {
+            if (helpers.deskMount) renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
+          }
+        });
+      } else {
+        animeDownloadService.openLocalFolderDiagnosticsModal(plugin, item, () => {
+          if (helpers.deskMount) renderActiveDeskSection(plugin, helpers.deskMount, state, helpers);
+        });
+      }
     };
   }
 
@@ -1633,6 +1652,13 @@ function renderDeskCard(plugin, parent, item, state, helpers, cardOpts = {}) {
     ev.preventDefault();
     ev.stopPropagation();
     const menu = new Menu();
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && typeof plugin?.openLocalMediaLinkerModal === "function") {
+      menu.addItem((mi) =>
+        mi.setTitle("关联本地视频…").setIcon("film").onClick(() => {
+          plugin.openLocalMediaLinkerModal(item);
+        })
+      );
+    }
     menu.addItem((mi) =>
       mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerDeskWand())
     );
@@ -2625,6 +2651,13 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
             })
         );
       }
+      if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && typeof plugin?.openLocalMediaLinkerModal === "function") {
+        menu.addItem((mi) =>
+          mi.setTitle("关联本地视频…").setIcon("film").onClick(() => {
+            plugin.openLocalMediaLinkerModal(item);
+          })
+        );
+      }
       if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
         menu.addItem((mi) =>
           mi.setTitle("打开本地文件夹").setIcon("folder").onClick(async () => {
@@ -2940,6 +2973,13 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       ev.preventDefault();
       ev.stopPropagation();
       const menu = new Menu();
+      if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && typeof plugin?.openLocalMediaLinkerModal === "function") {
+        menu.addItem((mi) =>
+          mi.setTitle("关联本地视频…").setIcon("film").onClick(() => {
+            plugin.openLocalMediaLinkerModal(item);
+          })
+        );
+      }
       menu.addItem((mi) =>
         mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => triggerRowWand())
       );
@@ -3202,17 +3242,36 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
       };
     }
 
-    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
-      const dirBtn = colActions.createEl("button", {
-        cls: "curator-table-action-btn",
-        text: "目录"
-      });
-      dirBtn.title = item.downloadPath;
-      dirBtn.onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await openLocalPathSafely(item.downloadPath);
-      };
+    if (isDesktopNodeAvailable() && !item.isSamplePreviewItem) {
+      const resolvedRow = localMediaIndexService.resolveAnimeLocalMedia(plugin, item);
+      const firstDir =
+        (item.downloadPath && item.downloadPath !== "无" ? item.downloadPath : "") ||
+        resolvedRow?.folders?.find((f) => f.status === "ok")?.path ||
+        "";
+      if (firstDir) {
+        const dirBtn = colActions.createEl("button", {
+          cls: "curator-table-action-btn",
+          text: "目录"
+        });
+        dirBtn.title = firstDir;
+        dirBtn.onclick = async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await openLocalPathSafely(firstDir);
+        };
+      }
+      if (typeof plugin?.openLocalMediaLinkerModal === "function") {
+        const linkBtn = colActions.createEl("button", {
+          cls: "curator-table-action-btn",
+          text: resolvedRow?.fileCount > 0 ? "视频" : "关联"
+        });
+        linkBtn.title = "打开本地视频关联（可绑定任意路径文件夹或单集文件）";
+        linkBtn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          plugin.openLocalMediaLinkerModal(item);
+        };
+      }
     }
 
     if (item.subjectId) {
@@ -5938,6 +5997,20 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     }
   }
 
+  // 本地视频关联入口按钮（仅桌面端显示）
+  if (!isMobileTopbar && isDesktopNodeAvailable() && typeof plugin?.openLocalMediaLinkerModal === "function") {
+    const linkerBtn = actionsCol.createEl("button", {
+      cls: "curator-top-btn"
+    });
+    v07Core.setBtnIconLabel(linkerBtn, "film", "本地视频");
+    linkerBtn.title = "打开「本地视频关联」工作台（浏览电脑文件夹、暂存整理、拖拽关联或按集指定，不移动原文件）";
+    linkerBtn.dataset.topAction = "local-media-linker";
+    linkerBtn.onclick = async (e) => {
+      e.preventDefault();
+      await plugin.openLocalMediaLinkerModal(null);
+    };
+  }
+
   // 进入 3D 原画展厅主入口按钮
   const enter3DBtn = actionsCol.createEl("button", {
     cls: "curator-top-btn is-3d-entry mod-cta"
@@ -6054,7 +6127,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
 
   // ==================== 2. 统一案头编目主工作台 (.curator-unified-workspace) + 展柜 + 年鉴 ====================
   const watchingCount = Number(metrics.stateCounts["在看"]) || 0;
-  const localUpdatedCount = computeLocalUpdatedItems(items).length;
+  const localUpdatedCount = computeLocalUpdatedItems(items, { plugin }).length;
 
   const validModes = ["desk", "catalog", "ratings", "character", "gallery", "voice", "game"];
   let effectiveWorkspaceMode = "desk";
@@ -6358,6 +6431,7 @@ async function renderCuratorDesk(plugin, container, options = {}, helpers = {}) 
     const curMetrics = computeDeskMetrics(state.items || []);
     const curWatching = Number(curMetrics.stateCounts["在看"]) || 0;
     const curLocalUpd = computeLocalUpdatedItems(state.items || [], {
+      plugin,
       preferCache: Boolean(ribbonOpts && ribbonOpts.preferCache)
     }).length;
     const curCharCount = Array.isArray(plugin.settings?.characterCollection)

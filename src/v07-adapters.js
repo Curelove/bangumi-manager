@@ -23,6 +23,7 @@ const reviewStudioService = require("./review-studio-service.js");
 const seasonalRadarService = require("./seasonal-radar-service.js");
 const gameMultisourceApi = require("./game-multisource-api.js");
 const gameStatsService = require("./game-stats-and-groups-service.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 let _cachedCapsuleSvc = null;
 function getDesktopCapsuleService() {
   if (isMobileEnv()) return null;
@@ -265,6 +266,7 @@ function invalidateLocalFolderCache(plugin) {
   if (plugin && plugin._v07LocalFolderCache && typeof plugin._v07LocalFolderCache.clear === "function") {
     plugin._v07LocalFolderCache.clear();
   }
+  localMediaIndexService.invalidateLocalMediaCache(plugin);
 }
 
 /* ============================== 番剧首屏 ============================== */
@@ -293,65 +295,28 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
     }
   };
   const getLocal = (it) => {
-    if (mobile || !it || !it.downloadPath || it.downloadPath === "无") return null;
-    const folderPath = String(it.downloadPath).trim();
-    if (!folderPath) return null;
-    let entry = folderCache.get(folderPath);
-    const now = Date.now();
-    if (!entry || now - entry.ts > 30000) {
-      let videoFiles = null;
-      let meta = null;
-      try {
-        const r = inspectLocalFolder(folderPath, 0);
-        if (r && !r.error && Array.isArray(r.videoFiles)) {
-          videoFiles = r.videoFiles;
-          meta = {
-            hasAttentionNeeded: Boolean(r.hasAttentionNeeded),
-            duplicateCount: Number(r.anomalies?.duplicateEpisodes?.length) || 0,
-            suspectedParent: Boolean(r.anomalies?.suspectedParentContainer?.detected),
-            subfolderCount: Number(r.anomalies?.subfolderStats?.totalInSubfolders) || 0,
-            extraCount: Array.isArray(r.extraFiles) ? r.extraFiles.length : 0
-          };
-        }
-      } catch (_) {}
-      entry = { ts: now, videoFiles, meta };
-      folderCache.set(folderPath, entry);
-    }
-    if (!entry.videoFiles) return null;
-    const watched = Number(it.watchedEpisodes) || 0;
-    let maxEp = 0;
-    let latestFileTimeMs = 0;
-    let latestUnwatchedTimeMs = 0;
-    const unseen = [];
-    for (const vf of entry.videoFiles) {
-      const ep = Number(vf && vf.episode) || 0;
-      const tMs = Math.max(
-        Number(vf && vf.addedTimeMs) || 0,
-        Number(vf && vf.mtimeMs) || 0,
-        Number(vf && vf.birthtimeMs) || 0
-      );
-      if (tMs > latestFileTimeMs) latestFileTimeMs = tMs;
-      if (ep > maxEp) maxEp = ep;
-      if (ep > watched) {
-        unseen.push(vf);
-        if (tMs > latestUnwatchedTimeMs) latestUnwatchedTimeMs = tMs;
-      }
-    }
-    unseen.sort((a, b) => (Number(a.episode) || 0) - (Number(b.episode) || 0));
-    const exactNext = unseen.find((v) => Number(v.episode) === watched + 1) || unseen[0] || null;
-    const m = entry.meta || {};
+    if (mobile || !it) return null;
+    const r = localMediaIndexService.resolveAnimeLocalMedia(plugin, it);
+    if (!r || !r.hasAnyBinding) return null;
+    const exactNextObj =
+      (r.nextEpisodeFile && Array.isArray(r.videoFiles)
+        ? r.videoFiles.find((v) => v && v.path === r.nextEpisodeFile)
+        : null) || null;
     return {
-      nextEpisodeFile: exactNext,
-      nextEpisodeNumber: exactNext ? Number(exactNext.episode) || null : null,
-      maxLocalEpisode: maxEp,
-      newCount: unseen.length,
-      latestFileTimeMs,
-      latestUnwatchedTimeMs: latestUnwatchedTimeMs || latestFileTimeMs,
-      hasAttentionNeeded: Boolean(m.hasAttentionNeeded),
-      duplicateCount: Number(m.duplicateCount) || 0,
-      suspectedParent: Boolean(m.suspectedParent),
-      subfolderCount: Number(m.subfolderCount) || 0,
-      extraCount: Number(m.extraCount) || 0
+      nextEpisodeFile: exactNextObj || r.nextEpisodeFile || null,
+      nextEpisodeNumber: r.nextEpisodeNumber ?? null,
+      maxLocalEpisode: Number(r.maxEpisodeNumber) || 0,
+      newCount: Number(r.newCount) || 0,
+      latestFileTimeMs: Number(r.latestFileTimeMs) || 0,
+      latestUnwatchedTimeMs: Number(r.latestUnwatchedTimeMs || r.latestFileTimeMs) || 0,
+      hasAttentionNeeded: Boolean(r.hasAttentionNeeded),
+      hasMissingMedia: Boolean(r.hasMissingMedia),
+      hasAnyBinding: Boolean(r.hasAnyBinding),
+      duplicateCount: Number(r.anomalies?.duplicateEpisodes?.length) || 0,
+      suspectedParent: Boolean(r.anomalies?.suspectedParentContainer?.detected),
+      subfolderCount: Number(r.anomalies?.subfolderStats?.totalInSubfolders) || 0,
+      extraCount: Array.isArray(r.extraFiles) ? r.extraFiles.length : 0,
+      missingItems: Array.isArray(r.missingItems) ? r.missingItems : []
     };
   };
 
@@ -440,7 +405,15 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
         }
         const f = local && local.nextEpisodeFile;
         const p = f && (f.path || f);
-        if (p) await openLocalPathSafely(p);
+        if (p) {
+          const ok = await openLocalPathSafely(p);
+          if (ok) return;
+        }
+        const resolved = localMediaIndexService.resolveAnimeLocalMedia(plugin, it);
+        const miss = (resolved?.missingItems || []).find((m) => Number(m.episode) === targetEp) || resolved?.missingItems?.[0];
+        if (miss) {
+          localMediaIndexService.notifyMissingEpisodeWithRecovery(plugin, it, targetEp, miss, items);
+        }
       },
       openWeb: (it, url) => openExternal(url),
       openNote: (it) => {
@@ -455,11 +428,16 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       openFolder: async (it) => {
         if (it && it.downloadPath && it.downloadPath !== "无") {
           await openLocalPathSafely(it.downloadPath);
-        } else if (animeDownloadService && typeof animeDownloadService.openAnimeDownloadModal === "function") {
-          animeDownloadService.openAnimeDownloadModal(plugin, it, () => {
-            if (it && it.downloadPath) folderCache.delete(String(it.downloadPath).trim());
-            if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();
-          });
+          return;
+        }
+        const resolved = localMediaIndexService.resolveAnimeLocalMedia(plugin, it);
+        const firstFolder = resolved?.folders?.find((f) => f.status === "ok")?.path;
+        if (firstFolder) {
+          await openLocalPathSafely(firstFolder);
+          return;
+        }
+        if (typeof plugin?.openLocalMediaLinkerModal === "function") {
+          await plugin.openLocalMediaLinkerModal(it);
         }
       },
       markNext: async (it) => {
@@ -536,10 +514,29 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
           });
         }
       },
+      openLocalLinker: (it, onDone) => {
+        if (typeof plugin?.openLocalMediaLinkerModal === "function") {
+          plugin.openLocalMediaLinkerModal(it || null, {
+            onUpdated: () => {
+              invalidateLocalFolderCache(plugin);
+              if (typeof onDone === "function") onDone();
+              if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();
+            }
+          });
+        }
+      },
       openLocalDiagnostics: (it, onDone) => {
-        if (animeDownloadService && typeof animeDownloadService.openLocalFolderDiagnosticsModal === "function") {
+        if (typeof plugin?.openLocalMediaLinkerModal === "function") {
+          plugin.openLocalMediaLinkerModal(it || null, {
+            onUpdated: () => {
+              invalidateLocalFolderCache(plugin);
+              if (typeof onDone === "function") onDone();
+              if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();
+            }
+          });
+        } else if (animeDownloadService && typeof animeDownloadService.openLocalFolderDiagnosticsModal === "function") {
           animeDownloadService.openLocalFolderDiagnosticsModal(plugin, it, () => {
-            if (it && it.downloadPath) folderCache.delete(String(it.downloadPath).trim());
+            invalidateLocalFolderCache(plugin);
             if (typeof onDone === "function") onDone();
             if (typeof deskRuntime.refreshStage === "function") deskRuntime.refreshStage();
           });

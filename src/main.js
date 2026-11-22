@@ -135,6 +135,8 @@ const createSettingsTabClass = require("./settings-tab.js");
 const { RatingSyncManager } = require("./rating-sync-manager.js");
 const createNetabaModals = require("./netaba-modals.js");
 const animeDownloadService = require("./anime-download-service.js");
+const localMediaIndexService = require("./local-media-index-service.js");
+const localMediaLinkerModal = require("./local-media-linker-modal.js");
 const v07Core = require("./v07-core.js");
 
 var DEFAULT_SETTINGS = {
@@ -149,6 +151,14 @@ var DEFAULT_SETTINGS = {
   enableBaseFileGeneration: false,
   localAnimeRoot: "",
   preferredEpisodeFiles: {},
+  localMediaBindings: {},
+  localMediaStagingPool: [],
+  localMediaBrowserState: {
+    lastDir: "",
+    pinnedDirs: [],
+    lastScannedDirs: [],
+    hideLinkedInPool: false
+  },
   checkIntervalSeconds: 60,
   checkOnStartup: true,
   checkOnSave: true,
@@ -796,6 +806,7 @@ var BangumiManagerPlugin = class extends Plugin {
       this.settings.preferredEpisodeFiles && typeof this.settings.preferredEpisodeFiles === "object"
         ? this.settings.preferredEpisodeFiles
         : {};
+    localMediaIndexService.ensureLocalMediaSettingsShape(this);
     // 仅在首次初始化或迁移归一化确实改动配置时才写盘，避免每次移动端冷启动无谓重写数百 KB 的 data.json
     let settingsChangedOnLoad = !savedSettings;
     if (!settingsChangedOnLoad) {
@@ -906,6 +917,14 @@ var BangumiManagerPlugin = class extends Plugin {
       name: "打开番剧档案馆",
       callback: async () => {
         await this.openScoreDashboardView();
+      }
+    });
+
+    this.addCommand({
+      id: "open-local-media-linker",
+      name: "打开本地视频关联面板",
+      callback: async () => {
+        await this.openLocalMediaLinkerModal(null);
       }
     });
 
@@ -1534,6 +1553,7 @@ var BangumiManagerPlugin = class extends Plugin {
       this.settings.preferredEpisodeFiles && typeof this.settings.preferredEpisodeFiles === "object"
         ? this.settings.preferredEpisodeFiles
         : {};
+    localMediaIndexService.ensureLocalMediaSettingsShape(this);
     await this.saveData(this.settings);
     const nextSeconds = Math.max(10, Number(this.settings.checkIntervalSeconds) || 60);
     if (!this.statusTimer || this._activeStatusIntervalSec !== nextSeconds) {
@@ -3169,7 +3189,7 @@ views:
         attentionNames.length > 0
           ? `\n提示：《${attentionNames.slice(0, 3).join("》《")}》${
               attentionNames.length > 3 ? ` 等 ${attentionNames.length} 部` : ""
-            }检测到同集多版本或目录层级待核对，可在对应作品卡片点击提示标签处理。`
+            }存在同集多份文件或目录结构需确认，可在对应作品卡片点击提示标签处理。`
           : "";
       new Notice(
         "\u672C\u5730\u72B6\u6001\u68C0\u67E5\u5B8C\u6210\uFF1A\u68C0\u67E5 " + checked + " \u7BC7\uFF0C\u66F4\u65B0 " + updated + " \u7BC7\uFF0C\u8DF3\u8FC7 " + skipped + " \u7BC7\uFF0C\u5931\u8D25 " + failed + " \u7BC7" + attnSuffix,
@@ -3181,7 +3201,7 @@ views:
     if (!isDesktopNodeAvailable()) {
       return "skipped";
     }
-    // 优先通过内存 metadataCache 快速短路，避免对无本地目录的笔记每 60s 重复读盘
+    // 优先通过内存 metadataCache 快速短路，避免对无任何本地绑定的笔记每 60s 重复读盘
     const cachedMeta = this.app?.metadataCache?.getFileCache?.(file)?.frontmatter;
     if (cachedMeta) {
       const rawTags = cachedMeta.tags;
@@ -3191,7 +3211,14 @@ views:
       }
       const cachedDl = cleanValue(cachedMeta["\u4E0B\u8F7D\u8DEF\u5F84"]);
       const cachedStatus = cleanValue(cachedMeta["\u672C\u5730\u66F4\u65B0\u72B6\u6001"]);
-      if ((!cachedDl || cachedDl === "\u65E0") && cachedStatus === "\u672A\u8BBE\u7F6E\u4E0B\u8F7D\u8DEF\u5F84") {
+      const cachedSidMatch = String(cachedMeta["BGM\u94FE\u63A5"] || "").match(/\/subject\/(\d+)/i);
+      const hasExtraBinding = localMediaIndexService.hasNonEmptyBindingRecord(
+        localMediaIndexService.getAnimeBindingRecord(this, {
+          file,
+          subjectId: cachedSidMatch ? cachedSidMatch[1] : ""
+        })
+      );
+      if (!hasExtraBinding && (!cachedDl || cachedDl === "\u65E0") && cachedStatus === "\u672A\u8BBE\u7F6E\u4E0B\u8F7D\u8DEF\u5F84") {
         return "skipped";
       }
     }
@@ -3209,21 +3236,28 @@ views:
     const downloadPath = cleanValue(
       frontmatter.fields.\u4E0B\u8F7D\u8DEF\u5F84
     );
+    const sidMatch = String(frontmatter.fields["BGM\u94FE\u63A5"] || "").match(/\/subject\/(\d+)/i);
     const watchedEpisodes = extractWatchedEpisodes(content);
-    const result = inspectLocalFolder(
+    const result = localMediaIndexService.resolveAnimeLocalMedia(this, {
+      file,
+      subjectId: sidMatch ? sidMatch[1] : "",
       downloadPath,
       watchedEpisodes
-    );
+    });
     if (metaOut && typeof metaOut === "object") {
       metaOut.hasAttentionNeeded = Boolean(result?.hasAttentionNeeded);
     }
+    const folderLineArg =
+      downloadPath && downloadPath !== "\u65E0"
+        ? { downloadPath, error: result?.folders?.[0]?.status && result.folders[0].status !== "ok" ? result.error : null }
+        : { downloadPath: "", error: null };
     const newContent = updateFolderLine(
       updateFrontmatterField(
         content,
         "\u672C\u5730\u66F4\u65B0\u72B6\u6001",
         getLocalStatusText(result)
       ),
-      result
+      folderLineArg
     );
     if (newContent === content) {
       return "skipped";
@@ -3939,6 +3973,26 @@ if (this.settings.seasonViewMode === "current") {
     const items = await this.collectDashboardItems();
     curatorDesk.openDeskSeasonManagerModal(this, items, async () => {
       await this.refreshOpenDashboardViews();
+    });
+  }
+
+  async openLocalMediaLinkerModal(focusItem = null, options = {}) {
+    try {
+      const mainWin = this.app?.workspace?.rootSplit?.containerEl?.ownerDocument?.defaultView || window;
+      if (mainWin && typeof mainWin.focus === "function" && globalThis.activeWindow !== mainWin) {
+        mainWin.focus();
+      }
+    } catch (_) {}
+    const items = await this.collectDashboardItems();
+    return localMediaLinkerModal.openLocalMediaLinkerModal(this, items, {
+      focusItem,
+      ...options,
+      onUpdated: async () => {
+        if (typeof options?.onUpdated === "function") {
+          await options.onUpdated();
+        }
+        await this.refreshOpenDashboardViews();
+      }
     });
   }
 
@@ -5668,8 +5722,8 @@ if (this.settings.seasonViewMode === "current") {
       });
 
       // 本地视频追番深度联动
-      if (item.downloadPath && item.downloadPath !== "\u65E0") {
-        const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
+      if (isDesktopNodeAvailable()) {
+        const localResult = localMediaIndexService.resolveAnimeLocalMedia(this, item);
         if (localResult && !localResult.error && localResult.fileCount > 0) {
           const localBar = info.createDiv("bangumi-grid-local-bar");
           const capsule = localBar.createSpan({
@@ -5678,11 +5732,15 @@ if (this.settings.seasonViewMode === "current") {
               ? `本地 +${localResult.newCount}话`
               : `本地 ${localResult.fileCount}话`
           });
-          capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
+          const openTargetDir = (item.downloadPath && item.downloadPath !== "\u65E0")
+            ? item.downloadPath
+            : (localResult.folders?.[0]?.path || "");
+          capsule.title = `本地视频共 ${localResult.fileCount} 话${openTargetDir ? `（路径：${openTargetDir}）` : ""}。点击管理或打开文件夹。`;
           capsule.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            await openLocalPathSafely(item.downloadPath);
+            if (openTargetDir) await openLocalPathSafely(openTargetDir);
+            else await this.openLocalMediaLinkerModal(item);
           };
 
           if (localResult.nextEpisodeFile) {
@@ -5712,16 +5770,18 @@ if (this.settings.seasonViewMode === "current") {
             };
           }
 
-          const folderBtn = localBar.createEl("button", {
-            cls: "bangumi-local-action-btn is-folder"
-          });
-          folderBtn.appendChild(v07Core.icon("folder", 13));
-          folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
-          folderBtn.onclick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await openLocalPathSafely(item.downloadPath);
-          };
+          if (openTargetDir) {
+            const folderBtn = localBar.createEl("button", {
+              cls: "bangumi-local-action-btn is-folder"
+            });
+            folderBtn.appendChild(v07Core.icon("folder", 13));
+            folderBtn.title = `打开本地视频所在文件夹\n${openTargetDir}`;
+            folderBtn.onclick = async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              await openLocalPathSafely(openTargetDir);
+            };
+          }
         }
       }
 
@@ -6141,8 +6201,8 @@ if (this.settings.seasonViewMode === "current") {
       });
 
       // 本地视频追番深度联动
-      if (item.downloadPath && item.downloadPath !== "\u65E0") {
-        const localResult = inspectLocalFolder(item.downloadPath, item.watchedEpisodes);
+      if (isDesktopNodeAvailable()) {
+        const localResult = localMediaIndexService.resolveAnimeLocalMedia(this, item);
         if (localResult && !localResult.error && localResult.fileCount > 0) {
           const localBar = info.createDiv("bangumi-grid-local-bar");
           const capsule = localBar.createSpan({
@@ -6151,11 +6211,15 @@ if (this.settings.seasonViewMode === "current") {
               ? `本地 +${localResult.newCount}话`
               : `本地 ${localResult.fileCount}话`
           });
-          capsule.title = `本地视频共 ${localResult.fileCount} 话（路径：${item.downloadPath}）。点击在系统文件夹中打开。`;
+          const openTargetDir = (item.downloadPath && item.downloadPath !== "\u65E0")
+            ? item.downloadPath
+            : (localResult.folders?.[0]?.path || "");
+          capsule.title = `本地视频共 ${localResult.fileCount} 话${openTargetDir ? `（路径：${openTargetDir}）` : ""}。点击管理或打开文件夹。`;
           capsule.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            await openLocalPathSafely(item.downloadPath);
+            if (openTargetDir) await openLocalPathSafely(openTargetDir);
+            else await this.openLocalMediaLinkerModal(item);
           };
 
           if (localResult.nextEpisodeFile) {
@@ -6185,16 +6249,18 @@ if (this.settings.seasonViewMode === "current") {
             };
           }
 
-          const folderBtn = localBar.createEl("button", {
-            cls: "bangumi-local-action-btn is-folder"
-          });
-          folderBtn.appendChild(v07Core.icon("folder", 13));
-          folderBtn.title = `打开本地视频所在文件夹\n${item.downloadPath}`;
-          folderBtn.onclick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            await openLocalPathSafely(item.downloadPath);
-          };
+          if (openTargetDir) {
+            const folderBtn = localBar.createEl("button", {
+              cls: "bangumi-local-action-btn is-folder"
+            });
+            folderBtn.appendChild(v07Core.icon("folder", 13));
+            folderBtn.title = `打开本地视频所在文件夹\n${openTargetDir}`;
+            folderBtn.onclick = async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              await openLocalPathSafely(openTargetDir);
+            };
+          }
         }
       }
 
@@ -6872,15 +6938,25 @@ if (this.settings.seasonViewMode === "current") {
         const curDlPath = cleanValue(
           (parsedMid && parsedMid.fields && parsedMid.fields["下载路径"]) || item.downloadPath || ""
         );
-        if (curDlPath && curDlPath !== "无") {
-          const nextWatched =
-            updates.watchedEpisodes !== undefined
-              ? Number(updates.watchedEpisodes) || 0
-              : Number(item.watchedEpisodes) || 0;
-          const localRes = inspectLocalFolder(curDlPath, nextWatched);
+        const nextWatched =
+          updates.watchedEpisodes !== undefined
+            ? Number(updates.watchedEpisodes) || 0
+            : Number(item.watchedEpisodes) || 0;
+        localMediaIndexService.invalidateLocalMediaCache(this, item);
+        const localRes = localMediaIndexService.resolveAnimeLocalMedia(
+          this,
+          Object.assign({}, item, { downloadPath: curDlPath, watchedEpisodes: nextWatched }),
+          { force: true }
+        );
+        if (localRes && localRes.hasAnyBinding) {
           const localText = getLocalStatusText(localRes);
           newContent = updateFrontmatterField(newContent, "本地更新状态", localText);
-          newContent = updateFolderLine(newContent, localRes);
+          if (curDlPath && curDlPath !== "无") {
+            newContent = updateFolderLine(newContent, {
+              downloadPath: curDlPath,
+              error: localRes?.folders?.[0]?.status && localRes.folders[0].status !== "ok" ? localRes.error : null
+            });
+          }
           item.localStatus = localText;
           if (
             updates.downloadPath !== undefined &&
@@ -8734,6 +8810,14 @@ var ManagerRibbonModal = class extends Modal {
       async () => {
         this.close();
         await this.plugin.openScoreDashboardView();
+      }
+    );
+    this.addButton(
+      contentEl,
+      "本地视频关联",
+      async () => {
+        this.close();
+        await this.plugin.openLocalMediaLinkerModal(null);
       }
     );
     this.addButton(

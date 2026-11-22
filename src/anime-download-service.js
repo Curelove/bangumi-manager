@@ -3,6 +3,7 @@ const noteUtils = require("./note-utils.js");
 const noteManager = require("./note-manager.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const v07Core = require("./v07-core.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 const {
   tryRequireNode,
   isDesktopNodeAvailable,
@@ -2911,7 +2912,7 @@ async function ensureAnimeLocalDownloadFolder(plugin, item, createOnDisk = true,
         targetPath: "",
         createdOnDisk: false,
         updatedNote: false,
-        error: "尚未在插件设置中填写「本地动画根目录」，请先前往设置指定保存根目录。"
+        error: "尚未在插件设置中填写「新下载默认保存目录」，请先前往设置指定保存位置。"
       };
     }
     const year = String(item?.year || new Date().getFullYear()).trim() || String(new Date().getFullYear());
@@ -2953,7 +2954,7 @@ async function ensureAnimeLocalDownloadFolder(plugin, item, createOnDisk = true,
         targetPath,
         createdOnDisk: false,
         updatedNote: false,
-        error: `无法创建本地目录「${targetPath}」（${diskError || "目标盘符不存在或无写入权限"}）。请在设置中检查「本地动画根目录」路径是否有效。`
+        error: `无法创建本地目录「${targetPath}」（${diskError || "目标盘符不存在或无写入权限"}）。请在设置中检查「新下载默认保存目录」路径是否有效。`
       };
     }
   }
@@ -3146,7 +3147,7 @@ async function dispatchDownloadToQbittorrent(plugin, item, episodeTargets, optio
   if (autoCreate && !folderRes.ok) {
     return {
       ok: false,
-      reason: folderRes.error || "无法创建本地动画保存目录，请检查插件设置中的「本地动画根目录」"
+      reason: folderRes.error || "无法创建本地动画保存目录，请检查插件设置中的「新下载默认保存目录」"
     };
   }
   const { targetPath } = folderRes;
@@ -5417,7 +5418,6 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       this.isRefreshingStates = false;
       this.errorMessage = "";
       this.lastFolderError = "";
-      this.showCustomFolderInput = false;
       this.isMobileMode = isMobileDownloadEnv();
       this._searchSeq = 0;
       this._lastFocusRefreshTs = 0;
@@ -5793,31 +5793,34 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         return;
       }
 
-      // 左侧：本地下载文件夹状态
+      // 左侧：本地视频目录与关联状态
       const folderCol = this.envBox.createDiv("curator-dl-env-col");
-      const rawPath = String(this.item?.downloadPath || "").trim();
+      const localInspect = localMediaIndexService.resolveAnimeLocalMedia(this.plugin, this.item);
+      const rawPath = String(localInspect?.primaryFolder || this.item?.downloadPath || "").trim();
       const hasPath = Boolean(rawPath && rawPath !== "无");
       const folderExists = hasPath && fs.existsSync(rawPath);
-      const localInspect = hasPath
-        ? noteUtils.inspectLocalFolder(rawPath, this.item?.watchedEpisodes)
-        : null;
+      const hasBoundMedia = Boolean(folderExists || localInspect?.hasAnyBinding);
 
       const folderHeader = folderCol.createDiv("curator-dl-env-line");
       folderHeader.createSpan({
-        cls: `curator-dl-status-dot ${folderExists ? "is-ok" : "is-warn"}`
+        cls: `curator-dl-status-dot ${hasBoundMedia ? "is-ok" : "is-warn"}`
       });
       folderHeader.createSpan({
         cls: "curator-dl-env-title",
-        text: folderExists
-          ? `本地目录已就绪（现存 ${localInspect?.fileCount || 0} 集 · 未看新集 ${localInspect?.newCount || 0} 集）`
+        text: hasBoundMedia
+          ? `本地视频已关联（现存 ${localInspect?.fileCount || 0} 集 · 未看新集 ${localInspect?.newCount || 0} 集）`
           : hasPath
           ? "已填写下载路径（本地文件夹尚未创建）"
-          : "尚未设置本地下载文件夹"
+          : "尚未关联本地视频或下载目录"
       });
 
       const pathText = folderCol.createDiv({
         cls: "curator-dl-env-path curator-mono",
-        text: hasPath ? rawPath : "点击下方「自动创建本地目录」将按 年份/季度/番剧名 建立文件夹"
+        text: hasPath
+          ? rawPath
+          : localInspect?.hasAnyBinding
+          ? `已原地关联 ${localInspect.extraFolders?.length || 0} 个目录 · ${localInspect.looseFiles?.length || 0} 个单文件`
+          : "新建下载目录请点「自动创建本地目录」，或直接点「管理本地视频关联…」绑定电脑里已有的原片"
       });
       pathText.title = rawPath || "";
 
@@ -5834,7 +5837,6 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           createDirBtn.disabled = false;
           if (res.ok && res.createdOnDisk) {
             this.lastFolderError = "";
-            this.showCustomFolderInput = false;
             if (NoticeClass) {
               new NoticeClass(`已创建并绑定本地目录：\n${res.targetPath}`, 4200);
             }
@@ -5842,7 +5844,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             this.lastFolderError =
               res.error ||
               res.noteError ||
-              "无法创建本地文件夹，请检查本地动画根目录路径是否存在及磁盘写入权限。";
+              "无法创建本地文件夹，请检查「新下载默认保存目录」路径是否存在及磁盘写入权限。";
             if (NoticeClass) {
               new NoticeClass(`本地目录创建未成功：\n${this.lastFolderError}`, 6000);
             }
@@ -5850,14 +5852,17 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           await this.refreshAllStates({ showNotice: false });
         };
 
-        const customDirToggleBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn",
-          text: this.showCustomFolderInput ? "收起路径输入" : "手动指定目录"
-        });
-        customDirToggleBtn.onclick = () => {
-          this.showCustomFolderInput = !this.showCustomFolderInput;
-          this.renderEnvStatus();
-        };
+        if (typeof this.plugin?.openLocalMediaLinkerModal === "function") {
+          const manageLinkBtn = folderActions.createEl("button", {
+            cls: "curator-dl-mini-btn"
+          });
+          v07Core.setBtnIconLabel(manageLinkBtn, "folder-check", "管理本地视频关联…", 13);
+          manageLinkBtn.onclick = () => {
+            this.plugin.openLocalMediaLinkerModal(this.item, {
+              onUpdated: () => this.refreshAllStates({ showNotice: false })
+            });
+          };
+        }
       } else {
         const openDirBtn = folderActions.createEl("button", {
           cls: "curator-dl-mini-btn"
@@ -5867,12 +5872,24 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           await noteUtils.openLocalPathSafely(rawPath);
         };
 
+        if (typeof this.plugin?.openLocalMediaLinkerModal === "function") {
+          const manageLinkBtn = folderActions.createEl("button", {
+            cls: "curator-dl-mini-btn is-subtle"
+          });
+          v07Core.setBtnIconLabel(manageLinkBtn, "folder-check", "管理本地视频关联…", 13);
+          manageLinkBtn.onclick = () => {
+            this.plugin.openLocalMediaLinkerModal(this.item, {
+              onUpdated: () => this.refreshAllStates({ showNotice: false })
+            });
+          };
+        }
+
         const collectCloudBtn = folderActions.createEl("button", {
           cls: "curator-dl-mini-btn is-accent"
         });
-        v07Core.setBtnIconLabel(collectCloudBtn, "cloud", "从夸克/网盘目录归集", 13);
+        v07Core.setBtnIconLabel(collectCloudBtn, "cloud", "从网盘目录整理移入（会移动文件）", 13);
         collectCloudBtn.title =
-          "扫描夸克网盘 (QuarkDownload)、百度网盘、迅雷及系统下载目录，将属于该番剧的视频移入本番文件夹";
+          "扫描夸克网盘 (QuarkDownload)、百度网盘、迅雷及系统下载目录，将属于该番剧的视频移动至本番文件夹（如不想移动原文件，请点「管理本地视频关联…」）";
         collectCloudBtn.onclick = async () => {
           collectCloudBtn.disabled = true;
           const res = await collectEpisodesFromCloudDriveFolders(this.plugin, this.item);
@@ -5880,25 +5897,16 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           if (res.movedFiles && res.movedFiles.length > 0) {
             if (NoticeClass) {
               new NoticeClass(
-                `已从网盘/默认下载目录归集 ${res.movedFiles.length} 个视频文件至本番目录`,
+                `已从网盘/默认下载目录移入 ${res.movedFiles.length} 个视频文件至本番目录`,
                 4200
               );
             }
           } else if (NoticeClass) {
             new NoticeClass(
-              "未在常见网盘下载目录（QuarkDownload / Downloads 等）中发现待归集的同名番剧视频"
+              "未在常见网盘下载目录（QuarkDownload / Downloads 等）中发现待移入的同名番剧视频"
             );
           }
           await this.refreshAllStates({ showNotice: false });
-        };
-
-        const changeDirBtn = folderActions.createEl("button", {
-          cls: "curator-dl-mini-btn is-subtle",
-          text: this.showCustomFolderInput ? "收起路径修改" : "更换目录"
-        });
-        changeDirBtn.onclick = () => {
-          this.showCustomFolderInput = !this.showCustomFolderInput;
-          this.renderEnvStatus();
         };
       }
 
@@ -5909,20 +5917,21 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
           text: this.lastFolderError
         });
         const errActs = errBox.createDiv("curator-dl-folder-error-actions");
-        if (!this.showCustomFolderInput) {
+        if (typeof this.plugin?.openLocalMediaLinkerModal === "function") {
           const manualBtn = errActs.createEl("button", {
             cls: "curator-dl-mini-btn is-accent",
-            text: "手动输入本番目录"
+            text: "前往本地视频关联挑选目录…"
           });
           manualBtn.onclick = () => {
-            this.showCustomFolderInput = true;
-            this.renderEnvStatus();
+            this.plugin.openLocalMediaLinkerModal(this.item, {
+              onUpdated: () => this.refreshAllStates({ showNotice: false })
+            });
           };
         }
         const openSettingsBtn = errActs.createEl("button", {
           cls: "curator-dl-mini-btn"
         });
-        v07Core.setBtnIconLabel(openSettingsBtn, "settings", "前往设置检查「本地动画根目录」", 13);
+        v07Core.setBtnIconLabel(openSettingsBtn, "settings", "前往设置检查「新下载默认保存目录」", 13);
         openSettingsBtn.onclick = () => {
           this.close();
           if (this.plugin?.app?.setting) {
@@ -5934,67 +5943,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
         };
       }
 
-      if (this.showCustomFolderInput) {
-        const customRow = folderCol.createDiv("curator-dl-custom-folder-row");
-        const cleanRoot = String(this.plugin?.settings?.localAnimeRoot || "").trim().replace(/[\\/]+$/, "");
-        const defaultSuggested =
-          hasPath && rawPath !== "无"
-            ? rawPath
-            : cleanRoot
-              ? `${cleanRoot}/${
-                  this.item?.year || new Date().getFullYear()
-                }/${this.item?.season || "10月新番"}/${noteManager.getSafeFileName(
-                  this.item?.name || "未命名动画"
-                )}`
-              : "";
-        const dirInput = customRow.createEl("input", {
-          type: "text",
-          cls: "curator-dl-keyword-input curator-mono",
-          placeholder: "输入或点右侧选择本机番剧保存文件夹…"
-        });
-        dirInput.value = defaultSuggested;
-        const browseCustomDirBtn = customRow.createEl("button", {
-          cls: "curator-dl-mini-btn",
-          text: "选择文件夹…"
-        });
-        browseCustomDirBtn.onclick = async () => {
-          browseCustomDirBtn.disabled = true;
-          const picked = await pickNativeFolderOnDesktop({
-            title: `选择《${this.item?.name || "番剧"}》本地目录`,
-            initialDir: dirInput.value.trim() || cleanRoot || ""
-          });
-          browseCustomDirBtn.disabled = false;
-          if (picked) {
-            dirInput.value = picked;
-          }
-        };
-        const saveCustomDirBtn = customRow.createEl("button", {
-          cls: "curator-dl-mini-btn is-primary",
-          text: "保存并绑定"
-        });
-        saveCustomDirBtn.onclick = async () => {
-          const val = dirInput.value.trim();
-          if (!val) return;
-          saveCustomDirBtn.disabled = true;
-          const res = await ensureAnimeLocalDownloadFolder(this.plugin, this.item, true, val);
-          saveCustomDirBtn.disabled = false;
-          if (res.ok && res.createdOnDisk) {
-            this.lastFolderError = "";
-            this.showCustomFolderInput = false;
-            if (NoticeClass) {
-              new NoticeClass(`已绑定本地目录：\n${res.targetPath}`, 4200);
-            }
-          } else {
-            this.lastFolderError = res.error || res.noteError || "指定目录无法创建";
-            if (NoticeClass) {
-              new NoticeClass(`目录绑定未成功：\n${this.lastFolderError}`, 6000);
-            }
-          }
-          await this.refreshAllStates({ showNotice: false });
-        };
-      }
-
-      if (folderExists && localInspect) {
+      if (hasBoundMedia && localInspect) {
         const anom = localInspect.anomalies || {};
         const dupList = Array.isArray(anom.duplicateEpisodes) ? anom.duplicateEpisodes : [];
         const subCount = Number(anom.subfolderStats?.totalInSubfolders) || 0;
@@ -6015,7 +5964,7 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             warnParts.push(`已隔离其他季度子目录「${anom.skippedOtherSeasonDirs.join("、")}」`);
           }
           if (Array.isArray(anom.unnumberedMultipleVideos) && anom.unnumberedMultipleVideos.length > 0) {
-            warnParts.push(`发现 ${anom.unnumberedMultipleVideos.length} 个未标话数的视频文件待核对`);
+            warnParts.push(`发现 ${anom.unnumberedMultipleVideos.length} 个未标话数的视频文件需对应`);
           }
           if (anom.hasBdmvStructure && localInspect.fileCount === 0) {
             warnParts.push("检测到 BDMV 原盘目录结构");
@@ -6033,9 +5982,15 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
             text: "查看并处理…"
           });
           resolveBtn.onclick = () => {
-            openLocalFolderDiagnosticsModal(this.plugin, this.item, () => {
-              this.refreshAllStates({ showNotice: false });
-            });
+            if (typeof this.plugin?.openLocalMediaLinkerModal === "function") {
+              this.plugin.openLocalMediaLinkerModal(this.item, {
+                onUpdated: () => this.refreshAllStates({ showNotice: false })
+              });
+            } else {
+              openLocalFolderDiagnosticsModal(this.plugin, this.item, () => {
+                this.refreshAllStates({ showNotice: false });
+              });
+            }
           };
         } else if (subCount > 0 || extraCount > 0 || incompleteCount > 0) {
           const infoBits = [];
@@ -6053,15 +6008,21 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
               text: extraCount > 0 ? "子目录与特典…" : "子目录详情…"
             });
             detailBtn.onclick = () => {
-              openLocalFolderDiagnosticsModal(this.plugin, this.item, () => {
-                this.refreshAllStates({ showNotice: false });
-              });
+              if (typeof this.plugin?.openLocalMediaLinkerModal === "function") {
+                this.plugin.openLocalMediaLinkerModal(this.item, {
+                  onUpdated: () => this.refreshAllStates({ showNotice: false })
+                });
+              } else {
+                openLocalFolderDiagnosticsModal(this.plugin, this.item, () => {
+                  this.refreshAllStates({ showNotice: false });
+                });
+              }
             };
           }
         }
       }
 
-      if (folderExists && Array.isArray(localInspect?.videoFiles) && localInspect.videoFiles.length > 0) {
+      if (hasBoundMedia && Array.isArray(localInspect?.videoFiles) && localInspect.videoFiles.length > 0) {
         const localEpStrip = folderCol.createDiv("curator-dl-local-ep-strip");
         localEpStrip.style.cssText =
           "display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:6px;border-top:1px dashed var(--background-modifier-border);";
@@ -7442,6 +7403,9 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
  * 本地剧集目录详情、同集重复版本抉择与子文件夹平铺对话框
  */
 function openLocalFolderDiagnosticsModal(plugin, item, onUpdated = null) {
+  if (plugin && typeof plugin.openLocalMediaLinkerModal === "function") {
+    return plugin.openLocalMediaLinkerModal(item || null, { onUpdated });
+  }
   const ModalClass = globalThis.__BangumiManagerModal || obsidian?.Modal;
   const NoticeClass = globalThis.__BangumiManagerNotice || obsidian?.Notice;
   if (!ModalClass || !plugin?.app) return null;
@@ -7700,7 +7664,7 @@ function openLocalFolderDiagnosticsModal(plugin, item, onUpdated = null) {
               },
               text: fItem.name
             });
-            const locLabel = fItem.inSubfolder ? `子文件夹：${path.dirname(fItem.relPath)}` : "番剧根目录直铺";
+            const locLabel = fItem.inSubfolder ? `子文件夹：${path.dirname(fItem.relPath)}` : "所在文件夹内";
             const sizeLabel = formatSizeMb(fItem.size);
             leftCol.createDiv({
               attr: { style: "font-size:12px;color:var(--text-muted);margin-top:3px;overflow-wrap:anywhere;" },
@@ -7775,11 +7739,11 @@ function openLocalFolderDiagnosticsModal(plugin, item, onUpdated = null) {
           attr: { style: "flex:1 1 320px;font-size:12.5px;line-height:1.55;color:var(--text-normal);" },
           text: `当前共有 ${subCount} 集位于子文件夹（${(anom.subfolderStats?.subfolderNames || []).slice(0, 3).join("、")}${
             (anom.subfolderStats?.subfolderNames?.length || 0) > 3 ? " 等" : ""
-          }）中。插件已支持原地识别与直接播放，无需手动搬出；若您希望统一整理到番剧根目录，可点右侧平铺提取。`
+          }）中。插件已支持原地识别与直接播放，无需手动搬出；若您希望统一整理到主文件夹，可点右侧按钮全部移入。`
         });
         const flattenBtn = subRow.createEl("button", {
           cls: `curator-dl-mini-btn ${this.confirmFlattenPending ? "is-primary" : ""}`,
-          text: this.confirmFlattenPending ? `确认移动 ${subCount} 集到根目录` : "平铺提取至番剧根目录"
+          text: this.confirmFlattenPending ? `确认移动 ${subCount} 集到主文件夹` : "全部移入主文件夹"
         });
         flattenBtn.onclick = async () => {
           if (!this.confirmFlattenPending) {
@@ -7794,7 +7758,7 @@ function openLocalFolderDiagnosticsModal(plugin, item, onUpdated = null) {
           this.render();
           if (NoticeClass) {
             new NoticeClass(
-              `已平铺提取 ${res.movedCount} 集视频至番剧根目录${
+              `已将 ${res.movedCount} 集视频移入主文件夹${
                 res.skippedCount > 0 ? `（跳过同名冲突 ${res.skippedCount} 项）` : ""
               }。`,
               4200

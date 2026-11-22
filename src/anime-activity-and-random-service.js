@@ -1,6 +1,7 @@
 const { Notice } = require("obsidian");
 const { isMobileEnv, isDesktopNodeAvailable, tryRequireNode } = require("./platform-env.js");
-const { inspectLocalFolder, openLocalPathSafely } = require("./note-utils.js");
+const { openLocalPathSafely } = require("./note-utils.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 
 const RANDOM_ANIME_SCOPES = [
   {
@@ -99,9 +100,10 @@ function filterPoolByRandomScope(items, options = {}) {
     const totalEp = Number(item.totalEpisodes) || 0;
     const watchedEp = Number(item.watchedEpisodes) || 0;
     const score = getEffectiveItemScore(item);
-    const localInfo = !isMobileEnv() && item.downloadPath && item.downloadPath !== "无"
-      ? inspectLocalFolder(item.downloadPath, watchedEp)
+    const resolvedLocal = !isMobileEnv()
+      ? localMediaIndexService.resolveAnimeLocalMedia(options.plugin || null, item)
       : null;
+    const localInfo = resolvedLocal && resolvedLocal.hasAnyBinding ? resolvedLocal : null;
     const hasLocalNext = Boolean(localInfo && !localInfo.error && localInfo.nextEpisodeFile);
     const hasAnyLocalVideo = Boolean(localInfo && !localInfo.error && Array.isArray(localInfo.videoFiles) && localInfo.videoFiles.length > 0);
     const hasWatchUrl = Boolean(item.watchUrl && /^https?:\/\//i.test(item.watchUrl));
@@ -143,12 +145,13 @@ function filterPoolByRandomScope(items, options = {}) {
 }
 
 function pickRandomAnimeEpisode(plugin, items, options = {}) {
-  let pool = filterPoolByRandomScope(items, options);
+  const enrichedOptions = Object.assign({}, options, { plugin });
+  let pool = filterPoolByRandomScope(items, enrichedOptions);
   const scopeId = String(options.scopeId || "default_active");
 
   // Graceful fallback if default_active has 0 watching/wish items in a vault where everything is 已看
   if (pool.length === 0 && scopeId === "default_active" && Array.isArray(items) && items.length > 0) {
-    pool = filterPoolByRandomScope(items, Object.assign({}, options, { scopeId: "high_score_rewatch" }));
+    pool = filterPoolByRandomScope(items, Object.assign({}, enrichedOptions, { scopeId: "high_score_rewatch" }));
   }
 
   if (pool.length === 0) {

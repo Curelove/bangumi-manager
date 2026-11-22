@@ -2,6 +2,7 @@ const { requestUrl, Notice, Modal, Menu } = require("obsidian");
 const { openLocalPathSafely, inspectLocalFolder, parseVideoEpisodeMeta } = require("./note-utils.js");
 const roxyMascotService = require("./roxy-mascot-service.js");
 const reviewStudioService = require("./review-studio-service.js");
+const localMediaIndexService = require("./local-media-index-service.js");
 const v07Core = require("./v07-core.js");
 const { paperSlipSwap, withPreservedScroll } = require("./v08-motion-and-lens.js");
 const { renderGallerySanctuary } = require("./v08-gallery-sanctuary.js");
@@ -4325,14 +4326,13 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
   const localRoot = String(plugin.settings?.localAnimeRoot || "").trim();
   let missingFfmpegDetected = false;
 
-  // 阶段 1（仅桌面端）：从当前作用域内的本地已下载番剧视频 + 字幕轨中抽选经典台词并调用 FFmpeg 切出原声 MP3
+  // 阶段 1（仅桌面端）：从所有已关联的本地动画视频（含任意路径、多目录与单集绑定）+ 字幕轨中抽选台词并切出原声 MP3
   if (isDesktopNodeAvailable()) {
     try {
       const candidateVideos = [];
       const seenVideoPaths = new Set();
       const pushCandidateVideo = (videoPath, animeTitle, episode) => {
         if (!videoPath || seenVideoPaths.has(videoPath)) return;
-        if (localRoot && !isPathInsideAnimeRoot(localRoot, videoPath)) return;
         seenVideoPaths.add(videoPath);
         const ext = path.extname(videoPath).toLowerCase();
         let hasExtSub = false;
@@ -4352,11 +4352,7 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
         });
       };
 
-      if (
-        currentSelectedVideo &&
-        fs.existsSync(currentSelectedVideo) &&
-        (!localRoot || isPathInsideAnimeRoot(localRoot, currentSelectedVideo))
-      ) {
+      if (currentSelectedVideo && fs.existsSync(currentSelectedVideo)) {
         pushCandidateVideo(
           currentSelectedVideo,
           path.basename(path.dirname(currentSelectedVideo)),
@@ -4364,22 +4360,25 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
         );
       }
 
-      const folderPool = [];
+      const animeMediaPool = [];
       const seenFolders = new Set();
       for (const it of vaultAnimeItems || []) {
         if (!it || it.isSamplePreviewItem) continue;
-        if (!it.downloadPath || it.downloadPath === "无" || !fs.existsSync(it.downloadPath)) continue;
-        // 若用户显式设置了本地动画根目录，严格只允许抽取位于该根目录之下的番剧，杜绝旧测试目录或迁移前路径串台
-        if (localRoot && !isPathInsideAnimeRoot(localRoot, it.downloadPath)) continue;
-        const norm = path.resolve(it.downloadPath);
-        const key = typeof process !== "undefined" && process.platform === "win32" ? norm.toLowerCase() : norm;
-        if (!seenFolders.has(key)) {
-          seenFolders.add(key);
-          folderPool.push({ dirPath: norm, title: it.name || path.basename(norm) });
+        const resolved = localMediaIndexService.resolveAnimeLocalMedia(plugin, it);
+        if (resolved && Array.isArray(resolved.videoFiles) && resolved.videoFiles.length > 0) {
+          animeMediaPool.push({ title: it.name || "动画", videoFiles: resolved.videoFiles });
+          for (const f of resolved.folders || []) {
+            if (f.status === "ok" && f.path) {
+              const norm = path.resolve(f.path);
+              const key = typeof process !== "undefined" && process.platform === "win32" ? norm.toLowerCase() : norm;
+              seenFolders.add(key);
+            }
+          }
         }
       }
 
-      if (localRoot && fs.existsSync(localRoot) && folderPool.length < 8) {
+      const folderPool = [];
+      if (localRoot && fs.existsSync(localRoot) && animeMediaPool.length < 8) {
         const nativeFs = tryRequireNode("fs");
         const readdirAsync =
           nativeFs?.promises && typeof nativeFs.promises.readdir === "function"
@@ -4395,7 +4394,7 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
           "system volume information"
         ]);
         const scanSubDirsAsync = async (dir, depth) => {
-          if (depth > 3 || visitedDirs >= 40 || folderPool.length >= 8) return;
+          if (depth > 3 || visitedDirs >= 40 || folderPool.length + animeMediaPool.length >= 8) return;
           visitedDirs += 1;
           try {
             const subEntries = await readdirAsync(dir);
@@ -4421,7 +4420,7 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
               }
             }
             for (const sub of childDirs) {
-              if (visitedDirs >= 40 || folderPool.length >= 8) break;
+              if (visitedDirs >= 40 || folderPool.length + animeMediaPool.length >= 8) break;
               await scanSubDirsAsync(sub, depth + 1);
             }
           } catch (_) {}
@@ -4429,8 +4428,23 @@ async function drawPlayableAcgVoiceQuote(plugin, vaultAnimeItems = [], currentSe
         await scanSubDirsAsync(localRoot, 0);
       }
 
+      const shuffledAnime = [...animeMediaPool].sort(() => Math.random() - 0.5);
+      for (const entry of shuffledAnime.slice(0, 10)) {
+        const preferredVids = [...entry.videoFiles].sort((a, b) => {
+          const aMkv = /\.mkv$/i.test(a.name) ? 1 : 0;
+          const bMkv = /\.mkv$/i.test(b.name) ? 1 : 0;
+          if (aMkv !== bMkv) return bMkv - aMkv;
+          return Math.random() - 0.5;
+        });
+        for (const vf of preferredVids.slice(0, 2)) {
+          if (vf.path) {
+            pushCandidateVideo(vf.path, entry.title, vf.episode !== null ? String(vf.episode) : "1");
+          }
+        }
+      }
+
       const shuffledFolders = [...folderPool].sort(() => Math.random() - 0.5);
-      for (const folderItem of shuffledFolders.slice(0, 10)) {
+      for (const folderItem of shuffledFolders.slice(0, 6)) {
         const folderInfo = inspectLocalFolder(folderItem.dirPath);
         if (folderInfo && Array.isArray(folderInfo.videoFiles) && folderInfo.videoFiles.length > 0) {
           const preferredVids = [...folderInfo.videoFiles].sort((a, b) => {
@@ -4798,37 +4812,33 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
 
     // 步骤 1：选择番剧与剧集视频（或直接浏览本地视频） + 设置首尾缓冲秒数
     const step1Row = drawer.createDiv("curator-voice-slicer-row");
-    const activeLocalRoot = String(plugin.settings?.localAnimeRoot || "").trim();
+    const animeResolvedMap = new Map();
     const animeWithLocal = (vaultAnimeItems || [])
-      .filter((it) => {
-        if (!it || it.isSamplePreviewItem || !it.downloadPath || it.downloadPath === "无") return false;
-        if (activeLocalRoot && !isPathInsideAnimeRoot(activeLocalRoot, it.downloadPath)) return false;
-        return fs.existsSync(it.downloadPath);
-      })
       .map((ani) => {
-        let hasSoftSubHint = false;
-        try {
-          const folderRes = inspectLocalFolder(ani.downloadPath);
-          if (folderRes && Array.isArray(folderRes.videoFiles)) {
-            hasSoftSubHint = folderRes.videoFiles.some((vf) => /\.mkv$/i.test(vf.name));
-          }
-          if (!hasSoftSubHint) {
-            const entries = fs.readdirSync(ani.downloadPath);
-            hasSoftSubHint = entries.some((f) => /\.(mkv|ass|ssa|srt|vtt)$/i.test(f));
-          }
-        } catch (e) {}
-        return Object.assign({}, ani, { _hasSoftSubHint: hasSoftSubHint });
+        if (!ani || ani.isSamplePreviewItem) return null;
+        const resolved = localMediaIndexService.resolveAnimeLocalMedia(plugin, ani);
+        if (!resolved || !Array.isArray(resolved.videoFiles) || resolved.videoFiles.length === 0) {
+          return null;
+        }
+        const bKey = localMediaIndexService.getAnimeBindingKey(ani) || ani.name;
+        const hasSoftSubHint = resolved.videoFiles.some((vf) => /\.mkv$/i.test(vf.name));
+        animeResolvedMap.set(bKey, resolved);
+        return Object.assign({}, ani, { _bindingKey: bKey, _hasSoftSubHint: hasSoftSubHint });
       })
+      .filter(Boolean)
       .sort((a, b) => (b._hasSoftSubHint ? 1 : 0) - (a._hasSoftSubHint ? 1 : 0));
 
     const animeSelect = step1Row.createEl("select", { cls: "curator-sort-select" });
-    animeSelect.createEl("option", { value: "", text: "── 从馆藏本地番剧中选择 ──" });
+    animeSelect.createEl("option", { value: "", text: "── 从已关联本地视频的作品中选择 ──" });
     animeWithLocal.forEach((ani) => {
       const opt = animeSelect.createEl("option", {
-        value: ani.downloadPath,
+        value: ani._bindingKey,
         text: ani._hasSoftSubHint ? `《${ani.name}》 · 含软字幕/MKV` : `《${ani.name}》`
       });
-      if (uiState.selectedAnimePath === ani.downloadPath) opt.selected = true;
+      if (uiState.selectedAnimePath === ani._bindingKey || (ani.downloadPath && uiState.selectedAnimePath === ani.downloadPath)) {
+        opt.selected = true;
+        uiState.selectedAnimePath = ani._bindingKey;
+      }
     });
 
     const epSelect = step1Row.createEl("select", { cls: "curator-sort-select" });
@@ -4867,18 +4877,18 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
       await plugin.saveSettings();
     };
 
-    const populateEpisodes = (folderPath) => {
+    const populateEpisodes = (bindingKeyOrPath) => {
       epSelect.empty();
       epSelect.createEl("option", { value: "", text: "── 选择剧集视频文件 ──" });
-      if (!folderPath) return;
-      const res = inspectLocalFolder(folderPath);
+      if (!bindingKeyOrPath) return;
+      const res = animeResolvedMap.get(bindingKeyOrPath) || inspectLocalFolder(bindingKeyOrPath);
       if (res && Array.isArray(res.videoFiles)) {
         res.videoFiles.forEach((vf) => {
-          const full = vf.path || path.join(folderPath, vf.name);
-          const subTag = vf.inSubfolder ? " [子目录]" : "";
+          const full = vf.path || path.join(bindingKeyOrPath, vf.name);
+          const subTag = vf.inSubfolder ? " [子目录]" : vf.isExplicitBind ? " [已指定]" : "";
           const o = epSelect.createEl("option", {
             value: full,
-            text: vf.episode !== null ? `第 ${vf.episode} 话${subTag} · ${vf.name}` : `${vf.name}${subTag}`
+            text: vf.episode !== null ? `第 ${vf.episode} 集${subTag} · ${vf.name}` : `${vf.name}${subTag}`
           });
           o.dataset.epNum = vf.episode !== null ? String(vf.episode) : "";
           if (uiState.selectedVideoFile === full) o.selected = true;

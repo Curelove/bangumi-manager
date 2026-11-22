@@ -28,6 +28,10 @@ function getV07Styles() {
     const { GALLERY_SANCTUARY_CSS } = require("./v08-gallery-sanctuary.js");
     if (GALLERY_SANCTUARY_CSS) parts.push(GALLERY_SANCTUARY_CSS);
   } catch (_) {}
+  try {
+    const { LOCAL_MEDIA_LINKER_CSS } = require("./local-media-linker-modal.js");
+    if (LOCAL_MEDIA_LINKER_CSS) parts.push(LOCAL_MEDIA_LINKER_CSS);
+  } catch (_) {}
   return parts.join("\n");
 }
 

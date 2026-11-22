@@ -327,7 +327,7 @@ var SingleAnimeImportModal = class extends Modal {
         ""
       );
       if (!base) {
-        pathPreview.textContent = "尚未在设置中填写「本地动画根目录」，本次仅创建动画笔记（日后可随时绑定本地视频目录）。";
+        pathPreview.textContent = "尚未设置「新下载默认保存目录」，本次仅创建动画笔记（日后可随时通过「本地视频关联」绑定已有视频）。";
         return;
       }
       if (!folderCheckbox.checked || !seasonInfo.year || seasonInfo.season === "\u672A\u77E5\u5B63\u5EA6") {

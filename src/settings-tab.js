@@ -913,17 +913,17 @@ module.exports = function createSettingsTabClass({
         if (/季度视图策略/.test(n)) return false;
         return (
           rec.sectionTitle === "本地播放与状态检查" ||
-          /本地动画根目录|FFmpeg|本地视频播放器|自定义视频播放器|立即检查全部本地状态|观片手札图片目录/.test(n)
+          /本地动画根目录|新下载默认保存目录|本地视频关联|FFmpeg|本地视频播放器|自定义视频播放器|立即检查全部本地状态|观片手札图片目录/.test(n)
         );
       }
     },
     {
       key: "intent-download",
       label: "下载与自动追更",
-      hint: "追番下载助手、漫猫检索、自动追更管理、qBittorrent 与本地动画根目录",
+      hint: "追番下载助手、漫猫检索、自动追更管理、qBittorrent 与新下载默认保存目录",
       match: (rec) => {
         const n = rec.origNameText || "";
-        return rec.sectionTitle === "追番下载与自动追更" || /本地动画根目录/.test(n);
+        return rec.sectionTitle === "追番下载与自动追更" || /本地动画根目录|新下载默认保存目录/.test(n);
       }
     },
     {
@@ -1592,9 +1592,8 @@ module.exports = function createSettingsTabClass({
         const dl = fm && fm["下载路径"] ? String(fm["下载路径"]).trim() : "";
         if (!dl || dl === "无") continue;
         const fromOldRoot = prevRoot && isPathInsideAnimeRoot(prevRoot, dl);
-        const outsideNewRoot = nextRoot && !isPathInsideAnimeRoot(nextRoot, dl);
-        if (fromOldRoot || outsideNewRoot) {
-          affected.push({ file, dl, fromOldRoot });
+        if (fromOldRoot) {
+          affected.push({ file, dl, fromOldRoot: true });
         }
       }
 
@@ -1607,7 +1606,7 @@ module.exports = function createSettingsTabClass({
       box.style.cssText =
         "margin:-4px 0 14px 0;padding:10px 12px;border-radius:8px;background:var(--background-secondary);border:1px solid var(--background-modifier-border);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;";
       box.createDiv({
-        text: `检测到 ${affected.length} 部已有动画笔记的「下载路径」仍指向旧目录（音声抽取已自动限制在当前根目录内）。是否同步更新这些笔记的路径绑定？`,
+        text: `检测到 ${affected.length} 部已有动画笔记的「下载路径」仍指向旧的默认保存目录（不影响各处散落关联视频的正常播放与抽取）。是否需要批量更新这些旧笔记的路径？`,
         attr: { style: "font-size:12px;line-height:1.5;color:var(--text-muted);flex:1 1 280px;" }
       });
       const btnRow = box.createDiv({
@@ -1683,12 +1682,12 @@ module.exports = function createSettingsTabClass({
     };
 
     const settingRow = new Setting(container)
-      .setName("本地动画根目录")
+      .setName("新下载默认保存目录")
       .setDesc(descText)
       .addText((text) => {
         rootInputEl = text.inputEl;
         text
-          .setPlaceholder("例如：D:/Anime（未配置本地视频可留空）")
+          .setPlaceholder("例如：D:/Anime（仅新下载时创建子目录，可留空）")
           .setValue(baselineRoot);
 
         text.inputEl.addEventListener("focus", () => {
@@ -1710,7 +1709,7 @@ module.exports = function createSettingsTabClass({
         btn.setButtonText("选择文件夹…").onClick(async () => {
           baselineRoot = String(this.plugin.settings.localAnimeRoot || "").trim();
           const picked = await pickNativeFolderOnDesktop({
-            title: "选择本地动画根目录",
+            title: "选择新下载默认保存目录",
             initialDir: baselineRoot
           });
           if (picked) {
@@ -1722,6 +1721,17 @@ module.exports = function createSettingsTabClass({
     }
 
     container.appendChild(promptHost);
+
+    if (isDesktopNodeAvailable() && typeof this.plugin?.openLocalMediaLinkerModal === "function") {
+      new Setting(container)
+        .setName("本地视频关联")
+        .setDesc("把电脑各盘符、下载文件夹或移动硬盘里已经看过的旧动画原片，原地关联到对应动画笔记（不移动原文件、不改原文件名，也能直接播放和截取台词）。")
+        .addButton((btn) => {
+          btn.setButtonText("打开本地视频关联面板").onClick(() => {
+            this.plugin.openLocalMediaLinkerModal(null);
+          });
+        });
+    }
   }
 
   addFfmpegSetting(container) {
@@ -2632,7 +2642,7 @@ module.exports = function createSettingsTabClass({
     if (!isMobile) {
       this.addLocalAnimeRootSetting(
         container,
-        "电脑端存放本地番剧视频的总文件夹路径，用于识别本地话数更新、创建下载子目录与限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
+        "新番下载或自动创建番剧目录时的默认保存总目录。散落在其他盘符的已有视频，可直接用下方「本地视频关联」原地绑定，无需移动原文件。"
       );
     }
 
@@ -2897,7 +2907,7 @@ module.exports = function createSettingsTabClass({
     if (!isMobile) {
       this.addLocalAnimeRootSetting(
         container,
-        "用于提示和创建本地动画文件夹、限制剧集音声抽取范围（未配置本地视频可留空，不会移动已有视频）。"
+        "仅用于新下载或一键新建番剧文件夹时的默认位置（可留空）；已有视频可通过「本地视频关联」跨盘符原地绑定，不会移动原文件。"
       );
 
       this.addFfmpegSetting(container);
@@ -6077,7 +6087,7 @@ await this.saveAndSynchronizeNoteScores();
       "导入单个动画",
       isMobile
         ? "搜索 Bangumi 并创建动画笔记；封面保存目录使用上方设置。"
-        : "搜索 Bangumi 并创建动画笔记；封面保存目录和本地动画根目录使用上方设置。",
+        : "搜索 Bangumi 并创建动画笔记；封面保存目录和新下载默认保存目录使用上方设置。",
       async () => {
         await openSingleAnimeImport(
           this.app,
