@@ -139,7 +139,10 @@ function collectCleanTagsForInsights(item) {
 function openAnimeInsightsDrawer(hostRoot, ctx, initialTab = "personal") {
   closeAllPopovers();
   const docBody = document.body;
-  docBody.querySelectorAll(":scope > .bm7-drawer").forEach((x) => x.remove());
+  docBody.querySelectorAll(":scope > .bm7-drawer").forEach((x) => {
+    if (typeof x._bm7Close === "function") x._bm7Close(true);
+    else x.remove();
+  });
 
   const themeAttr =
     (hostRoot && hostRoot.getAttribute && hostRoot.getAttribute("data-bm7-theme")) ||
@@ -162,16 +165,21 @@ function openAnimeInsightsDrawer(hostRoot, ctx, initialTab = "personal") {
     }
   });
   const sheet = h("div.bm7-drawer-sheet");
-  const close = () => {
-    drawer.classList.add("is-leaving");
+  const close = (immediate = false) => {
     document.removeEventListener("keydown", onKey, true);
+    if (immediate) {
+      drawer.remove();
+      return;
+    }
+    drawer.classList.add("is-leaving");
     setTimeout(() => drawer.remove(), 200);
   };
+  drawer._bm7Close = close;
   const onKey = (e) => {
     if (e.key === "Escape") close();
   };
-  drawer.append(h("div.bm7-drawer-scrim", { on: { click: close } }), sheet);
-  sheet.appendChild(iconButton("close", "关闭统计抽屉", close, "bm7-drawer-close"));
+  drawer.append(h("div.bm7-drawer-scrim", { on: { click: () => close(false) } }), sheet);
+  sheet.appendChild(iconButton("close", "关闭统计抽屉", () => close(false), "bm7-drawer-close"));
 
   const body = h("div.bm7-drawer-body");
   sheet.appendChild(body);
@@ -674,7 +682,17 @@ function renderAnimeStage(host, ctx) {
   const getWatchUrl = ctx.getWatchUrl || ((it) => it.watchUrl || "");
   const getBgmUrl =
     ctx.getBgmUrl ||
-    ((it) => (it && it.bgmUrl) || (it && it.subjectId ? `https://bgm.tv/subject/${it.subjectId}` : ""));
+    ((it) => {
+      const raw = String((it && it.bgmUrl) || "").trim();
+      if (/^https?:\/\//i.test(raw)) return raw;
+      return it && it.subjectId ? `https://bgm.tv/subject/${it.subjectId}` : "";
+    });
+  const getReferenceUrl =
+    ctx.getReferenceUrl ||
+    ((it) => {
+      const raw = String((it && it.referenceUrl) || "").trim();
+      return /^https?:\/\//i.test(raw) ? raw : "";
+    });
   const classifyWatch =
     ctx.classifyWatch ||
     ((it) => {
@@ -995,6 +1013,16 @@ function renderAnimeStage(host, ctx) {
               actions.openWeb(item, bgmUrl);
             })
           );
+        } else {
+          const refUrl = getReferenceUrl(item);
+          if (refUrl && actions.openWeb) {
+            box.appendChild(
+              menuItem("link", "打开外部参考链接", () => {
+                close();
+                actions.openWeb(item, refUrl);
+              })
+            );
+          }
         }
 
         if (watchMeta && watchMeta.kind === "streaming" && watchMeta.url && actions.openWeb) {
@@ -1002,6 +1030,15 @@ function renderAnimeStage(host, ctx) {
             menuItem("play", watchMeta.siteLabel ? `打开 ${watchMeta.siteLabel} 播放页` : "打开在线播放页", () => {
               close();
               actions.openWeb(item, watchMeta.url);
+            })
+          );
+        }
+
+        if (actions.editMetadata && item.file && !item.isSamplePreviewItem) {
+          box.appendChild(
+            menuItem("pen", "编辑动画资料…", () => {
+              close();
+              actions.editMetadata(item);
             })
           );
         }

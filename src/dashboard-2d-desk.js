@@ -220,7 +220,8 @@ function matchesInstantSearch(item, rawQuery) {
   const haystack = [
     item.name || "",
     item.japaneseName || "",
-    item.subjectId ? `bgm${item.subjectId} #${item.subjectId} ${item.subjectId}` : "",
+    item.subjectId ? `bgm${item.subjectId} #${item.subjectId} ${item.subjectId}` : "自定义 自建 custom",
+    item.mediaFormat || "",
     item.tags || "",
     item.studio || "",
     item.director || "",
@@ -515,7 +516,7 @@ function collectAvailableSeasons(items) {
   for (const it of items || []) {
     const year = String(it.year || "").trim();
     const season = String(it.season || "").trim();
-    if (!year || !season) continue;
+    if (!/^\d{4}$/.test(year) || !season || season === "未知季度" || season === "未知") continue;
     const key = `${year}:${season}`;
     if (!map.has(key)) {
       map.set(key, {
@@ -972,6 +973,16 @@ function renderNewUserStarterDesk(plugin, hostMount, helpers = {}) {
       triggerSingleImport(sampleName);
     };
   });
+  if (typeof plugin.openCustomAnimeModal === "function") {
+    const customStarterChip = chipRow.createEl("button", {
+      cls: "curator-starter-chip",
+      text: "手动新建自定义动画…"
+    });
+    customStarterChip.onclick = (e) => {
+      e.preventDefault();
+      plugin.openCustomAnimeModal({ initialName: searchInput.value.trim() });
+    };
+  }
 
   // 路径 2：填入 Bangumi ID 一键同步历史片单
   const cardSync = grid.createDiv("curator-starter-card");
@@ -2564,9 +2575,10 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
     const metaParts = [];
     if (item.year || item.season) metaParts.push([item.year, item.season].filter(Boolean).join(" "));
     if (item.studio) metaParts.push(item.studio);
+    if (!item.subjectId && item.isCustom) metaParts.push("自建");
     info.createDiv({
       cls: "bangumi-grid-meta curator-gallery-meta",
-      text: metaParts.join(" · ") || (item.subjectId ? `BGM #${item.subjectId}` : "馆藏条目")
+      text: metaParts.join(" · ") || (item.subjectId ? `BGM #${item.subjectId}` : "自建条目")
     });
 
     // 固定单行安静页脚（左：最多2枚无框标签 + 添加标签；右：安静无框微链接，Hover 显色不改高度）
@@ -2675,6 +2687,13 @@ function renderCatalogGalleryMode(plugin, container, items, state, helpers, cata
       menu.addItem((mi) =>
         mi.setTitle("关联角色、画集与游戏").setIcon("sparkles").onClick(() => triggerGalleryWand())
       );
+      if (item.file && !item.isSamplePreviewItem && typeof plugin?.openEditAnimeMetadataModal === "function") {
+        menu.addItem((mi) =>
+          mi.setTitle("编辑动画资料…").setIcon("pencil").onClick(() => {
+            plugin.openEditAnimeMetadataModal(item);
+          })
+        );
+      }
       if (item.file) {
         menu.addItem((mi) =>
           mi.setTitle("打开 Markdown 笔记").setIcon("file-text").onClick(async () => {
@@ -2988,6 +3007,13 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
           reviewStudioService.openAnimeReviewStudioModal(plugin, item);
         })
       );
+      if (item.file && !item.isSamplePreviewItem && typeof plugin?.openEditAnimeMetadataModal === "function") {
+        menu.addItem((mi) =>
+          mi.setTitle("编辑动画资料…").setIcon("pencil").onClick(() => {
+            plugin.openEditAnimeMetadataModal(item);
+          })
+        );
+      }
       if (item.file) {
         menu.addItem((mi) =>
           mi.setTitle("打开动画笔记").setIcon("file-text").onClick(async () => {
@@ -3004,6 +3030,8 @@ function renderCatalogIndexMode(plugin, container, items, state, helpers, catalo
     colIdx.createDiv({ cls: "curator-index-seq", text: String(idx + 1).padStart(2, "0") });
     if (item.subjectId) {
       colIdx.createDiv({ cls: "curator-index-bgmid", text: `#${item.subjectId}` });
+    } else if (item.isCustom) {
+      colIdx.createDiv({ cls: "curator-index-bgmid", text: "自建" });
     }
 
     // 2. 缩略图列

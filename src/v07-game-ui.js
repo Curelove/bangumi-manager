@@ -423,7 +423,10 @@ function timerButton(game, ctx, rerender) {
 /** 视图内抽屉：宽屏右侧滑出，窄屏为底部整页 */
 function openGameStatsPanel(game, ctx, hostRoot, onChange) {
   const host = document.body;
-  host.querySelectorAll(":scope > .bm7-drawer").forEach((x) => x.remove());
+  host.querySelectorAll(":scope > .bm7-drawer").forEach((x) => {
+    if (typeof x._bm7Close === "function") x._bm7Close(true);
+    else x.remove();
+  });
   const themeAttr = (hostRoot && hostRoot.getAttribute && hostRoot.getAttribute("data-bm7-theme")) || (ctx.appearance && ctx.appearance.theme) || "follow";
   const motionAttr = (hostRoot && hostRoot.getAttribute && hostRoot.getAttribute("data-bm7-motion")) || (ctx.appearance && ctx.appearance.motion === false ? "off" : "on");
   const drawer = h("div.bm7-root.bm7-drawer", {
@@ -444,6 +447,7 @@ function openGameStatsPanel(game, ctx, hostRoot, onChange) {
     drawer.classList.add("is-leaving");
     setTimeout(() => drawer.remove(), 200);
   };
+  drawer._bm7Close = close;
   const onKey = (e) => e.key === "Escape" && close();
   drawer.append(h("div.bm7-drawer-scrim", { on: { click: () => close(false) } }), sheet);
   sheet.appendChild(iconButton("close", "关闭", () => close(false), "bm7-drawer-close"));

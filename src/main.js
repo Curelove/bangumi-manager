@@ -137,6 +137,8 @@ const createNetabaModals = require("./netaba-modals.js");
 const animeDownloadService = require("./anime-download-service.js");
 const localMediaIndexService = require("./local-media-index-service.js");
 const localMediaLinkerModal = require("./local-media-linker-modal.js");
+const reviewStudioService = require("./review-studio-service.js");
+const customAnimeModal = require("./custom-anime-modal.js");
 const v07Core = require("./v07-core.js");
 
 var DEFAULT_SETTINGS = {
@@ -1011,6 +1013,13 @@ var BangumiManagerPlugin = class extends Plugin {
       }
     });
     this.addCommand({
+      id: "create-custom-anime",
+      name: "新建自定义动画（不依赖 Bangumi）",
+      callback: () => {
+        this.openCustomAnimeModal();
+      }
+    });
+    this.addCommand({
       id: "import-batch-anime",
       name: "\u6279\u91CF\u5BFC\u5165\u52A8\u753B",
       callback: async () => {
@@ -1250,6 +1259,46 @@ var BangumiManagerPlugin = class extends Plugin {
             await multiHallArchiveService.handleVaultGalleryFileRename(this, oldPath, file?.path || "");
           } catch (_) {}
           scheduleGalleryVaultSync(180);
+        }
+        if (file && file.extension === "md" && oldPath && file.path && oldPath !== file.path) {
+          const noteRoot = String(this.settings.noteRootFolder || "动画笔记").replace(/[\\/]+$/, "") + "/";
+          if (oldPath.startsWith(noteRoot) || file.path.startsWith(noteRoot)) {
+            let settingsDirty = false;
+            try {
+              if (
+                this.settings.personalRatingCache &&
+                Object.prototype.hasOwnProperty.call(this.settings.personalRatingCache, oldPath)
+              ) {
+                this.settings.personalRatingCache[file.path] = this.settings.personalRatingCache[oldPath];
+                delete this.settings.personalRatingCache[oldPath];
+                settingsDirty = true;
+              }
+              if (Array.isArray(this.settings.customCollectionSections)) {
+                for (const col of this.settings.customCollectionSections) {
+                  if (!col || !Array.isArray(col.items)) continue;
+                  for (const entry of col.items) {
+                    if (entry && typeof entry === "object" && entry.path === oldPath) {
+                      entry.path = file.path;
+                      settingsDirty = true;
+                    }
+                  }
+                }
+              }
+              if (typeof localMediaIndexService.migrateAnimeBindingKey === "function") {
+                await localMediaIndexService.migrateAnimeBindingKey(
+                  this,
+                  `note:${oldPath}`,
+                  `note:${file.path}`,
+                  file.path
+                );
+              }
+              if (settingsDirty) {
+                await this.saveSettings().catch(() => {});
+              }
+            } catch (renameErr) {
+              console.warn("[Bangumi Manager] 同步重命名动画笔记关联键失败:", renameErr);
+            }
+          }
         }
       })
     );
@@ -1506,6 +1555,9 @@ var BangumiManagerPlugin = class extends Plugin {
     }
     if (typeof document !== "undefined") {
       for (const styleId of [
+        "bangumi-score-dashboard-style",
+        "bm9-rating-compare-styles",
+        "bm-custom-anime-modal-styles",
         "atelier-cel-style",
         "bangumi-roxy-3d-style",
         "bangumi-settings-spotlight-styles",
@@ -1888,6 +1940,18 @@ var BangumiManagerPlugin = class extends Plugin {
 
   async openSearchModal(initialQuery = "") {
     return await this.openSingleAnimeImportModal(initialQuery);
+  }
+
+  openCustomAnimeModal(options = {}) {
+    return customAnimeModal.openCustomAnimeModal(this.app, this, options);
+  }
+
+  openEditAnimeMetadataModal(item, options = {}) {
+    if (!item || item.isSamplePreviewItem || !item.file) {
+      new Notice("当前条目不支持编辑资料。", 3200);
+      return null;
+    }
+    return customAnimeModal.openCustomAnimeModal(this.app, this, Object.assign({}, options, { editItem: item }));
   }
 
   isTargetNote(file) {
@@ -3871,28 +3935,45 @@ if (this.settings.seasonViewMode === "current") {
       }
       const rawTags = dedupTags.join(", ");
 
+      const cleanMeta = (val) => {
+        const s = cleanValue(val);
+        return !s || s === "未知" || s === "未知季度" || s === "无" || s === "未设置" ? "" : s;
+      };
       const airDateMatch = String(content || "").match(/^\|\s*开播日期\s*\|\s*([^|\r\n]+?)\s*\|/m);
       const airDateText =
-        cleanValue(parsed.fields.开播日期) ||
-        (airDateMatch ? cleanValue(airDateMatch[1]) : "") ||
-        (cachedMeta?.date || "");
-      let resolvedYear = cleanValue(parsed.fields.开播年份);
-      let resolvedSeason = cleanValue(parsed.fields.开播季度);
-      if ((!resolvedYear || !resolvedSeason || resolvedSeason === "未知季度") && airDateText) {
+        cleanMeta(parsed.fields.开播日期) ||
+        (airDateMatch ? cleanMeta(airDateMatch[1]) : "") ||
+        cleanMeta(cachedMeta?.date || "");
+      const rawSeasonField = parsed.fields.开播季度;
+      const rawSeasonCleaned = cleanValue(rawSeasonField);
+      const explicitNoSeason =
+        rawSeasonField !== undefined &&
+        (rawSeasonCleaned === "" || rawSeasonCleaned === "不分季");
+      let resolvedYear = cleanMeta(parsed.fields.开播年份);
+      let resolvedSeason = explicitNoSeason ? "" : cleanMeta(rawSeasonField);
+      if ((!resolvedYear || (!resolvedSeason && !explicitNoSeason)) && airDateText) {
         const inferred = noteManager.getSeasonInfo(airDateText);
         if (!resolvedYear && inferred.year) resolvedYear = inferred.year;
-        if ((!resolvedSeason || resolvedSeason === "未知季度") && inferred.season) {
+        if (!resolvedSeason && !explicitNoSeason && inferred.season && inferred.season !== "未知季度") {
           resolvedSeason = inferred.season;
         }
       }
+      const cleanBgmLink = /^https?:\/\//i.test(bgmLink) ? bgmLink : "";
+      const rawSource = cleanValue(parsed.fields.数据来源);
+      const isCustom = rawSource === "自定义" || !subjectId;
+      const cleanRefUrlRaw = cleanMeta(parsed.fields.参考链接);
+      const cleanRefUrl = /^https?:\/\//i.test(cleanRefUrlRaw) ? cleanRefUrlRaw : "";
+      const cleanNetabaRaw = cleanMeta(parsed.fields.Netaba链接);
+      const cleanNetabaUrl = /^https?:\/\//i.test(cleanNetabaRaw) ? cleanNetabaRaw : "";
+      const cleanCover = cleanMeta(parsed.fields.cover);
 
       result.push({
         file,
         name: cleanValue(
           parsed.fields.中文名
         ) || file.basename,
-        japaneseName: cleanValue(parsed.fields.日文名),
-        cover: cleanValue(parsed.fields.cover),
+        japaneseName: cleanMeta(parsed.fields.日文名),
+        cover: cleanCover,
         state: cleanValue(
           parsed.fields.观看状态
         ) || "未设置",
@@ -3905,44 +3986,45 @@ if (this.settings.seasonViewMode === "current") {
           parsed.fields.BGM用户评分 ||
           parsed.fields["BGM 用户评分"] ||
           parsed.fields.Bangumi用户评分 ||
-          (this.settings.bangumiRatingCache || {})[subjectId]
+          (subjectId ? (this.settings.bangumiRatingCache || {})[subjectId] : "")
         ),
         publicScore: this.parseDashboardScore(
-          (this.settings.bangumiPublicRatingCache || {})[subjectId] ||
+          (subjectId ? (this.settings.bangumiPublicRatingCache || {})[subjectId] : "") ||
           parsed.fields.BGM评分 ||
           parsed.fields["BGM 评分"]
         ),
         preciseScore: this.parseDashboardScore(
-          (
-            this.settings.bangumiPreciseRatingCache ||
-            {}
-          )[
-            subjectId
-          ] ||
+          (subjectId ? (this.settings.bangumiPreciseRatingCache || {})[subjectId] : "") ||
           parsed.fields.BGM精确评分 ||
-          (this.settings.bangumiPublicRatingCache || {})[subjectId] ||
+          (subjectId ? (this.settings.bangumiPublicRatingCache || {})[subjectId] : "") ||
           parsed.fields.BGM评分 ||
           parsed.fields["BGM 评分"]
         ),
+        referenceScore: this.parseDashboardScore(parsed.fields.参考评分),
+        referenceScoreSource: cleanMeta(parsed.fields.参考评分来源),
+        referenceUrl: cleanRefUrl,
+        isCustom,
+        mediaFormat: cleanMeta(parsed.fields.载体类型),
+        music: cleanMeta(parsed.fields.音乐),
         year: resolvedYear,
         season: resolvedSeason,
         airDate: airDateText,
-        recordDate: cleanValue(parsed.fields.记录日期),
+        recordDate: cleanMeta(parsed.fields.记录日期),
         watchUrl: noteUtils.extractWatchUrlFromContent(content, parsed.fields),
         tags: rawTags,
-        totalEpisodes: cleanValue(parsed.fields.总集数),
+        totalEpisodes: cleanMeta(parsed.fields.总集数),
         watchedEpisodes: extractWatchedEpisodes(content),
-        bgmUrl: bgmLink,
+        bgmUrl: cleanBgmLink,
         subjectId: subjectId,
-        animeType: cleanValue(parsed.fields.改编类型),
-        studio: cleanValue(parsed.fields.制作公司),
-        director: cleanValue(parsed.fields.监督),
+        animeType: cleanMeta(parsed.fields.改编类型),
+        studio: cleanMeta(parsed.fields.制作公司),
+        director: cleanMeta(parsed.fields.监督),
         downloadPath: cleanValue(parsed.fields.下载路径),
         localUpdateStatus: cleanValue(parsed.fields.本地更新状态),
         downloadSourceKeyword: cleanValue(parsed.fields.下载源关键词),
         rssUrl: cleanValue(parsed.fields.RSS订阅),
         downloadStreamId: cleanValue(parsed.fields.发布源标识),
-        netabaUrl: cleanValue(parsed.fields.Netaba链接),
+        netabaUrl: cleanNetabaUrl,
         reviews: noteUtils.parseNoteReviewsSection(content)
       });
     }
@@ -5230,6 +5312,10 @@ if (this.settings.seasonViewMode === "current") {
       .replace(/^!\[\[|\]\]$/g, "")
       .replace(/^\[\[|\]\]$/g, "");
 
+    if (!cleanPath || cleanPath === "未知" || cleanPath === "无" || cleanPath === "未设置") {
+      return "";
+    }
+
     if (/^(?:https?:|data:|blob:|app:)/i.test(cleanPath)) {
       return cleanPath;
     }
@@ -5512,15 +5598,24 @@ if (this.settings.seasonViewMode === "current") {
 
   bindAnimeItemQuickInteractions(targetEl, item) {
     if (!targetEl || !item) return;
+    const openRelations = async () => {
+      const allItems = await this.collectDashboardItems().catch(() => []);
+      multiHallArchiveService.openMagicWandRelationModal(
+        this,
+        {
+          type: "anime",
+          name: item.name,
+          title: item.name,
+          jpName: item.japaneseName || item.jpName || "",
+          subjectId: item.subjectId || "",
+          studio: item.studio || "",
+          file: item.file || null
+        },
+        allItems
+      );
+    };
     if (multiHallArchiveService && typeof multiHallArchiveService.bindMagicWandLongPress === "function") {
-      multiHallArchiveService.bindMagicWandLongPress(this, targetEl, {
-        sourceType: "anime",
-        title: item.name,
-        jpName: item.japaneseName || item.jpName || "",
-        subjectId: item.subjectId || "",
-        studio: item.studio || "",
-        notePath: item.file?.path || item.filePath || ""
-      });
+      multiHallArchiveService.bindMagicWandLongPress(targetEl, openRelations);
     }
     targetEl.addEventListener("contextmenu", (e) => {
       if (e.target && e.target.closest && e.target.closest("input, textarea, select")) return;
@@ -5528,25 +5623,25 @@ if (this.settings.seasonViewMode === "current") {
       e.stopPropagation();
       const menu = new Menu();
       menu.addItem((mi) =>
-        mi.setTitle("查看关联收藏").onClick(() => {
-          multiHallArchiveService.openMagicWandRelationModal(this, {
-            sourceType: "anime",
-            title: item.name,
-            jpName: item.japaneseName || item.jpName || "",
-            subjectId: item.subjectId || "",
-            studio: item.studio || "",
-            notePath: item.file?.path || item.filePath || ""
-          });
+        mi.setTitle("查看关联收藏").setIcon("sparkles").onClick(() => {
+          openRelations();
         })
       );
       menu.addItem((mi) =>
-        mi.setTitle("打开观片手札").onClick(() => {
-          reviewStudioService.openReviewStudioModal(this, item);
+        mi.setTitle("打开观片手札").setIcon("message-square").onClick(() => {
+          reviewStudioService.openAnimeReviewStudioModal(this, item);
         })
       );
+      if (item.file && !item.isSamplePreviewItem) {
+        menu.addItem((mi) =>
+          mi.setTitle("编辑动画资料…").setIcon("pencil").onClick(() => {
+            this.openEditAnimeMetadataModal(item);
+          })
+        );
+      }
       if (item.file) {
         menu.addItem((mi) =>
-          mi.setTitle("打开动画笔记").onClick(async () => {
+          mi.setTitle("打开动画笔记").setIcon("file-text").onClick(async () => {
             const leaf = this.app.workspace.getLeaf(true);
             await leaf.openFile(item.file);
           })
@@ -8210,6 +8305,15 @@ if (this.settings.seasonViewMode === "current") {
     );
 
     if (!url) {
+      const parsedCur = parseFrontmatter(content);
+      const curSid = bangumiApi.getSubjectId(cleanValue(parsedCur?.fields?.BGM链接));
+      if (!curSid && (page === "subject" || page === "compare")) {
+        new Notice(
+          "当前笔记为自定义动画，未绑定 Bangumi 条目，无法生成该 Netaba 页面。",
+          6000
+        );
+        return;
+      }
       new Notice(
         "当前设置不足以生成这个 Netaba 页面，请检查用户编号或对比动画设置。",
         6000
@@ -8260,6 +8364,15 @@ if (this.settings.seasonViewMode === "current") {
     );
 
     if (!url) {
+      const parsedCur = parseFrontmatter(content);
+      const curSid = bangumiApi.getSubjectId(cleanValue(parsedCur?.fields?.BGM链接));
+      if (!curSid && (page === "subject" || page === "compare")) {
+        new Notice(
+          "当前笔记为自定义动画，未绑定 Bangumi 条目，无法生成该 Netaba 页面。",
+          6000
+        );
+        return;
+      }
       new Notice(
         "当前设置不足以生成这个 Netaba 页面，请检查用户编号或对比动画设置。",
         6000
@@ -8271,11 +8384,14 @@ if (this.settings.seasonViewMode === "current") {
   }
 
   async openNetabaNoteManager() {
-    const items = await this.collectAnimeItems();
+    const allItems = await this.collectAnimeItems();
+    const items = allItems.filter((it) => Boolean(it.subjectId));
 
     if (items.length === 0) {
       new Notice(
-        "\u6CA1\u6709\u627E\u5230\u5E26\u6709 bangumi \u6807\u7B7E\u7684\u52A8\u753B\u7B14\u8BB0\u3002",
+        allItems.length > 0
+          ? "当前动画笔记均为未绑定 Bangumi 条目的自定义动画，暂不支持 Netaba 评分图。"
+          : "\u6CA1\u6709\u627E\u5230\u5E26\u6709 bangumi \u6807\u7B7E\u7684\u52A8\u753B\u7B14\u8BB0\u3002",
         6e3
       );
       return;
@@ -8391,6 +8507,15 @@ if (this.settings.seasonViewMode === "current") {
       if (!tags.includes("bangumi")) {
         continue;
       }
+      const rawYear = cleanValue(frontmatter.fields.\u5F00\u64AD\u5E74\u4EFD);
+      const rawSeason = cleanValue(frontmatter.fields.\u5F00\u64AD\u5B63\u5EA6);
+      const validYear = /^\d{4}$/.test(rawYear) ? rawYear : "";
+      const validSeason =
+        rawSeason && rawSeason !== "未知季度" && rawSeason !== "未知" && rawSeason !== "无"
+          ? rawSeason
+          : "";
+      const bgmLink = cleanValue(frontmatter.fields.BGM链接);
+      const subjectId = bangumiApi.getSubjectId(bgmLink);
       result.push({
         file,
         name: cleanValue(
@@ -8399,11 +8524,13 @@ if (this.settings.seasonViewMode === "current") {
         state: cleanValue(
           frontmatter.fields.\u89C2\u770B\u72B6\u6001
         ) || "\u672A\u8BBE\u7F6E",
-        season: cleanValue(
-          frontmatter.fields.\u5F00\u64AD\u5E74\u4EFD
-        ) + "\u5E74" + cleanValue(
-          frontmatter.fields.\u5F00\u64AD\u5B63\u5EA6
-        )
+        season: validYear && validSeason
+          ? validYear + "\u5E74" + validSeason
+          : validYear
+          ? validYear + "\u5E74"
+          : "未分季",
+        subjectId,
+        isCustom: cleanValue(frontmatter.fields.数据来源) === "自定义" || !subjectId
       });
     }
     return result.sort(
@@ -8420,20 +8547,25 @@ if (this.settings.seasonViewMode === "current") {
     let skipped = 0;
     for (const file of files) {
       const content = await this.app.vault.read(file);
-      const newContent = updateFrontmatterField(
+      let newContent = updateFrontmatterField(
         content,
         "\u89C2\u770B\u72B6\u6001",
         status
       );
+      newContent = syncNoteCalloutFromFrontmatter(newContent);
       if (newContent === content) {
         skipped += 1;
         continue;
       }
-      await this.app.vault.modify(
+      await this.modifyNoteSafely(
         file,
-        newContent
+        newContent,
+        2400
       );
       updated += 1;
+    }
+    if (updated > 0) {
+      await this.refreshOpenDashboardViews().catch(() => {});
     }
     if (showNotice) {
       new Notice(
@@ -8836,6 +8968,14 @@ var ManagerRibbonModal = class extends Modal {
           this.app,
           this.plugin
         );
+      }
+    );
+    this.addButton(
+      contentEl,
+      "新建自定义动画（不依赖 Bangumi）",
+      async () => {
+        this.close();
+        this.plugin.openCustomAnimeModal();
       }
     );
     this.addButton(

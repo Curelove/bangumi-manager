@@ -12,11 +12,77 @@ var IMAGE_EXTENSIONS = [
 function escapeYamlValue(value) {
   return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ");
 }
-function addYamlField(lines, key, value) {
-  const finalValue = value === void 0 || value === null || value === "" ? "\u672A\u77E5" : value;
+function addYamlField(lines, key, value, options = {}) {
+  const allowEmpty = Boolean(options && options.allowEmpty);
+  const finalValue =
+    value === void 0 || value === null || value === ""
+      ? (allowEmpty ? "" : "\u672A\u77E5")
+      : value;
   lines.push(
     key + ': "' + escapeYamlValue(finalValue) + '"'
   );
+}
+function normalizeCoverExtension(rawExtOrMime = "") {
+  const s = String(rawExtOrMime || "").trim().toLowerCase();
+  if (!s) return "jpg";
+  if (s.includes("png")) return "png";
+  if (s.includes("webp")) return "webp";
+  if (s.includes("gif")) return "gif";
+  if (s.includes("avif")) return "avif";
+  if (s.includes("jpeg") || s.includes("jpg")) return "jpg";
+  const cleaned = s.replace(/^\./, "");
+  return IMAGE_EXTENSIONS.includes(cleaned) ? (cleaned === "jpeg" ? "jpg" : cleaned) : "jpg";
+}
+async function saveCustomCoverFromBuffer(app, coverFolder, titleHint, extOrMime, arrayBuffer) {
+  if (!app || !app.vault || !app.vault.adapter || !arrayBuffer || arrayBuffer.byteLength < 64) {
+    throw new Error("图片内容无效或文件为空");
+  }
+  const cleanFolder = String(coverFolder || "附件/动画封面")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  await ensureVaultFolder(app, cleanFolder);
+  const ext = normalizeCoverExtension(extOrMime);
+  const safeSlug = getSafeFileName(titleHint || "custom")
+    .replace(/\s+/g, "-")
+    .slice(0, 36);
+  const stamp = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+  const localPath = `${cleanFolder}/custom-cover-${safeSlug}-${stamp}.${ext}`;
+  await app.vault.adapter.writeBinary(localPath, arrayBuffer);
+  return localPath;
+}
+async function saveCustomCoverFromUrl(app, coverFolder, titleHint, remoteUrl) {
+  const cleanUrl = String(remoteUrl || "").trim();
+  if (!/^https?:\/\//i.test(cleanUrl)) {
+    throw new Error("请输入以 http:// 或 https:// 开头的图片网址");
+  }
+  let timer = null;
+  try {
+    const reqPromise = requestUrl({
+      url: cleanUrl,
+      method: "GET",
+      headers: {
+        "User-Agent": "Curelove/bangumi-manager (https://github.com/Curelove/bangumi-manager)"
+      },
+      throw: true
+    });
+    reqPromise.catch(() => {});
+    const response = await Promise.race([
+      reqPromise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("图片下载超时")), 10000);
+      })
+    ]);
+    if (!response || !response.arrayBuffer || response.arrayBuffer.byteLength < 120) {
+      throw new Error("下载到的图片数据为空");
+    }
+    const contentType =
+      (response.headers && (response.headers["content-type"] || response.headers["Content-Type"])) || "";
+    const ext = contentType ? normalizeCoverExtension(contentType) : getImageExtension(cleanUrl);
+    return await saveCustomCoverFromBuffer(app, coverFolder, titleHint, ext, response.arrayBuffer);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 function getImageExtension(url) {
   try {
@@ -279,17 +345,53 @@ function getPreciseScoreInfo(info) {
   };
 }
 
-function buildNoteContent(info, options) {
-  const watchedEpisodes = options.watchedEpisodes || "0";
+function buildNoteContent(info, options = {}) {
+  const watchedEpisodes =
+    options.watchedEpisodes !== undefined && options.watchedEpisodes !== null && String(options.watchedEpisodes).trim() !== ""
+      ? String(options.watchedEpisodes).trim()
+      : "0";
   const netabaEmbedEnabled =
     options.netabaEmbedEnabled !== false;
   const animeInfoCollapsedByDefault =
     Boolean(options.animeInfoCollapsedByDefault);
   const netabaEmbedUrl =
     getNetabaPageUrl(info, options);
-  const watchUrl = options.watchUrl || "";
-  const personalSummary = options.personalSummary || "";
+  const watchUrl = String(options.watchUrl || info.watchUrl || "").trim();
+  const personalSummary = String(options.personalSummary || "").trim();
   const downloadPath = options.downloadPath || "\u65E0";
+  const subjectId = getSubjectIdFromUrl(info.url);
+  const hasBgmUrl = /^https?:\/\//i.test(String(info.url || "").trim());
+  const isCustom = Boolean(options.isCustom || info.isCustom || !subjectId);
+  const cleanCover = String(info.cover || "").trim();
+  const hasRealCover = Boolean(cleanCover && cleanCover !== "\u672A\u77E5" && cleanCover !== "\u65E0");
+  const cleanRefUrl = String(info.referenceUrl || options.referenceUrl || "").trim();
+  const hasRefUrl = /^https?:\/\//i.test(cleanRefUrl);
+  const cleanRefScoreRaw =
+    info.referenceScore !== undefined && info.referenceScore !== null && String(info.referenceScore).trim() !== ""
+      ? String(info.referenceScore).trim()
+      : options.referenceScore !== undefined && options.referenceScore !== null && String(options.referenceScore).trim() !== ""
+      ? String(options.referenceScore).trim()
+      : "";
+  const refScoreNum = cleanRefScoreRaw ? Number(cleanRefScoreRaw) : NaN;
+  const hasRefScore = Number.isFinite(refScoreNum) && refScoreNum > 0;
+  const cleanRefSource = String(info.referenceScoreSource || options.referenceScoreSource || "").trim();
+  const cleanPersonalScoreRaw =
+    options.personalScore !== undefined && options.personalScore !== null && String(options.personalScore).trim() !== ""
+      ? String(options.personalScore).trim()
+      : info.personalScore !== undefined && info.personalScore !== null && String(info.personalScore).trim() !== ""
+      ? String(info.personalScore).trim()
+      : "";
+  const personalScoreNum = cleanPersonalScoreRaw ? Number(cleanPersonalScoreRaw) : NaN;
+  const personalScoreText =
+    Number.isFinite(personalScoreNum) && personalScoreNum >= 0
+      ? String(personalScoreNum)
+      : "\u672A\u8BC4\u5206";
+  const cleanMediaType = String(info.type || info.mediaFormat || "").trim();
+  const cleanYear = String(info.year || "").trim();
+  const cleanSeason = String(info.season || "").trim();
+  const validSeason = cleanSeason && cleanSeason !== "\u672A\u77E5\u5B63\u5EA6" ? cleanSeason : "";
+  const emptyOpt = isCustom ? { allowEmpty: true } : {};
+
   const yaml = [];
   yaml.push("---");
   addYamlField(
@@ -300,22 +402,40 @@ function buildNoteContent(info, options) {
   addYamlField(
     yaml,
     "\u65E5\u6587\u540D",
-    info.JP
+    info.JP,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "cover",
-    info.cover
+    hasRealCover ? cleanCover : "",
+    { allowEmpty: true }
   );
+  if (isCustom) {
+    addYamlField(
+      yaml,
+      "\u6570\u636E\u6765\u6E90",
+      "\u81EA\u5B9A\u4E49"
+    );
+  }
+  if (cleanMediaType) {
+    addYamlField(
+      yaml,
+      "\u8F7D\u4F53\u7C7B\u578B",
+      cleanMediaType
+    );
+  }
   addYamlField(
     yaml,
     "\u6539\u7F16\u7C7B\u578B",
-    info.catego
+    info.catego,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "\u603B\u96C6\u6570",
-    info.episode
+    info.episode,
+    emptyOpt
   );
   addYamlField(
     yaml,
@@ -325,56 +445,98 @@ function buildNoteContent(info, options) {
   addYamlField(
     yaml,
     "\u5236\u4F5C\u516C\u53F8",
-    info.AnimeMake
+    info.AnimeMake,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "\u76D1\u7763",
-    info.director
+    info.director,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "\u97F3\u4E50",
-    info.music
+    info.music,
+    emptyOpt
   );
+  if (info.date && String(info.date).trim() && String(info.date).trim() !== "\u672A\u77E5") {
+    addYamlField(
+      yaml,
+      "\u5F00\u64AD\u65E5\u671F",
+      String(info.date).trim()
+    );
+  }
   addYamlField(
     yaml,
     "\u5F00\u64AD\u5E74\u4EFD",
-    info.year
+    cleanYear,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "\u5F00\u64AD\u5B63\u5EA6",
-    info.season
+    isCustom ? validSeason : info.season,
+    emptyOpt
   );
   addYamlField(
     yaml,
     "\u8BB0\u5F55\u65E5\u671F",
     info.recordDate
   );
-  addYamlField(
-    yaml,
-    "BGM\u94FE\u63A5",
-    info.url
-  );
+  if (hasBgmUrl || !isCustom) {
+    addYamlField(
+      yaml,
+      "BGM\u94FE\u63A5",
+      hasBgmUrl ? info.url : "",
+      { allowEmpty: true }
+    );
+  }
+  if (hasRefUrl) {
+    addYamlField(
+      yaml,
+      "\u53C2\u8003\u94FE\u63A5",
+      cleanRefUrl
+    );
+  }
   const preciseInfo = getPreciseScoreInfo(info);
 
   const scoreToStore =
-    options.useBangumiPreciseScore === true &&
-    preciseInfo &&
-    preciseInfo.allScore
-      ? preciseInfo.allScore
-      : info.rating;
+    !isCustom || hasBgmUrl
+      ? (
+          options.useBangumiPreciseScore === true &&
+          preciseInfo &&
+          preciseInfo.allScore
+            ? preciseInfo.allScore
+            : info.rating
+        )
+      : "\u672A\u8BC4\u5206";
 
   addYamlField(
     yaml,
     "BGM评分",
-    scoreToStore
+    scoreToStore === void 0 || scoreToStore === null || scoreToStore === ""
+      ? "\u672A\u8BC4\u5206"
+      : scoreToStore
   );
 
+  if (hasRefScore) {
+    addYamlField(
+      yaml,
+      "\u53C2\u8003\u8BC4\u5206",
+      String(refScoreNum)
+    );
+    if (cleanRefSource) {
+      addYamlField(
+        yaml,
+        "\u53C2\u8003\u8BC4\u5206\u6765\u6E90",
+        cleanRefSource
+      );
+    }
+  }
 
   const showBangumiUserScore =
-    options.showBangumiUserScore !== false;
+    options.showBangumiUserScore !== false && (!isCustom || hasBgmUrl);
 
   const showPersonalScore =
     options.showPersonalScore !== false;
@@ -390,11 +552,11 @@ function buildNoteContent(info, options) {
     );
   }
 
-  if (showPersonalScore) {
+  if (showPersonalScore || personalScoreText !== "\u672A\u8BC4\u5206") {
     addYamlField(
       yaml,
       "\u6211\u7684\u8BC4\u5206",
-      "\u672A\u8BC4\u5206"
+      personalScoreText
     );
   }
 
@@ -466,9 +628,13 @@ function buildNoteContent(info, options) {
     (info.CN || "\u672A\u77E5\u4F5C\u54C1") +
     "**"
   );
-  yaml.push(
-    "> ![[" + info.cover + "]]"
-  );
+  if (hasRealCover) {
+    yaml.push(
+      /^https?:\/\//i.test(cleanCover)
+        ? "> ![" + (info.CN || "\u5C01\u9762") + "](" + cleanCover + ")"
+        : "> ![[" + cleanCover + "]]"
+    );
+  }
   yaml.push(">");
   yaml.push(
     "| \u9879\u76EE | \u5185\u5BB9 |"
@@ -481,14 +647,16 @@ function buildNoteContent(info, options) {
     (info.CN || "\u672A\u77E5") +
     " |"
   );
-  yaml.push(
-    "| \u65E5\u6587\u540D | " +
-    (info.JP || "\u672A\u77E5") +
-    " |"
-  );
+  if (!isCustom || (info.JP && String(info.JP).trim())) {
+    yaml.push(
+      "| \u65E5\u6587\u540D | " +
+      (info.JP || "\u672A\u77E5") +
+      " |"
+    );
+  }
   yaml.push(
     "| \u5F00\u64AD\u65E5\u671F | " +
-    (info.date || "\u672A\u77E5") +
+    (info.date || cleanYear || "\u672A\u77E5") +
     " |"
   );
   yaml.push(
@@ -496,12 +664,17 @@ function buildNoteContent(info, options) {
     (info.catego || "\u672A\u77E5") +
     " |"
   );
+  const epNumVal = Number(info.episode);
+  const epText =
+    Number.isFinite(epNumVal) && epNumVal > 0
+      ? [cleanMediaType, `\u5171 ${epNumVal} \u8BDD`].filter(Boolean).join(" ")
+      : cleanMediaType
+      ? `${cleanMediaType} \u96C6\u6570\u5F85\u5B9A`
+      : "\u5171 0 \u8BDD";
   yaml.push(
     "| \u52A8\u753B\u96C6\u6570 | " +
-    (info.type || "") +
-    " \u5171 " +
-    (info.episode || "0") +
-    " \u8BDD |"
+    epText +
+    " |"
   );
   yaml.push(
     "| \u5236\u4F5C\u516C\u53F8 | " +
@@ -528,35 +701,57 @@ function buildNoteContent(info, options) {
     info.recordDate +
     " |"
   );
-  yaml.push(
-    "| BGM \u5730\u5740 | [" +
-    (info.CN || "\u94FE\u63A5") +
-    "](" +
-    info.url +
-    ") |"
-  );
-  const scoreToDisplay =
-    options.useBangumiPreciseScore === true &&
-    preciseInfo &&
-    preciseInfo.allScore
-      ? preciseInfo.allScore
-      : info.rating;
+  if (isCustom) {
+    yaml.push("| \u6570\u636E\u6765\u6E90 | \u81EA\u5B9A\u4E49\u6536\u5F55 |");
+  }
+  if (hasBgmUrl) {
+    yaml.push(
+      "| BGM \u5730\u5740 | [" +
+      (info.CN || "\u94FE\u63A5") +
+      "](" +
+      info.url +
+      ") |"
+    );
+  }
+  if (hasRefUrl) {
+    yaml.push(
+      "| \u53C2\u8003\u94FE\u63A5 | [\u67E5\u770B\u5916\u90E8\u6761\u76EE](" +
+      cleanRefUrl +
+      ") |"
+    );
+  }
+  if (!isCustom || hasBgmUrl) {
+    const scoreToDisplay =
+      options.useBangumiPreciseScore === true &&
+      preciseInfo &&
+      preciseInfo.allScore
+        ? preciseInfo.allScore
+        : info.rating;
 
-  const scoreDigits =
-    options.useBangumiPreciseScore === true &&
-    preciseInfo &&
-    preciseInfo.allScore
-      ? options.bangumiPreciseScoreDisplayDigits
-      : 1;
+    const scoreDigits =
+      options.useBangumiPreciseScore === true &&
+      preciseInfo &&
+      preciseInfo.allScore
+        ? options.bangumiPreciseScoreDisplayDigits
+        : 1;
 
-  yaml.push(
-    "| BGM 评分 | " +
-    formatScoreForDisplay(
-      scoreToDisplay,
-      scoreDigits
-    ) +
-    " |"
-  );
+    yaml.push(
+      "| BGM 评分 | " +
+      formatScoreForDisplay(
+        scoreToDisplay,
+        scoreDigits
+      ) +
+      " |"
+    );
+  }
+
+  if (hasRefScore) {
+    yaml.push(
+      "| \u53C2\u8003\u8BC4\u5206 | " +
+      (cleanRefSource ? `${cleanRefSource} ${refScoreNum}` : String(refScoreNum)) +
+      " |"
+    );
+  }
 
   if (showBangumiUserScore) {
     yaml.push(
@@ -571,9 +766,9 @@ function buildNoteContent(info, options) {
     );
   }
 
-  if (showPersonalScore) {
+  if (showPersonalScore || personalScoreText !== "\u672A\u8BC4\u5206") {
     yaml.push(
-      "| \u6211\u7684\u8BC4\u5206 | \u672A\u8BC4\u5206 |"
+      "| \u6211\u7684\u8BC4\u5206 | " + personalScoreText + " |"
     );
   }
 
@@ -628,24 +823,29 @@ function buildNoteContent(info, options) {
   return yaml.join("\n");
 }
 function getNoteFolder(rootFolder, info) {
-  if (info.year && info.season && info.season !== "\u672A\u77E5\u5B63\u5EA6") {
-    return rootFolder + "/" + info.year + "/" + info.season;
+  const year = String(info?.year || "").trim();
+  const season = String(info?.season || "").trim();
+  if (/^\d{4}$/.test(year) && season && season !== "\u672A\u77E5\u5B63\u5EA6" && season !== "\u672A\u77E5") {
+    return rootFolder + "/" + year + "/" + season;
   }
   return rootFolder;
 }
+function resolveAnimeNotePath(settings, info) {
+  const rootFolder = String(settings?.noteRootFolder || "\u52A8\u753B\u7B14\u8BB0").trim().replace(/[\\/]+$/, "");
+  const noteFolder = getNoteFolder(rootFolder, info);
+  const fileName = getSafeFileName(info?.fileName || info?.CN || info?.JP);
+  return {
+    noteFolder,
+    fileName,
+    filePath: noteFolder + "/" + fileName + ".md"
+  };
+}
 async function createAnimeNote(app, settings, info, options = {}) {
-  const noteFolder = getNoteFolder(
-    settings.noteRootFolder,
-    info
-  );
+  const { noteFolder, filePath } = resolveAnimeNotePath(settings, info);
   await ensureVaultFolder(
     app,
     noteFolder
   );
-  const fileName = getSafeFileName(
-    info.fileName || info.CN || info.JP
-  );
-  const filePath = noteFolder + "/" + fileName + ".md";
   if (app.vault.getAbstractFileByPath(
     filePath
   )) {
@@ -671,9 +871,12 @@ async function createAnimeNote(app, settings, info, options = {}) {
 module.exports = {
   ensureVaultFolder,
   saveCoverLocally,
+  saveCustomCoverFromBuffer,
+  saveCustomCoverFromUrl,
   getSeasonInfo,
   getSafeFileName,
   buildNoteContent,
   getNoteFolder,
+  resolveAnimeNotePath,
   createAnimeNote
 };

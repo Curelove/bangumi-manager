@@ -262,7 +262,9 @@ function getAnimeRatingCacheKey(item) {
   const m = String(item.bgmUrl || "").match(/\/subject\/(\d+)/);
   if (m && m[1]) return m[1];
   const norm = normalizeTitleForMatch(item.japaneseName || item.name || "");
-  return norm ? `title:${norm}` : "";
+  if (norm) return `title:${norm}`;
+  const fp = cleanStr(item.file?.path || item.path || "");
+  return fp ? `note:${fp}` : "";
 }
 
 function ensureMultiSiteCache(plugin) {
@@ -1172,8 +1174,10 @@ function computeAnimeCrossSiteProfile(plugin, item, customWeights = null) {
   const rec = getCachedMultiSiteRecord(plugin, item);
 
   const bgmVal = getBangumiScoreValue(plugin, item);
+  const rawBgmUrl = cleanStr(item?.bgmUrl);
   const bgmUrl =
-    cleanStr(item?.bgmUrl) || (item?.subjectId ? `https://bgm.tv/subject/${item.subjectId}` : "");
+    (/^https?:\/\//i.test(rawBgmUrl) ? rawBgmUrl : "") ||
+    (item?.subjectId ? `https://bgm.tv/subject/${item.subjectId}` : "");
 
   const alScore100 = rec?.anilist?.score !== undefined && rec?.anilist?.score !== null ? Number(rec.anilist.score) : null;
   const malScore10 = rec?.mal?.score !== undefined && rec?.mal?.score !== null ? Number(rec.mal.score) : null;
@@ -1369,6 +1373,25 @@ function getPreferredDisplayRating(plugin, item, overrideSourceId = "") {
         activeId = any;
         isFallback = any !== prefId;
       } else {
+        const refScore = Number(item?.referenceScore);
+        if (Number.isFinite(refScore) && refScore > 0) {
+          const refLabel = cleanStr(item?.referenceScoreSource) || "参考";
+          const compact = refScore.toFixed(1);
+          return {
+            sourceId: "custom",
+            preferredSourceId: prefId,
+            shortLabel: refLabel,
+            siteLabel: refLabel,
+            rawScore: refScore,
+            normalized10: Number(refScore.toFixed(2)),
+            badgeText: `${refLabel} ${compact}`,
+            compactNumber: compact,
+            isFallback: true,
+            tooltip: `自定义参考评分（${refLabel}）：${compact}`,
+            tooltipLines: [`自定义参考评分（${refLabel}）：${compact}`],
+            profile
+          };
+        }
         return {
           sourceId: prefId,
           preferredSourceId: prefId,
@@ -1452,8 +1475,10 @@ function getSeasonOrderWeight(seasonStr) {
 }
 
 function getItemSeasonInfo(item) {
-  const year = String(item?.year || "").trim();
-  const season = String(item?.season || "").trim();
+  const rawYear = String(item?.year || "").trim();
+  const rawSeason = String(item?.season || "").trim();
+  const year = /^\d{4}$/.test(rawYear) ? rawYear : "";
+  const season = rawSeason && rawSeason !== "未知季度" && rawSeason !== "未知" && rawSeason !== "无" ? rawSeason : "";
   const seasonKey = year && season ? `${year}:${season}` : "";
   const label = year && season ? `${year}年${season}` : year ? `${year}年` : "";
   return { year, season, seasonKey, label };

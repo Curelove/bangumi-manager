@@ -5469,21 +5469,25 @@ function openAnimeDownloadModal(plugin, item, onUpdated) {
       if (!targetFile || !this.plugin?.app?.vault) return;
       try {
         const raw = await this.plugin.app.vault.read(targetFile);
-        if (typeof noteUtils.extractFrontmatterField === "function") {
-          const st = noteUtils.extractFrontmatterField(raw, "观看状态");
-          const we = noteUtils.extractFrontmatterField(raw, "已看集数");
-          const te = noteUtils.extractFrontmatterField(raw, "总集数");
-          const dp = noteUtils.extractFrontmatterField(raw, "本地路径");
-          const kw = noteUtils.extractFrontmatterField(raw, "下载源关键词");
-          const rss = noteUtils.extractFrontmatterField(raw, "RSS订阅");
-          const sid = noteUtils.extractFrontmatterField(raw, "发布源标识");
+        const parsed = noteUtils.parseFrontmatter(raw);
+        if (parsed && parsed.fields) {
+          const f = parsed.fields;
+          const st = noteUtils.cleanValue(f["观看状态"]);
+          const te = noteUtils.cleanValue(f["总集数"]);
+          const dp = noteUtils.cleanValue(f["下载路径"]);
+          const kw = noteUtils.cleanValue(f["下载源关键词"]);
+          const rss = noteUtils.cleanValue(f["RSS订阅"]);
+          const sid = noteUtils.cleanValue(f["发布源标识"]);
           if (st) this.item.state = st;
-          if (we !== undefined && we !== "") this.item.watchedEpisodes = Number(we) || 0;
-          if (te !== undefined && te !== "") this.item.totalEpisodes = Number(te) || 0;
+          if (te !== undefined && te !== "" && te !== "未知") this.item.totalEpisodes = Number(te) || te;
           if (dp !== undefined && dp !== "") this.item.downloadPath = dp;
-          if (kw !== undefined) this.item.downloadSourceKeyword = kw;
-          if (rss !== undefined) this.item.rssUrl = rss;
-          if (sid !== undefined) this.item.downloadStreamId = sid;
+          if (f["下载源关键词"] !== undefined) this.item.downloadSourceKeyword = kw;
+          if (f["RSS订阅"] !== undefined) this.item.rssUrl = rss;
+          if (f["发布源标识"] !== undefined) this.item.downloadStreamId = sid;
+        }
+        const watched = noteUtils.extractWatchedEpisodes(raw);
+        if (Number.isFinite(watched)) {
+          this.item.watchedEpisodes = watched;
         }
       } catch (_) {}
     }

@@ -92,7 +92,7 @@ async function requestNetabaApi(url) {
         url,
         method: "GET",
         headers: {
-          "User-Agent": "ObsidianBangumiManager/0.8.1 (https://github.com/Curelove/bangumi-manager)"
+          "User-Agent": "ObsidianBangumiManager/0.9.5 (https://github.com/Curelove/bangumi-manager)"
         }
       });
       if (resp.status === 200) {

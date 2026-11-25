@@ -68,13 +68,33 @@ var SingleAnimeImportModal = class extends Modal {
     keywordInput.type = "text";
     keywordInput.placeholder = "\u4F8B\u5982\uFF1A\u53E4\u8BFA\u5E0C\u4E9A";
     keywordInput.style.width = "100%";
-    const searchButton = contentEl.createEl(
+    const actionRow = contentEl.createDiv();
+    actionRow.style.display = "flex";
+    actionRow.style.flexWrap = "wrap";
+    actionRow.style.alignItems = "center";
+    actionRow.style.gap = "8px";
+    actionRow.style.marginTop = "10px";
+
+    const searchButton = actionRow.createEl(
       "button",
       {
+        cls: "mod-cta",
         text: "\u641C\u7D22 Bangumi"
       }
     );
-    searchButton.style.marginTop = "10px";
+    const customFallbackBtn = actionRow.createEl(
+      "button",
+      {
+        text: "Bangumi 搜不到？手动新建自定义动画"
+      }
+    );
+    customFallbackBtn.onclick = () => {
+      const kw = keywordInput.value.trim();
+      this.close();
+      if (typeof this.plugin?.openCustomAnimeModal === "function") {
+        this.plugin.openCustomAnimeModal({ initialName: kw });
+      }
+    };
     const resultList = contentEl.createDiv();
     resultList.style.maxHeight = "42vh";
     resultList.style.overflowY = "auto";
@@ -105,9 +125,19 @@ var SingleAnimeImportModal = class extends Modal {
           resultList.createEl(
             "p",
             {
-              text: "\u6CA1\u6709\u627E\u5230\u52A8\u753B\u7ED3\u679C\u3002"
+              text: "\u6CA1\u6709\u5728 Bangumi \u627E\u5230\u76F8\u5173\u52A8\u753B\u3002\u82E5\u8BE5\u4F5C\u54C1\u672A\u88AB Bangumi \u6536\u5F55\uFF0C\u53EF\u76F4\u63A5\u624B\u52A8\u81EA\u5B9A\u4E49\u5EFA\u6863\uFF1A"
             }
           );
+          const directCustomBtn = resultList.createEl("button", {
+            cls: "mod-cta",
+            text: `手动新建《${keyword}》自定义动画 →`
+          });
+          directCustomBtn.onclick = () => {
+            this.close();
+            if (typeof this.plugin?.openCustomAnimeModal === "function") {
+              this.plugin.openCustomAnimeModal({ initialName: keyword });
+            }
+          };
           return;
         }
         const candidateRows = [];

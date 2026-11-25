@@ -2733,8 +2733,11 @@ class Dashboard3DSpace {
       ? `${Number(item.watchedEpisodes) || 0}/${item.totalEpisodes}话`
       : `${Number(item.watchedEpisodes) || 0}话`;
 
+    const codeLabel = item.subjectId
+      ? `BGM-${String(item.subjectId).slice(-3).padStart(3, "0")}`
+      : "自建档案";
     this.hoverElement.textContent =
-      `▶ 点击拆阅详情 ｜ BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")} · ${item.state || "未设置"} (${progress}) · 《${item.name}》`;
+      `▶ 点击拆阅详情 ｜ ${codeLabel} · ${item.state || "未设置"} (${progress}) · 《${item.name}》`;
 
     this.hoverElement.classList.add("is-visible");
   }
@@ -3066,9 +3069,13 @@ class Dashboard3DSpace {
       ? " · 策展共现"
       : "";
 
+    const focusCode = item.subjectId
+      ? `FILE BGM-${String(item.subjectId).slice(-3).padStart(3, "0")}`
+      : "自建档案";
+    const focusTimeText = [item.year, item.season].filter(Boolean).join(" ") || "年份未记";
     this.focusMeta.textContent = isEmptyLane
       ? `${cfg.badge || "LANE EMPTY"} · ${this.laneNames[this.focusLane]} · ${cfg.plaqueNote || "当前轨道下暂无收录动画"}`
-      : `FILE BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")} · ${item.state || this.laneNames[this.focusLane]} · ${item.year || "年份未记"} ${item.season || ""}${multiNote}`;
+      : `${focusCode} · ${item.state || this.laneNames[this.focusLane]} · ${focusTimeText}${multiNote}`;
 
     this.laneElement.textContent =
       `LANE ${String(this.focusLane + 1).padStart(2, "0")} / ${String(this.laneCount).padStart(2, "0")} · ${this.laneNames[this.focusLane]}`;
@@ -3553,7 +3560,9 @@ class Dashboard3DSpace {
       headerLeft,
       "div",
       "atelier-meta",
-      `原画手稿页 · BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")}`
+      item.subjectId
+        ? `原画手稿页 · BGM-${String(item.subjectId).slice(-3).padStart(3, "0")}`
+        : "原画手稿页 · 自定义收录"
     );
     this.el(headerLeft, "div", "atelier-note-sheet-title", `《${item.name || "未命名档案"}》`);
     this.el(headerLeft, "div", "atelier-meta", item.japaneseName || `${item.year || ""} ${item.season || ""}`);
@@ -3710,8 +3719,15 @@ class Dashboard3DSpace {
       this.el(sec4, "h3", "", "04 · 馆藏源文件路径与索引 / SOURCE & LINKS");
       this.el(sec4, "p", "atelier-note-paragraph", `笔记路径：${item.file?.path || "未关联本地文件"}`);
       this.el(sec4, "p", "atelier-note-paragraph", `本地媒体目录：${item.downloadPath || "未设置"}`);
-      this.el(sec4, "p", "atelier-note-paragraph", `Bangumi 条目：https://bgm.tv/subject/${item.subjectId || ""}`);
-      this.el(sec4, "p", "atelier-note-paragraph", `Netaba 趋势：https://netaba.re/subject/${item.subjectId || ""}`);
+      if (item.subjectId) {
+        this.el(sec4, "p", "atelier-note-paragraph", `Bangumi 条目：https://bgm.tv/subject/${item.subjectId}`);
+        this.el(sec4, "p", "atelier-note-paragraph", `Netaba 趋势：https://netaba.re/subject/${item.subjectId}`);
+      } else {
+        this.el(sec4, "p", "atelier-note-paragraph", "数据来源：自定义收录（未绑定 Bangumi 条目）");
+        if (item.referenceUrl) {
+          this.el(sec4, "p", "atelier-note-paragraph", `外部参考链接：${item.referenceUrl}`);
+        }
+      }
     };
 
     // 先同步渲染基础数据，保证抽纸零延迟，随后异步补充笔记正文
@@ -3749,11 +3765,12 @@ class Dashboard3DSpace {
       this.detailElement,
       "div",
       "atelier-meta",
-      `FILE BGM-${String(item.subjectId || "000").slice(-3).padStart(3, "0")} ／ ${item.state || "未设置"}${multiBadge}`
+      `${item.subjectId ? `FILE BGM-${String(item.subjectId).slice(-3).padStart(3, "0")}` : "自建档案"} ／ ${item.state || "未设置"}${multiBadge}`
     );
 
     this.el(this.detailElement, "h1", "", `《${item.name || "未命名档案"}》`);
-    this.el(this.detailElement, "div", "atelier-meta", `${item.japaneseName || ""} · ${item.year || "未知"} ${item.season || ""}`);
+    const detailSubParts = [item.japaneseName, [item.year, item.season].filter(Boolean).join(" ")].filter(Boolean);
+    this.el(this.detailElement, "div", "atelier-meta", detailSubParts.join(" · ") || "自定义收录动画");
 
     const hintBox = this.el(this.detailElement, "div", "atelier-folio-sheet-hint");
     this.folioSheetHintText = this.el(hintBox, "span", "", "");
@@ -4027,6 +4044,13 @@ class Dashboard3DSpace {
       this.activeViewer = new ModelViewer(this, item);
       this.activeViewer.open();
     };
+
+    if (item.file && !item.isSamplePreviewItem && typeof this.plugin?.openEditAnimeMetadataModal === "function") {
+      const editBtn = this.el(actions, "button", "atelier-text-action", "编辑动画资料");
+      editBtn.onclick = () => {
+        this.plugin.openEditAnimeMetadataModal(item);
+      };
+    }
 
     if (isDesktopNodeAvailable() && !item.isSamplePreviewItem && item.downloadPath && item.downloadPath !== "无") {
       const folder = this.el(actions, "button", "atelier-text-action", "打开本地目录 ↗");

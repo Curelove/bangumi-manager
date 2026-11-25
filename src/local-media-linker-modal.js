@@ -1527,8 +1527,8 @@ function createLinkerModalClass() {
         if (!ownerDoc.getElementById(injectStyleId)) {
           const st = ownerDoc.createElement("style");
           st.id = injectStyleId;
-          const mainV07 = document.getElementById("bangumi-v07-style");
-          st.textContent = (mainV07 && mainV07.textContent) || LOCAL_MEDIA_LINKER_CSS;
+          const mainStyle = document.getElementById("bangumi-score-dashboard-style");
+          st.textContent = [mainStyle ? mainStyle.textContent : "", LOCAL_MEDIA_LINKER_CSS].filter(Boolean).join("\n");
           ownerDoc.head.appendChild(st);
         }
       }

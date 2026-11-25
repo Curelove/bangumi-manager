@@ -1078,7 +1078,7 @@ module.exports = function createSettingsTabClass({
   function ensureSettingsSpotlightStyles(doc) {
     const targetDoc = doc || (typeof document !== "undefined" ? document : null);
     if (!targetDoc || !targetDoc.head) return;
-    const STYLE_VER = "0.9.1-settings-ia-v2";
+    const STYLE_VER = "0.9.5-settings-ia-v2";
     let styleEl = targetDoc.getElementById("bangumi-settings-spotlight-styles");
     if (styleEl && styleEl.dataset.bgmVer === STYLE_VER) return;
     if (!styleEl) {

@@ -2271,7 +2271,14 @@ function renderRatingCompareWorkspace(container, ctx = {}) {
                 )
               : null
           ]),
-          h("div.bm9rc-fact-v", { cls: line ? "" : "is-none", text: line || "还没拉到这个站的数据" }),
+          h("div.bm9rc-fact-v", {
+            cls: line ? "" : "is-none",
+            text:
+              line ||
+              (sid === "bangumi" && p.item && p.item.isCustom && !p.item.subjectId
+                ? "自定义动画，未关联 Bangumi 条目"
+                : "还没拉到这个站的数据")
+          }),
           sid === "filmarks" && s.available && s.matchedTitle
             ? h("div.bm9rc-fact-m", { title: s.matchedTitle, text: `匹配到：${s.matchedTitle}` })
             : null

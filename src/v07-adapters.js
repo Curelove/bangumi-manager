@@ -355,9 +355,15 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       }
     },
     getWatchUrl: (it) => (it && it.watchUrl) || "",
-    getBgmUrl: (it) =>
-      (it && it.bgmUrl) ||
-      (it && it.subjectId ? `https://bgm.tv/subject/${it.subjectId}` : ""),
+    getBgmUrl: (it) => {
+      const raw = String((it && it.bgmUrl) || "").trim();
+      if (/^https?:\/\//i.test(raw)) return raw;
+      return it && it.subjectId ? `https://bgm.tv/subject/${it.subjectId}` : "";
+    },
+    getReferenceUrl: (it) => {
+      const raw = String((it && it.referenceUrl) || "").trim();
+      return /^https?:\/\//i.test(raw) ? raw : "";
+    },
     classifyWatch: (it) => classifyWatchUrl((it && (it.watchUrl || it.bgmUrl)) || ""),
     heroScene: (plugin.settings && plugin.settings.v07HeroScene) || "watching",
     onHeroSceneChange: (id) => {
@@ -388,6 +394,11 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
         plugin.openSingleAnimeImportModal("");
       } else if (typeof plugin.openSearchModal === "function") {
         plugin.openSearchModal();
+      }
+    },
+    addCustom: () => {
+      if (typeof plugin.openCustomAnimeModal === "function") {
+        plugin.openCustomAnimeModal();
       }
     },
     actions: {
@@ -545,6 +556,11 @@ function createAnimeStageContext(plugin, items, deskRuntime = {}) {
       openTrend: (it) => {
         if (typeof deskRuntime.openTrendModal === "function") {
           deskRuntime.openTrendModal(it);
+        }
+      },
+      editMetadata: (it) => {
+        if (typeof plugin.openEditAnimeMetadataModal === "function") {
+          plugin.openEditAnimeMetadataModal(it);
         }
       },
       openRelations: (it) => {

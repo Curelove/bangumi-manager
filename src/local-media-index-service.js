@@ -232,6 +232,76 @@ function hasNonEmptyBindingRecord(record) {
   );
 }
 
+/**
+ * 在动画笔记重命名 / 移动或自定义动画补绑 Bangumi ID 时无损迁移本地视频绑定键与暂存区关联标记
+ */
+async function migrateAnimeBindingKey(plugin, oldKeyRaw, newKeyRaw, nextNotePath = "") {
+  const oldKey = String(oldKeyRaw || "").trim();
+  const newKey = String(newKeyRaw || "").trim();
+  if (!plugin || !oldKey || !newKey || oldKey === newKey) return false;
+  ensureLocalMediaSettingsShape(plugin);
+  const bindings = plugin.settings.localMediaBindings;
+  let changed = false;
+
+  if (bindings[oldKey]) {
+    const src = normalizeBindingEntry(bindings[oldKey]);
+    if (!bindings[newKey]) {
+      if (nextNotePath) src.notePath = normalizeNoteRelKey(nextNotePath);
+      bindings[newKey] = src;
+    } else {
+      const dst = normalizeBindingEntry(bindings[newKey]);
+      const seenFolders = new Set(dst.extraFolders.map(normPathCompareKey));
+      for (const f of src.extraFolders) {
+        if (!seenFolders.has(normPathCompareKey(f))) {
+          dst.extraFolders.push(f);
+          seenFolders.add(normPathCompareKey(f));
+        }
+      }
+      const seenLoose = new Set(dst.looseFiles.map((f) => normPathCompareKey(f.path)));
+      for (const lf of src.looseFiles) {
+        if (!seenLoose.has(normPathCompareKey(lf.path))) {
+          dst.looseFiles.push(lf);
+          seenLoose.add(normPathCompareKey(lf.path));
+        }
+      }
+      for (const [epK, epV] of Object.entries(src.episodeMap || {})) {
+        if (!dst.episodeMap[epK]) dst.episodeMap[epK] = epV;
+      }
+      const seenClips = new Set(dst.extraClips.map((c) => normPathCompareKey(c.path)));
+      for (const cl of src.extraClips) {
+        if (!seenClips.has(normPathCompareKey(cl.path))) {
+          dst.extraClips.push(cl);
+          seenClips.add(normPathCompareKey(cl.path));
+        }
+      }
+      if (nextNotePath) dst.notePath = normalizeNoteRelKey(nextNotePath);
+      dst.updatedAt = Date.now();
+      bindings[newKey] = dst;
+    }
+    delete bindings[oldKey];
+    changed = true;
+  }
+
+  const pool = plugin.settings.localMediaStagingPool;
+  if (Array.isArray(pool)) {
+    for (const item of pool) {
+      if (!item || !Array.isArray(item.linkedTo)) continue;
+      if (item.linkedTo.includes(oldKey)) {
+        item.linkedTo = Array.from(new Set(item.linkedTo.map((k) => (k === oldKey ? newKey : k))));
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    invalidateLocalMediaCache(plugin);
+    if (typeof plugin.saveSettings === "function") {
+      await plugin.saveSettings().catch(() => {});
+    }
+  }
+  return changed;
+}
+
 function invalidateLocalMediaCache(plugin, item = null) {
   if (plugin?._localMediaResolveCache && typeof plugin._localMediaResolveCache.clear === "function") {
     if (!item) {
@@ -1832,6 +1902,7 @@ module.exports = {
   getAnimeBindingRecord,
   ensureAnimeBindingRecord,
   hasNonEmptyBindingRecord,
+  migrateAnimeBindingKey,
   invalidateLocalMediaCache,
   resolveAnimeLocalMedia,
   writeNotePrimaryDownloadPath,

@@ -1146,20 +1146,23 @@ function updateFrontmatterField(content, fieldName, fieldValue) {
     }
     fieldLine = "tags:\n" + tagList.map((t) => "  - " + t).join("\n");
   } else {
-    fieldLine = fieldName + ': "' + String(fieldValue || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    fieldLine =
+      fieldName +
+      ': "' +
+      String(fieldValue ?? "")
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\r?\n/g, " ") +
+      '"';
   }
   const pattern = new RegExp(
     "^" + escapedName + "\\s*:(?:[^\\r\\n]*(?:\\r?\\n\\s+-[^\\r\\n]*)*)",
     "m"
   );
-  const newBody = pattern.test(parsed.body) ? parsed.body.replace(
-    pattern,
-    fieldLine
-  ) : parsed.body + "\n" + fieldLine;
-  return content.replace(
-    parsed.full,
-    "---\n" + newBody + "\n---"
-  );
+  const newBody = pattern.test(parsed.body)
+    ? parsed.body.replace(pattern, () => fieldLine)
+    : parsed.body + "\n" + fieldLine;
+  return content.replace(parsed.full, () => "---\n" + newBody + "\n---");
 }
 function updateScoreFields(
   content,
@@ -1264,7 +1267,7 @@ function updateScoreFields(
 
   let result = content.replace(
     parsed.full,
-    rebuiltFrontmatter
+    () => rebuiltFrontmatter
   );
 
   const tableFieldNames = [
@@ -1337,13 +1340,19 @@ function updateScoreFields(
     }
   }
 
-  if (
-    !insertedTableScores &&
-    tableLines.length > 0
-  ) {
-    rebuiltContentLines.push(
-      ...tableLines
-    );
+  if (!insertedTableScores && tableLines.length > 0) {
+    // 兼容自定义动画笔记（信息表中不含「BGM 评分」行）：锚定插在参考评分 / 记录日期 / 观看状态之后，绝不掉到文件末尾
+    const fallbackAnchorRx = /^\|\s*(?:\u53C2\u8003\u8BC4\u5206|\u8BB0\u5F55\u65E5\u671F|\u89C2\u770B\u72B6\u6001)\s*\|/;
+    let anchorIdx = -1;
+    for (let i = 0; i < rebuiltContentLines.length; i++) {
+      if (fallbackAnchorRx.test(rebuiltContentLines[i])) {
+        anchorIdx = i;
+      }
+    }
+    if (anchorIdx >= 0) {
+      rebuiltContentLines.splice(anchorIdx + 1, 0, ...tableLines);
+      insertedTableScores = true;
+    }
   }
 
   return rebuiltContentLines.join(
@@ -1969,7 +1978,8 @@ function updateCalloutTableRow(content, fieldName, newValue) {
   const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(`^((?:>\\s*)?\\|\\s*(?:\\*\\*)?${escaped}(?:\\*\\*)?\\s*\\|)[^|\\r\\n]*(\\|)`, "m");
   if (regex.test(content)) {
-    return content.replace(regex, `$1 ${newValue} $2`);
+    const safeVal = String(newValue ?? "").replace(/\r?\n/g, " ");
+    return content.replace(regex, (_, p1, p2) => `${p1} ${safeVal} ${p2}`);
   }
   return content;
 }
