@@ -32,6 +32,14 @@ function getDesktopCapsuleService() {
   }
   return _cachedCapsuleSvc;
 }
+let _cachedPlaytimeTrackerSvc = null;
+function getDesktopPlaytimeTrackerService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedPlaytimeTrackerSvc) {
+    _cachedPlaytimeTrackerSvc = require("./game-playtime-tracker-service.js");
+  }
+  return _cachedPlaytimeTrackerSvc;
+}
 
 function getAppearance(plugin) {
   const s = (plugin && plugin.settings) || {};
@@ -742,10 +750,125 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
   if (typeof plugin._v07GameStageUnreg === "function") {
     plugin._v07GameStageUnreg();
   }
+  if (typeof plugin._v07GameTrackerUnreg === "function") {
+    plugin._v07GameTrackerUnreg();
+  }
   const capSvc = getDesktopCapsuleService();
+  const trackerSvc = getDesktopPlaytimeTrackerService();
   plugin._v07GameStageUnreg = capSvc
     ? capSvc.registerGameStageRefreshHook(plugin, refresh)
     : null;
+  plugin._v07GameTrackerUnreg = trackerSvc
+    ? trackerSvc.registerPlaytimeTrackerListener(plugin, () => {
+        refresh();
+      })
+    : null;
+
+  // 进入游戏典藏页时自动做一次节流同步，确保离线刚玩完或玩到一半打开的游戏立刻更新
+  if (trackerSvc && Date.now() - (plugin._v07LastGameStageSyncMs || 0) > 1500) {
+    plugin._v07LastGameStageSyncMs = Date.now();
+    trackerSvc.syncFromBackgroundLedger(plugin, { silentNotice: false }).catch(() => {});
+  }
+
+  const playtimeTrackerBridge = trackerSvc
+    ? {
+        supported: trackerSvc.isWindowsDesktop(),
+        desktop: !isMobileEnv(),
+        getSettings: () => trackerSvc.ensurePlaytimeTrackerSettings(plugin),
+        getStatus: () => trackerSvc.getWatcherRuntimeStatus(plugin),
+        getLiveSession: (gameId) => trackerSvc.getLiveGameSession(plugin, gameId),
+        getAllLiveSessions: () => trackerSvc.getAllLiveGameSessions(plugin),
+        syncNow: async () => {
+          const res = await trackerSvc.syncFromBackgroundLedger(plugin, { silentNotice: false });
+          refresh();
+          return res;
+        },
+        updateSettings: async (patch = {}) => {
+          const cfg = trackerSvc.ensurePlaytimeTrackerSettings(plugin);
+          const prevWatcher = cfg.backgroundWatcherEnabled;
+          const prevAutoStart = cfg.autoStartWithWindows;
+          Object.assign(cfg, patch);
+          trackerSvc.ensurePlaytimeTrackerSettings(plugin);
+          await save();
+
+          let opResult = { ok: true };
+          if (trackerSvc.isWindowsDesktop()) {
+            if (cfg.backgroundWatcherEnabled && (!prevWatcher || !trackerSvc.isBackgroundWatcherRunning(plugin))) {
+              opResult = await trackerSvc.startBackgroundWatcher(plugin, {
+                autoStart: cfg.autoStartWithWindows
+              });
+              if (!opResult.ok) {
+                cfg.backgroundWatcherEnabled = false;
+                await save();
+              }
+            } else if (patch.backgroundWatcherEnabled === false && (prevWatcher || trackerSvc.isBackgroundWatcherRunning(plugin))) {
+              cfg.autoStartWithWindows = false;
+              await trackerSvc.stopBackgroundWatcher(plugin, {
+                removeAutoStart: true,
+                removeBinary: false
+              });
+              await save();
+            } else if ((cfg.backgroundWatcherEnabled || trackerSvc.isBackgroundWatcherRunning(plugin)) && patch.autoStartWithWindows !== undefined) {
+              const st = trackerSvc.getWatcherRuntimeStatus(plugin);
+              opResult = trackerSvc.setWindowsAutoStart(cfg.autoStartWithWindows, st.exePath);
+              if (!opResult.ok) {
+                cfg.autoStartWithWindows = prevAutoStart;
+                await save();
+              }
+            }
+          }
+          trackerSvc.refreshPlaytimeTrackerLifecycle(plugin);
+          refresh();
+          return { cfg, opResult };
+        },
+        uninstallWatcher: async () => {
+          const res = await trackerSvc.uninstallBackgroundWatcherCompletely(plugin);
+          refresh();
+          return res;
+        }
+      }
+    : {
+        supported: false,
+        desktop: false,
+        getSettings: () => ({ autoTrackExternalGames: false, backgroundWatcherEnabled: false, autoStartWithWindows: false }),
+        getStatus: () => ({ supported: false, running: false, activeGames: [] }),
+        getLiveSession: (gameId) => {
+          const active = gameStatsService.getActiveGameTimer(plugin, gameId);
+          if (!active) return null;
+          const sec = Math.max(0, Math.round((Date.now() - Number(active.startedAtMs)) / 1000));
+          return {
+            gameId,
+            title: active.title || "",
+            startedAtMs: Number(active.startedAtMs),
+            elapsedSeconds: sec,
+            elapsedMinutes: Math.max(0, Math.round(sec / 60)),
+            origin: "timer",
+            matchedExe: ""
+          };
+        },
+        getAllLiveSessions: () => {
+          const map = new Map();
+          const timers = (plugin && plugin.settings && plugin.settings.activeGameTimers) || {};
+          for (const gid of Object.keys(timers)) {
+            const st = timers[gid];
+            if (!st || !st.startedAtMs) continue;
+            const sec = Math.max(0, Math.round((Date.now() - Number(st.startedAtMs)) / 1000));
+            map.set(gid, {
+              gameId: gid,
+              title: st.title || "",
+              startedAtMs: Number(st.startedAtMs),
+              elapsedSeconds: sec,
+              elapsedMinutes: Math.max(0, Math.round(sec / 60)),
+              origin: "timer",
+              matchedExe: ""
+            });
+          }
+          return map;
+        },
+        syncNow: async () => ({ syncedCount: 0, liveCount: 0 }),
+        updateSettings: async () => ({ ok: false }),
+        uninstallWatcher: async () => ({ ok: false })
+      };
 
   const capsuleBridge = capSvc
     ? {
@@ -814,6 +937,7 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
     initialSearchQuery: extraOpts.searchQuery || "",
     appearance: getAppearance(plugin),
     capsule: capsuleBridge,
+    playtimeTracker: playtimeTrackerBridge,
     settings: {
       gameUi: plugin.settings.gameUi || {},
       gameGroups: ensureNormalizedGameGroups(plugin)
@@ -877,6 +1001,7 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
           });
         }
         await save();
+        if (trackerSvc) trackerSvc.writeVaultWatchConfig(plugin, true);
         refresh();
       },
       addGame: () => {
@@ -890,6 +1015,7 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
       saveGame: async (g) => {
         if (typeof mh.syncGameMarkdownNote === "function") await mh.syncGameMarkdownNote(plugin, g);
         await save();
+        if (trackerSvc) trackerSvc.writeVaultWatchConfig(plugin, true);
       },
       saveSettings: async (patch) => {
         if (patch.gameUi) plugin.settings.gameUi = patch.gameUi;
@@ -900,15 +1026,36 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
         await save();
       },
       addManualSession: async (g, s) => {
-        if (!Array.isArray(g.playSessions)) g.playSessions = [];
         const mins = Math.max(1, Math.round(Number(s.minutes) || 0));
+        const durSec = mins * 60;
+        const startMs = Date.parse(s.start || "") || Date.now();
+        const endMs = startMs + durSec * 1000;
+        if (trackerSvc) {
+          await trackerSvc.commitGamePlaySession(
+            plugin,
+            g,
+            {
+              startedAtMs: startMs,
+              endedAtMs: endMs,
+              durationSeconds: durSec,
+              source: "manual",
+              mode: "manual",
+              note: s.note || ""
+            },
+            { ignoreMinThreshold: true }
+          );
+          return;
+        }
+        if (!Array.isArray(g.playSessions)) g.playSessions = [];
         const durHours = Number((mins / 60).toFixed(2));
-        const startIso = s.start || new Date().toISOString();
+        const startIso = new Date(startMs).toISOString();
+        const endIso = new Date(endMs).toISOString();
         g.playSessions.unshift({
           id: `ses-${Date.now().toString(36)}`,
           start: startIso,
           startedAt: startIso,
-          endedAt: startIso,
+          endedAt: endIso,
+          durationSeconds: durSec,
           minutes: mins,
           durationHours: durHours,
           source: "manual",
@@ -916,11 +1063,18 @@ function createGameStageContext(plugin, vaultAnimeItems, rerender, extraOpts = {
           note: s.note || ""
         });
         g.playHours = Number(((Number(g.playHours) || 0) + durHours).toFixed(2));
-        g.lastPlayedAt = g.lastPlayedAt || startIso;
+        const prevLast = Date.parse(g.lastPlayedAt || "") || 0;
+        if (!prevLast || endMs >= prevLast) g.lastPlayedAt = endIso;
+        const prevFirst = Date.parse(g.firstPlayedAt || "") || 0;
+        if (!prevFirst || startMs < prevFirst) g.firstPlayedAt = startIso;
         if (typeof mh.syncGameMarkdownNote === "function") await mh.syncGameMarkdownNote(plugin, g);
         await save();
       },
       removeSession: async (g, id) => {
+        if (trackerSvc) {
+          await trackerSvc.removeGamePlaySession(plugin, g, id);
+          return;
+        }
         const s = (g.playSessions || []).find((x) => x.id === id);
         g.playSessions = (g.playSessions || []).filter((x) => x.id !== id);
         if (s) {

@@ -627,17 +627,36 @@ function buildTrackableExeMap(plugin) {
 function collectCandidateExesForGame(plugin, game, extraExePath = "") {
   const out = new Set();
   if (!plugin || !game) return out;
-  buildTrackableExeMap(plugin);
-  const rt = getRuntime(plugin);
-  const cached = rt.exeSetByGame && rt.exeSetByGame.get(game.id);
-  if (cached) {
-    cached.forEach((x) => out.add(x));
+  try {
+    const tracker = require("./game-playtime-tracker-service.js");
+    if (tracker && typeof tracker.describeGameWatchTargets === "function") {
+      const desc = tracker.describeGameWatchTargets(plugin, game);
+      if (desc) {
+        const pathMod = tryRequireNode("path");
+        (desc.fallbackNames || []).forEach((x) => out.add(x));
+        (desc.customNames || []).forEach((x) => out.add(x));
+        (desc.exactPaths || []).forEach((p) => {
+          const base = pathMod ? pathMod.basename(p).toLowerCase() : String(p).toLowerCase();
+          if (base && !GENERIC_STUB_EXE_NAMES.has(base)) out.add(base);
+        });
+      }
+    }
+  } catch (_) {}
+  if (out.size === 0) {
+    buildTrackableExeMap(plugin);
+    const rt = getRuntime(plugin);
+    const cached = rt.exeSetByGame && rt.exeSetByGame.get(game.id);
+    if (cached) {
+      cached.forEach((x) => out.add(x));
+    }
   }
   if (extraExePath) {
     const fsMod = tryRequireNode("fs");
     const pathMod = tryRequireNode("path");
     const extra = scanExecutableNeighborhood(fsMod, pathMod, extraExePath, game.launchMode !== "emulator");
-    extra.forEach((x) => out.add(x));
+    extra.forEach((x) => {
+      if (!GENERIC_STUB_EXE_NAMES.has(x)) out.add(x);
+    });
   }
   return out;
 }
@@ -3415,6 +3434,8 @@ async function handleSpawnedProcessClosed(plugin, game, sessionCtx = {}) {
   rt.activeSource = "internal";
   rt.adoptedSession = {
     gameId: game.id,
+    startTs: Number(sessionCtx.startTs) || Date.now(),
+    missingSinceMs: 0,
     candidateExes,
     finalizeSession: typeof sessionCtx.finalizeSession === "function" ? sessionCtx.finalizeSession : null
   };
@@ -3475,24 +3496,27 @@ function expandActiveCapsuleForGame(plugin, game) {
   return true;
 }
 
-/* ==================== 后台轻量外部游戏进程感知与壳进程接管守护 ==================== */
+/* ==================== 壳进程接管与协议启动守护（外部游戏时长监测已解耦至 game-playtime-tracker-service） ==================== */
 
 async function pollExternalGameProcessesOnce(plugin) {
   const rt = getRuntime(plugin);
   if (rt.pollingBusy || !isDesktopCapsuleSupported()) return;
-  const cfg = ensureGameCapsuleSettings(plugin);
   const hasInternalWatch = Boolean(rt.adoptedSession || rt.protocolWatch);
-  if (!hasInternalWatch && (!cfg.enabled || !cfg.autoDetectExternalProcess)) return;
-
-  const exeMap = buildTrackableExeMap(plugin);
-  if (!hasInternalWatch && (!exeMap || exeMap.size === 0)) return;
+  if (!hasInternalWatch) return;
 
   rt.pollingBusy = true;
   try {
     const runningSet = await queryRunningProcessNamesWin32();
     if (!runningSet) return;
 
-    // 0A. 检查接管的壳进程/Steam 重启会话是否仍在运行
+    const now = Date.now();
+    let graceMs = 15000;
+    try {
+      const tracker = require("./game-playtime-tracker-service.js");
+      graceMs = Math.max(5, Number(tracker.ensurePlaytimeTrackerSettings(plugin).exitGraceSeconds) || 15) * 1000;
+    } catch (_) {}
+
+    // 0A. 检查接管的壳进程/Steam 重启会话是否仍在运行（带防抖宽限期，防启动器交接误切）
     if (rt.adoptedSession) {
       const { gameId, candidateExes, finalizeSession } = rt.adoptedSession;
       let alive = false;
@@ -3502,7 +3526,17 @@ async function pollExternalGameProcessesOnce(plugin) {
           break;
         }
       }
-      if (alive) return;
+      if (alive) {
+        rt.adoptedSession.missingSinceMs = 0;
+        return;
+      }
+      if (!rt.adoptedSession.missingSinceMs) {
+        rt.adoptedSession.missingSinceMs = now;
+        return;
+      }
+      if (now - rt.adoptedSession.missingSinceMs < graceMs) {
+        return;
+      }
 
       rt.adoptedSession = null;
       deactivateGameSideCapsule(plugin, gameId);
@@ -3511,9 +3545,7 @@ async function pollExternalGameProcessesOnce(plugin) {
           await finalizeSession();
         } catch (_) {}
       }
-      if (!cfg.enabled || !cfg.autoDetectExternalProcess) {
-        refreshGameCapsuleLifecycle(plugin);
-      }
+      refreshGameCapsuleLifecycle(plugin);
       return;
     }
 
@@ -3528,6 +3560,7 @@ async function pollExternalGameProcessesOnce(plugin) {
         }
       }
       if (alive) {
+        pw.missingSinceMs = 0;
         if (!pw.seenRunning) {
           pw.seenRunning = true;
           const g = findGameForCapsule(plugin, pw.gameId);
@@ -3536,6 +3569,13 @@ async function pollExternalGameProcessesOnce(plugin) {
         return;
       }
       if (pw.seenRunning) {
+        if (!pw.missingSinceMs) {
+          pw.missingSinceMs = now;
+          return;
+        }
+        if (now - pw.missingSinceMs < graceMs) {
+          return;
+        }
         rt.protocolWatch = null;
         const g = findGameForCapsule(plugin, pw.gameId);
         if (g) {
@@ -3556,77 +3596,12 @@ async function pollExternalGameProcessesOnce(plugin) {
             deactivateGameSideCapsule(plugin, g.id);
           }
         }
+        refreshGameCapsuleLifecycle(plugin);
         return;
       }
-      if (Date.now() > pw.expiresAtMs) {
+      if (now > pw.expiresAtMs) {
         rt.protocolWatch = null;
-      }
-    }
-
-    if (!cfg.enabled || !cfg.autoDetectExternalProcess) return;
-
-    // 1. 若当前正跟踪一个外部直接启动的游戏，检查是否仍在运行（兼容同目录其他子进程接力）
-    if (rt.activeSource === "external" && rt.activeGameId) {
-      const trackedGame = findGameForCapsule(plugin, rt.activeGameId);
-      const candSet = trackedGame ? collectCandidateExesForGame(plugin, trackedGame) : new Set();
-      if (rt.externalMatchedExe) candSet.add(rt.externalMatchedExe);
-      let stillAlive = false;
-      for (const exeLower of candSet) {
-        if (runningSet.has(exeLower)) {
-          stillAlive = true;
-          break;
-        }
-      }
-      if (stillAlive) {
-        return;
-      }
-      // 外部启动的游戏已退出：自动累加游玩时长并平滑收起胶囊
-      const finishedGame = trackedGame;
-      const startedMs = rt.externalSessionStartMs;
-      rt.externalMatchedExe = "";
-      rt.externalSessionStartMs = 0;
-      deactivateGameSideCapsule(plugin, finishedGame ? finishedGame.id : null);
-
-      if (finishedGame && startedMs > 0) {
-        const elapsedMin = Math.max(1, Math.round((Date.now() - startedMs) / 60000));
-        const elapsedHours = Number((elapsedMin / 60).toFixed(2));
-        const startIso = new Date(startedMs).toISOString();
-        const endIso = new Date().toISOString();
-        if (!Array.isArray(finishedGame.playSessions)) finishedGame.playSessions = [];
-        finishedGame.playSessions.unshift({
-          id: `ses-${Date.now().toString(36)}`,
-          start: startIso,
-          startedAt: startIso,
-          endedAt: endIso,
-          minutes: elapsedMin,
-          durationHours: elapsedHours,
-          source: "auto",
-          mode: "auto",
-          note: "桌面快捷方式启动自动记录"
-        });
-        finishedGame.playHours = Number(((Number(finishedGame.playHours) || 0) + elapsedHours).toFixed(2));
-        finishedGame.lastPlayedAt = endIso;
-        if (!finishedGame.firstPlayedAt) finishedGame.firstPlayedAt = startIso;
-        await persistCapsuleGameMutation(plugin, finishedGame);
-        notifyObsidianViewsUpdated(plugin, finishedGame.id, "capsule");
-      }
-      return;
-    }
-
-    // 2. 若当前已有插件内启动的活跃胶囊，不重复抢占
-    if (rt.win && !rt.win.isDestroyed() && rt.activeSource === "internal") {
-      return;
-    }
-
-    // 3. 检测是否有已收录游戏刚刚在外部启动
-    for (const [exeLower, game] of exeMap.entries()) {
-      if (runningSet.has(exeLower)) {
-        rt.activeGameId = game.id;
-        rt.activeSource = "external";
-        rt.externalMatchedExe = exeLower;
-        rt.externalSessionStartMs = Date.now();
-        activateGameSideCapsule(plugin, game, { source: "external" });
-        break;
+        refreshGameCapsuleLifecycle(plugin);
       }
     }
   } finally {
@@ -3660,7 +3635,7 @@ function refreshGameCapsuleLifecycle(plugin) {
     return;
   }
 
-  if (cfg.autoDetectExternalProcess || rt.adoptedSession || rt.protocolWatch) {
+  if (rt.adoptedSession || rt.protocolWatch) {
     ensureProcessPollLoop(plugin);
     setTimeout(() => pollExternalGameProcessesOnce(plugin), 1200);
   }
@@ -3672,6 +3647,32 @@ function stopGameCapsuleService(plugin) {
     if (rt.pollTimer) {
       clearInterval(rt.pollTimer);
       rt.pollTimer = null;
+    }
+    // 卸载前若仍有壳进程接管会话且无独立后台守卫运行，写入共享账本以防时长丢失
+    if (rt.adoptedSession && rt.adoptedSession.gameId && rt.adoptedSession.startTs) {
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        if (tracker && !tracker.isBackgroundWatcherRunning(plugin)) {
+          const paths = tracker.getVaultLedgerPaths(plugin);
+          const fsMod = tryRequireNode("fs");
+          const pathMod = tryRequireNode("path");
+          const now = Date.now();
+          const durSec = Math.round((now - rt.adoptedSession.startTs) / 1000);
+          if (paths && fsMod && pathMod && durSec >= 20) {
+            fsMod.mkdirSync(pathMod.dirname(paths.completedPath), { recursive: true });
+            const line = JSON.stringify({
+              sessionId: `adopt_${rt.adoptedSession.gameId}_${Math.floor(rt.adoptedSession.startTs / 1000)}`,
+              gameId: rt.adoptedSession.gameId,
+              startedAtMs: rt.adoptedSession.startTs,
+              endedAtMs: now,
+              durationSec: durSec,
+              matchedExe: "",
+              source: "watcher_recovered"
+            });
+            fsMod.appendFileSync(paths.completedPath, `${line}\n`, "utf8");
+          }
+        }
+      } catch (_) {}
     }
     rt.adoptedSession = null;
     rt.protocolWatch = null;

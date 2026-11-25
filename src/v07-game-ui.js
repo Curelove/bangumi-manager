@@ -79,9 +79,14 @@ function devGroupName(g) {
 function sessionsOf(g) {
   return (Array.isArray(g.playSessions) ? g.playSessions : [])
     .map((s) => {
-      const rawMin = s.minutes !== undefined && s.minutes !== null
-        ? Number(s.minutes)
-        : Math.round((Number(s.durationHours) || 0) * 60);
+      let rawMin = 0;
+      if (Number.isFinite(Number(s.durationSeconds)) && Number(s.durationSeconds) > 0) {
+        rawMin = Math.max(1, Math.round(Number(s.durationSeconds) / 60));
+      } else if (s.minutes !== undefined && s.minutes !== null && Number.isFinite(Number(s.minutes))) {
+        rawMin = Number(s.minutes);
+      } else {
+        rawMin = Math.round((Number(s.durationHours) || 0) * 60);
+      }
       return Object.assign({}, s, {
         _d: toDate(s.start || s.startedAt || s.endedAt || s.date),
         minutes: Math.max(0, rawMin || 0),
@@ -92,20 +97,47 @@ function sessionsOf(g) {
     .sort((a, b) => b._d - a._d);
 }
 
-function gameStats(g, now = new Date()) {
+function gameStats(g, now = new Date(), liveSession = null) {
   const ss = sessionsOf(g);
   const sum = ss.reduce((a, s) => a + s.minutes, 0);
-  const total = Math.max(sum, Math.round((Number(g.playHours) || 0) * 60));
+  const legacyMin =
+    g && g.legacyPlayMinutes !== undefined && g.legacyPlayMinutes !== null
+      ? Math.max(0, Math.round(Number(g.legacyPlayMinutes) || 0))
+      : Math.max(0, Math.round((Number(g.playHours) || 0) * 60) - sum);
+  // 剔除旧版 0.02h 舍入产生的 1~2 分钟伪差值
+  const untracked = legacyMin > 2 ? legacyMin : 0;
+  const liveMinutes = liveSession
+    ? Math.max(0, Math.round((Number(liveSession.elapsedSeconds) || 0) / 60))
+    : 0;
+  const baseTotal = sum + untracked;
+  const total = baseTotal + liveMinutes;
   const t0 = startOfDay(now), w0 = startOfWeek(now), m0 = startOfMonth(now);
-  let today = 0, week = 0, month = 0;
+  let today = liveMinutes, week = liveMinutes, month = liveMinutes;
   for (const s of ss) {
     if (s._d >= t0) today += s.minutes;
     if (s._d >= w0) week += s.minutes;
     if (s._d >= m0) month += s.minutes;
   }
-  const last = [ss[0] && ss[0]._d, toDate(g.lastPlayedAt)].filter(Boolean).sort((a, b) => b - a)[0] || null;
-  const first = ss.length ? ss[ss.length - 1]._d : null;
-  return { sessions: ss, total, logged: sum, untracked: Math.max(0, total - sum), today, week, month, count: ss.length, first, last, avg: ss.length ? sum / ss.length : 0 };
+  const last = liveSession
+    ? new Date()
+    : ([ss[0] && ss[0]._d, toDate(g.lastPlayedAt)].filter(Boolean).sort((a, b) => b - a)[0] || null);
+  const first = ss.length ? ss[ss.length - 1]._d : (liveSession ? new Date(liveSession.startedAtMs || Date.now()) : null);
+  return {
+    sessions: ss,
+    total,
+    logged: sum,
+    untracked,
+    today,
+    week,
+    month,
+    count: ss.length,
+    first,
+    last,
+    avg: ss.length ? sum / ss.length : 0,
+    isLive: Boolean(liveSession),
+    liveMinutes,
+    liveSession
+  };
 }
 
 function gameDisplayScore(g) {
@@ -142,7 +174,10 @@ function gameCover(game, ctx, defaultAspect) {
 }
 
 function renderGameCard(game, ctx, opts) {
-  const st = gameStats(game);
+  const liveSes = ctx.playtimeTracker && typeof ctx.playtimeTracker.getLiveSession === "function"
+    ? ctx.playtimeTracker.getLiveSession(game.id)
+    : null;
+  const st = gameStats(game, new Date(), liveSes);
   const { frame, ar } = gameCover(game, ctx, opts.defaultAspect);
   const canLaunch = Boolean(ctx.actions.canLaunch && ctx.actions.canLaunch(game));
   const card = h("article.bm7-gcard", {
@@ -155,7 +190,16 @@ function renderGameCard(game, ctx, opts) {
     }
   });
   const status = game.status || "在玩";
-  frame.appendChild(h("span.bm7-gcard-status", { dataset: { st: status }, text: status }));
+  if (st.isLive) {
+    frame.appendChild(
+      h("span.bm7-gcard-status.is-live", [
+        h("span.bm7-glive-dot"),
+        h("span", { text: st.liveMinutes > 0 ? `游玩中 · ${formatMinutes(st.liveMinutes, true)}` : "游玩中" })
+      ])
+    );
+  } else {
+    frame.appendChild(h("span.bm7-gcard-status", { dataset: { st: status }, text: status }));
+  }
   const overlay = h("div.bm7-gcard-overlay", [
     canLaunch ? button("启动", { icon: "play", variant: "primary", onClick: () => ctx.actions.launch(game) }) : null,
     button("详情", { icon: "clock", onClick: () => opts.onOpen(game) })
@@ -265,9 +309,12 @@ function openCoverEditor(anchor, game, ctx, defaultAspect, onDone) {
 
 function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
   clear(container);
-  const st = gameStats(game);
+  const liveSes = ctx.playtimeTracker && typeof ctx.playtimeTracker.getLiveSession === "function"
+    ? ctx.playtimeTracker.getLiveSession(game.id)
+    : null;
+  const st = gameStats(game, new Date(), liveSes);
   const url = ctx.getCover ? ctx.getCover(game) : game.coverUrl;
-  const state = { period: "week", chart: "days" };
+  const state = { period: "week", chart: "days", showAllSessions: false };
   const root = h("div.bm7-gs");
   applyAmbient(root, url, game.title);
 
@@ -277,7 +324,16 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
     h("div.bm7-gs-head-main", [
       h("div.bm7-gs-cover", [gameCover(game, ctx, "2:3").frame]),
       h("div.bm7-gs-titles", [
-        h("div.bm7-kicker", [h("span", { text: game.status || "在玩" }), game.developer ? h("span.bm7-kicker-dim", { text: game.developer }) : null]),
+        h("div.bm7-kicker", [
+          h("span", { text: game.status || "在玩" }),
+          game.developer ? h("span.bm7-kicker-dim", { text: game.developer }) : null,
+          st.isLive
+            ? h("span.bm7-glive-pill", [
+                h("span.bm7-glive-dot"),
+                h("span", { text: st.liveMinutes > 0 ? `游玩中 · 已同步 ${formatMinutes(st.liveMinutes, true)}` : "游玩中" })
+              ])
+            : null
+        ]),
         h("h2.bm7-gs-title", { text: game.title }),
         h("div.bm7-gs-total", [h("span.bm7-gs-total-label", { text: "总时长" }), h("span.bm7-gs-total-val", { text: formatMinutes(st.total) })]),
         h("div.bm7-gs-actions", [
@@ -295,6 +351,17 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
     ])
   ]);
 
+  const liveBanner = st.isLive && liveSes
+    ? h("div.bm7-gs-live-banner", [
+        h("span.bm7-glive-dot"),
+        h("span", {
+          text: `正在游玩中 · 自 ${formatClock(new Date(liveSes.startedAtMs)) || "刚刚"} 起已同步 ${
+            st.liveMinutes > 0 ? formatMinutes(st.liveMinutes, true) : "不足 1 分钟"
+          }，退出游戏后将自动保存为正式记录。`
+        })
+      ])
+    : null;
+
   // —— 概览 ——
   const periodVal = h("span.bm7-gs-period-val");
   const paintPeriod = () => { periodVal.textContent = formatMinutes(st[state.period]); };
@@ -307,7 +374,7 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
       tile("游玩次数", st.count ? `${st.count} 次` : "—"),
       tile("平均每次", st.count ? formatMinutes(st.avg, true) : "—"),
       tile("首次游玩", st.first ? formatShortDate(st.first) : "—"),
-      tile("最近游玩", st.last ? formatShortDate(st.last) : "—", st.last ? formatRelative(st.last) : "")
+      tile("最近游玩", st.isLive ? "正在游玩" : (st.last ? formatShortDate(st.last) : "—"), st.isLive ? "时长实时同步中" : (st.last ? formatRelative(st.last) : ""))
     ])
   ]);
   paintPeriod();
@@ -330,6 +397,7 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
       }
     }
     for (const s of st.sessions) for (const b of buckets) if (s._d >= b.from && s._d < b.to) b.v += s.minutes;
+    if (st.liveMinutes > 0 && buckets.length > 0) buckets[buckets.length - 1].v += st.liveMinutes;
     const max = Math.max(30, ...buckets.map((b) => b.v));
     const bars = h("div.bm7-gs-bars", { style: { "--n": String(buckets.length) } });
     buckets.forEach((b, i) => {
@@ -353,24 +421,76 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
   paintChart();
 
   // —— 记录与补录 ——
-  const listSec = h("section.bm7-gs-sec", [h("div.bm7-gs-sec-head", [h("h4", { text: "游玩记录" }), h("span.bm7-gs-sec-sub", { text: st.untracked > 1 ? `另有 ${formatMinutes(st.untracked, true)} 来自早期累计，没有逐次明细` : "" })])]);
+  const listSec = h("section.bm7-gs-sec", [h("div.bm7-gs-sec-head", [h("h4", { text: "游玩记录" }), h("span.bm7-gs-sec-sub", { text: st.untracked > 2 ? `另有 ${formatMinutes(st.untracked, true)} 来自早期累计，没有逐次明细` : "" })])]);
   const list = h("ol.bm7-gs-sessions");
-  if (!st.sessions.length) list.appendChild(emptyState("还没有逐次记录。启动游戏会自动记时；在别处玩的，可以在下面补录。"));
-  st.sessions.slice(0, 10).forEach((s) => {
-    const srcLabel = s.source === "manual" ? "手动补录" : s.source === "timer" ? "计时" : "自动记录";
-    list.appendChild(
-      h("li.bm7-gs-session", [
-        h("span.bm7-gs-session-date", [h("strong", { text: formatDayLabel(s._d) }), formatClock(s._d) ? h("span", { text: formatClock(s._d) }) : null]),
-        h("span.bm7-gs-session-len", { text: formatMinutes(s.minutes, true) }),
-        h("span.bm7-gs-session-src", { dataset: { src: s.source || "auto" }, text: srcLabel }),
-        s.note ? h("span.bm7-gs-session-note", { text: s.note }) : h("span"),
-        s.source === "manual" && ctx.actions.removeSession
-          ? iconButton("close", "删除这条补录", async () => { await ctx.actions.removeSession(game, s.id); renderGameStatsPanel(container, game, ctx, onChange); onChange && onChange(); })
-          : h("span")
-      ])
-    );
-  });
-  listSec.appendChild(list);
+  const moreHost = h("div");
+  const paintSessionList = () => {
+    clear(list);
+    clear(moreHost);
+    if (!st.sessions.length) {
+      list.appendChild(emptyState("还没有逐次记录。启动游戏会自动记时；在别处玩的，可以在下面补录。"));
+      return;
+    }
+    const visible = state.showAllSessions ? st.sessions : st.sessions.slice(0, 10);
+    visible.forEach((s) => {
+      const srcLabel =
+        s.source === "manual"
+          ? "手动补录"
+          : s.source === "timer"
+            ? "手动计时"
+            : s.source === "watcher" || s.source === "watcher_recovered"
+              ? "离线记录"
+              : "自动记录";
+      let delControl = h("span");
+      if (ctx.actions.removeSession && s.id) {
+        let armed = false;
+        let armTid = null;
+        delControl = iconButton("close", "删除这条游玩记录", async () => {
+          if (!armed) {
+            armed = true;
+            delControl.classList.add("is-armed");
+            delControl.textContent = "确认删除";
+            armTid = setTimeout(() => {
+              armed = false;
+              if (delControl.isConnected) {
+                delControl.classList.remove("is-armed");
+                clear(delControl);
+                delControl.appendChild(icon("close", 15));
+              }
+            }, 3200);
+            return;
+          }
+          if (armTid) clearTimeout(armTid);
+          await ctx.actions.removeSession(game, s.id);
+          renderGameStatsPanel(container, game, ctx, onChange, closeDrawer);
+          onChange && onChange();
+        }, "bm7-gs-session-del");
+      }
+      list.appendChild(
+        h("li.bm7-gs-session", [
+          h("span.bm7-gs-session-date", [h("strong", { text: formatDayLabel(s._d) }), formatClock(s._d) ? h("span", { text: formatClock(s._d) }) : null]),
+          h("span.bm7-gs-session-len", { text: formatMinutes(s.minutes, true) }),
+          h("span.bm7-gs-session-src", { dataset: { src: s.source || "auto" }, text: srcLabel }),
+          s.note ? h("span.bm7-gs-session-note", { text: s.note, title: s.note }) : h("span"),
+          delControl
+        ])
+      );
+    });
+    if (st.sessions.length > 10) {
+      moreHost.appendChild(
+        button(state.showAllSessions ? "收起记录" : `查看全部 ${st.sessions.length} 条记录`, {
+          variant: "ghost",
+          cls: "bm7-gs-more-btn",
+          onClick: () => {
+            state.showAllSessions = !state.showAllSessions;
+            paintSessionList();
+          }
+        })
+      );
+    }
+  };
+  paintSessionList();
+  listSec.append(list, moreHost);
 
   const todayStr = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
   const dateIn = h("input.bm7-input", { attr: { type: "date", value: todayStr, max: todayStr, "aria-label": "日期" } });
@@ -394,7 +514,7 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
           const d = toDate(dateIn.value) || new Date();
           d.setHours(20, 0, 0, 0);
           await ctx.actions.addManualSession(game, { start: d.toISOString(), minutes, note: noteIn.value.trim() });
-          renderGameStatsPanel(container, game, ctx, onChange);
+          renderGameStatsPanel(container, game, ctx, onChange, closeDrawer);
           onChange && onChange();
         }
       })
@@ -402,7 +522,7 @@ function renderGameStatsPanel(container, game, ctx, onChange, closeDrawer) {
     msg
   ]);
 
-  root.append(head, overview, chartSec, listSec, addSec);
+  root.append(...[head, liveBanner, overview, chartSec, listSec, addSec].filter(Boolean));
   container.appendChild(root);
 }
 
@@ -656,10 +776,17 @@ function renderGameStage(host, ctx) {
     );
 
   /* —— 首屏 —— */
+  const liveMap =
+    ctx.playtimeTracker && typeof ctx.playtimeTracker.getAllLiveSessions === "function"
+      ? ctx.playtimeTracker.getAllLiveSessions()
+      : new Map();
+  const getLive = (g) => (g && liveMap && liveMap.get(g.id)) || null;
+
   const top = h("div.bm7-stage-grid.bm7-game-grid");
   stage.appendChild(top);
   const byRecent = sortGames(games, "recent");
-  const current = byRecent.find((g) => gameStats(g).last) || byRecent[0];
+  const liveFirst = games.find((g) => g && liveMap.has(g.id)) || null;
+  const current = liveFirst || byRecent.find((g) => gameStats(g).last) || byRecent[0];
 
   const heroArea = h("section.bm7-area-hero");
   top.appendChild(heroArea);
@@ -671,7 +798,8 @@ function renderGameStage(host, ctx) {
       button("添加游戏", { icon: "plus", variant: "primary", onClick: () => ctx.actions.addGame && ctx.actions.addGame() })
     ])]));
   } else {
-    const st = gameStats(current);
+    const curLive = getLive(current);
+    const st = gameStats(current, new Date(), curLive);
     const url = ctx.getCover ? ctx.getCover(current) : current.coverUrl;
     const hero = h("div.bm7-hero.bm7-ghero");
     applyAmbient(hero, url, current.title);
@@ -684,13 +812,22 @@ function renderGameStage(host, ctx) {
       h("div.bm7-hero-main", [
         plate,
         h("div.bm7-hero-info", [
-          h("div.bm7-kicker", [h("span", { text: "继续玩" }), current.developer ? h("span.bm7-kicker-dim", { text: current.developer }) : null]),
+          h("div.bm7-kicker", [
+            h("span", { text: st.isLive ? "正在游玩" : "继续玩" }),
+            current.developer ? h("span.bm7-kicker-dim", { text: current.developer }) : null,
+            st.isLive
+              ? h("span.bm7-glive-pill", [
+                  h("span.bm7-glive-dot"),
+                  h("span", { text: st.liveMinutes > 0 ? `已同步 ${formatMinutes(st.liveMinutes, true)}` : "已检测到运行中" })
+                ])
+              : null
+          ]),
           h("h2.bm7-hero-title", { text: current.title }),
           current.currentProgress ? h("p.bm7-hero-sub", { text: `进度：${current.currentProgress}` }) : null,
           h("div.bm7-ghero-figs", [
             fig("总时长", formatMinutes(st.total, true)),
             fig("本周", formatMinutes(st.week, true)),
-            fig("上次游玩", st.last ? formatRelative(st.last) : "—"),
+            fig("上次游玩", st.isLive ? "进行中" : (st.last ? formatRelative(st.last) : "—")),
             fig("游玩次数", st.count ? `${st.count} 次` : "—")
           ]),
           h("div.bm7-hero-actions", [
@@ -747,7 +884,7 @@ function renderGameStage(host, ctx) {
   // 时长概览
   const sumPanel = panel("bm7-area-rhythm", { title: "时长概览" });
   top.appendChild(sumPanel);
-  const tot = games.reduce((acc, g) => { const s = gameStats(g); acc.total += s.total; acc.today += s.today; acc.week += s.week; acc.month += s.month; return acc; }, { total: 0, today: 0, week: 0, month: 0 });
+  const tot = games.reduce((acc, g) => { const s = gameStats(g, new Date(), getLive(g)); acc.total += s.total; acc.today += s.today; acc.week += s.week; acc.month += s.month; return acc; }, { total: 0, today: 0, week: 0, month: 0 });
   const per = { mode: "week" };
   const perVal = h("span.bm7-stat-value");
   const perPaint = () => { perVal.textContent = formatMinutes(per.mode === "week" ? tot.week : tot.month, true); };
@@ -763,7 +900,7 @@ function renderGameStage(host, ctx) {
       ])
     ])
   );
-  sumPanel._body.appendChild(weekStrip(games));
+  sumPanel._body.appendChild(weekStrip(games, liveMap));
 
   // 侧栏：游玩动态
   const side = h("aside.bm7-area-side");
@@ -793,10 +930,20 @@ function renderGameStage(host, ctx) {
 
   const hasCapsule = Boolean(desktop && ctx.capsule && ctx.capsule.supported);
   const capState = hasCapsule ? ctx.capsule.getSettings() : null;
+  const hasTracker = Boolean(desktop && ctx.playtimeTracker && ctx.playtimeTracker.desktop);
+  const trackerStatus = hasTracker ? ctx.playtimeTracker.getStatus() : null;
   lib.append(
     h("header.bm7-glib-head", [
       h("div.bm7-lists-titles", [h("h3.bm7-section-title", { text: "全部游戏" }), h("span.bm7-section-sub", { text: `共 ${games.length} 部 · 卡片比例默认 ${ui.defaultAspect}` })]),
       h("div.bm7-lists-bar", [
+        hasTracker
+          ? button(trackerStatus && trackerStatus.running ? "离线记录 · 运行中" : "离线记录", {
+              icon: "clock",
+              cls: trackerStatus && trackerStatus.running ? "is-tracker-on" : "",
+              title: "配置脱离 Obsidian 的轻量后台游玩时长记录、开机自启与手动同步",
+              onClick: (e) => openPlaytimeTrackerPopover(e.currentTarget)
+            })
+          : null,
         hasCapsule
           ? button(capState && capState.enabled ? "侧边手札 · 已开启" : "侧边手札", {
               icon: "bookmark",
@@ -977,11 +1124,13 @@ function renderGameStage(host, ctx) {
   function openCardMenu(g, anchor) {
     popover(anchor, (box, close) => {
       box.append(
-        menuItem("clock", "详情与统计", () => { close(); openStats(g); }),
-        menuItem("crop", "封面比例与填充", () => { close(); openCoverEditor(anchor, g, ctx, ui.defaultAspect, paintGrid); }),
-        menuItem("pen", "手札", () => { close(); ctx.actions.openJournal && ctx.actions.openJournal(g); }),
-        menuItem("note", "修改封面与信息", () => { close(); ctx.actions.editMeta && ctx.actions.editMeta(g); }),
-        ctx.actions.openRelations ? menuItem("link", "关联其他典藏", () => { close(); ctx.actions.openRelations(g); }) : null
+        ...[
+          menuItem("clock", "详情与统计", () => { close(); openStats(g); }),
+          menuItem("crop", "封面比例与填充", () => { close(); openCoverEditor(anchor, g, ctx, ui.defaultAspect, paintGrid); }),
+          menuItem("pen", "手札", () => { close(); ctx.actions.openJournal && ctx.actions.openJournal(g); }),
+          menuItem("note", "修改封面与信息", () => { close(); ctx.actions.editMeta && ctx.actions.editMeta(g); }),
+          ctx.actions.openRelations ? menuItem("link", "关联其他典藏", () => { close(); ctx.actions.openRelations(g); }) : null
+        ].filter(Boolean)
       );
       box.appendChild(h("div.bm7-pop-title", { text: "加入分组" }));
       groups.forEach((gr) => {
@@ -1007,6 +1156,146 @@ function renderGameStage(host, ctx) {
         box.appendChild(delBtn);
       }
     }, { width: 240, alignRight: true });
+  }
+
+  function openPlaytimeTrackerPopover(anchor) {
+    if (!hasTracker) return;
+    popover(anchor, (box, close) => {
+      const renderPopBody = () => {
+        clear(box);
+        const cfg = Object.assign({}, ctx.playtimeTracker.getSettings());
+        const st = ctx.playtimeTracker.getStatus();
+        const isWin = Boolean(st && st.supported);
+        const liveArr = Array.isArray(st && st.activeGames) ? st.activeGames : [];
+
+        const statusHeadText = !isWin
+          ? "当前系统支持在 Obsidian 开启期间自动记录时长"
+          : st.running
+            ? `后台守卫运行中 · 约 ${st.workingSetMB || 4} MB 内存 · 0 显存`
+            : st.installed
+              ? "后台守卫已停用（随时可一键重新开启）"
+              : "后台守卫未启用（默认关闭）";
+
+        const statusSubParts = [];
+        if (isWin && st.running) {
+          statusSubParts.push(`PID ${st.pid}`);
+          statusSubParts.push(`正在监测 ${st.trackedGameCount} 款已绑定游戏`);
+          statusSubParts.push(st.autoStartRegistered ? "开机自启已开启" : "未设开机自启");
+        } else if (isWin) {
+          statusSubParts.push(`已识别 ${st.trackedGameCount} 款绑定了路径的游戏`);
+        }
+        if (st.lastSyncAtMs) {
+          statusSubParts.push(`上次同步 ${formatClock(new Date(st.lastSyncAtMs))}`);
+        }
+
+        const statusCard = h("div.bm7-tracker-status", [
+          h("div.bm7-tracker-status-head", [
+            h("span.bm7-tracker-dot", { cls: st && st.running ? "is-on" : "" }),
+            h("span", { text: statusHeadText })
+          ]),
+          statusSubParts.length ? h("div.bm7-tracker-status-sub", { text: statusSubParts.join(" · ") }) : null,
+          liveArr.length
+            ? h(
+                "div.bm7-tracker-live-list",
+                liveArr.map((ag) =>
+                  h("div", {
+                    text: `游玩中：《${ag.title || "已收录游戏"}》已同步 ${
+                      ag.elapsedMinutes > 0 ? formatMinutes(ag.elapsedMinutes, true) : "不足 1 分钟"
+                    }`
+                  })
+                )
+              )
+            : null
+        ]);
+
+        const msgLine = h("p.bm7-ce-hint", { style: { display: "none", color: "var(--bm7-live)" } });
+        const showErr = (t) => {
+          msgLine.textContent = t;
+          msgLine.style.display = t ? "" : "none";
+        };
+
+        box.append(
+          ...[
+            h("div.bm7-pop-title", { text: "游玩时长自动记录与离线守卫" }),
+            statusCard,
+            toggleRow({
+              label: "自动记录外部启动的游戏",
+              hint: "与侧边手札独立：即使关掉侧边浮窗，在 Obsidian 开启期间也能自动记时长",
+              checked: cfg.autoTrackExternalGames !== false,
+              onChange: async (v) => {
+                await ctx.playtimeTracker.updateSettings({ autoTrackExternalGames: v });
+                renderPopBody();
+              }
+            }),
+            isWin
+              ? toggleRow({
+                  label: "脱离 Obsidian 后台守卫（Windows）",
+                  hint: "关闭 Obsidian 期间照常记录，玩到一半或玩完打开即同步；无窗口、0 显存、仅占约 3–8 MB 内存",
+                  checked: Boolean(cfg.backgroundWatcherEnabled || (st && st.running)),
+                  onChange: async (v) => {
+                    showErr("");
+                    const { opResult } = await ctx.playtimeTracker.updateSettings({
+                      backgroundWatcherEnabled: v,
+                      autoStartWithWindows: v ? cfg.autoStartWithWindows : false
+                    });
+                    if (opResult && !opResult.ok && opResult.error) {
+                      showErr(opResult.error);
+                    }
+                    renderPopBody();
+                  }
+                })
+              : null,
+            isWin && (cfg.backgroundWatcherEnabled || (st && st.running))
+              ? toggleRow({
+                  label: "随 Windows 开机自动启动",
+                  hint: "写入当前用户启动项（免管理员），重启电脑未开 Obsidian 也能记录；关闭即清理启动项",
+                  checked: Boolean(st && st.autoStartRegistered),
+                  onChange: async (v) => {
+                    showErr("");
+                    const { opResult } = await ctx.playtimeTracker.updateSettings({
+                      backgroundWatcherEnabled: true,
+                      autoStartWithWindows: v
+                    });
+                    if (opResult && !opResult.ok && opResult.error) {
+                      showErr(opResult.error);
+                    }
+                    renderPopBody();
+                  }
+                })
+              : null,
+            msgLine,
+            h("p.bm7-ce-hint", {
+              text: "支持同时追踪多款游戏、自动排除睡眠休眠时间与 15 秒启动器交接防抖；可在单个游戏的「修改封面与信息」里查看或补充监测进程名。"
+            }),
+            h("div.bm7-ce-actions", [
+              button("立即同步", {
+                icon: "refresh",
+                variant: "primary",
+                onClick: async () => {
+                  const res = await ctx.playtimeTracker.syncNow();
+                  if (!res || !res.syncedCount) {
+                    showErr("");
+                  }
+                  renderPopBody();
+                }
+              }),
+              isWin && (st.running || st.installed || st.autoStartRegistered)
+                ? button("停用并清理", {
+                    variant: "ghost",
+                    onClick: async () => {
+                      await ctx.playtimeTracker.uninstallWatcher();
+                      renderPopBody();
+                    }
+                  })
+                : null,
+              h("span.bm7-grow"),
+              button("完成", { onClick: () => close() })
+            ])
+          ].filter(Boolean)
+        );
+      };
+      renderPopBody();
+    }, { width: 410, alignRight: true });
   }
 
   function openCapsuleQuickSettings(anchor) {
@@ -1083,21 +1372,12 @@ function renderGameStage(host, ctx) {
         h("div.bm7-pop-title", { text: "游戏侧边手札胶囊（桌面端）" }),
         toggleRow({
           label: "游戏运行时启用侧边手札",
-          hint: "启动收录游戏后自动在屏幕旁侧挂起窄条（平时未开游戏时不占用屏幕）",
+          hint: "仅控制屏幕旁侧浮窗，关闭后不会影响游戏游玩时长的自动记录",
           checked: cfg.enabled,
           onChange: async (v) => {
             cfg.enabled = v;
             await ctx.capsule.updateSettings({ enabled: v });
             repaintAll();
-          }
-        }),
-        toggleRow({
-          label: "自动感知桌面快捷方式启动",
-          hint: "直接从桌面或 Steam 启动已收录游戏时，同样自动唤起侧边胶囊并记时长",
-          checked: cfg.autoDetectExternalProcess,
-          onChange: async (v) => {
-            cfg.autoDetectExternalProcess = v;
-            await ctx.capsule.updateSettings({ autoDetectExternalProcess: v }, { promptTaskbar: false });
           }
         }),
         h("label.bm7-ce-row", { style: { marginTop: "6px", gap: "10px" } }, [
@@ -1202,6 +1482,23 @@ function renderGameStage(host, ctx) {
   }
 
   paintGrid();
+
+  // 若当前有游戏正在游玩中，每 30 秒温和刷新实时累计分钟数（元素卸载即自动停表）
+  if (host._bm7LiveTickTimer) {
+    clearInterval(host._bm7LiveTickTimer);
+    host._bm7LiveTickTimer = null;
+  }
+  if (liveMap.size > 0) {
+    host._bm7LiveTickTimer = setInterval(() => {
+      if (!stage.isConnected) {
+        clearInterval(host._bm7LiveTickTimer);
+        host._bm7LiveTickTimer = null;
+        return;
+      }
+      repaintAll();
+    }, 30000);
+  }
+
   return { el: stage, repaint: repaintAll };
 }
 
@@ -1210,14 +1507,22 @@ function fig(label, value) {
 }
 
 /** 近 7 天全部游戏时长条 */
-function weekStrip(games) {
+function weekStrip(games, liveMap = null) {
   const now = new Date();
   const days = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date(startOfDay(now).getTime() - i * DAY_MS);
     days.push({ d, v: 0 });
   }
-  for (const g of games) for (const s of sessionsOf(g)) for (const x of days) if (dayKey(s._d) === dayKey(x.d)) x.v += s.minutes;
+  for (const g of games) {
+    for (const s of sessionsOf(g)) {
+      for (const x of days) if (dayKey(s._d) === dayKey(x.d)) x.v += s.minutes;
+    }
+    const lv = liveMap && g && liveMap.get(g.id);
+    if (lv && lv.elapsedSeconds > 0 && days.length > 0) {
+      days[days.length - 1].v += Math.max(0, Math.round(lv.elapsedSeconds / 60));
+    }
+  }
   const max = Math.max(30, ...days.map((x) => x.v));
   return h("div.bm7-gweek", [
     h("div.bm7-dist-label", { text: "近 7 天" }),

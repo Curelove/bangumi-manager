@@ -114,6 +114,14 @@ function getGameCapsuleService() {
   }
   return _cachedGameCapsuleService;
 }
+let _cachedGamePlaytimeTrackerService = null;
+function getGamePlaytimeTrackerService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedGamePlaytimeTrackerService) {
+    _cachedGamePlaytimeTrackerService = require("./game-playtime-tracker-service.js");
+  }
+  return _cachedGamePlaytimeTrackerService;
+}
 const DEFAULT_GAME_CAPSULE_SETTINGS_INLINE = {
   enabled: true,
   autoEnabledV2: true,
@@ -127,6 +135,15 @@ const DEFAULT_GAME_CAPSULE_SETTINGS_INLINE = {
   dockDisplayId: null,
   taskbarPolicy: "ask",
   taskbarTempApplied: false
+};
+const DEFAULT_GAME_PLAYTIME_TRACKER_INLINE = {
+  autoTrackExternalGames: true,
+  backgroundWatcherEnabled: false,
+  autoStartWithWindows: false,
+  minSessionSeconds: 60,
+  exitGraceSeconds: 15,
+  pollIntervalMs: 4000,
+  syncOnWindowFocus: true
 };
 const animeActivityService = require("./anime-activity-and-random-service.js");
 const importManager = require("./import-manager.js");
@@ -304,6 +321,8 @@ var DEFAULT_SETTINGS = {
     status: "all"
   },
   gameCapsule: Object.assign({}, DEFAULT_GAME_CAPSULE_SETTINGS_INLINE),
+  gamePlaytimeTracker: Object.assign({}, DEFAULT_GAME_PLAYTIME_TRACKER_INLINE),
+  activeGameTimers: {},
   archiveAppearance: {
     theme: "follow",
     motion: true,
@@ -1400,6 +1419,17 @@ var BangumiManagerPlugin = class extends Plugin {
             console.warn("[Bangumi Manager] 游戏典藏笔记启动同步失败:", e);
           }
           if (this.unloaded) return;
+          if (!isMobile) {
+            try {
+              const trackerSvc = getGamePlaytimeTrackerService();
+              if (trackerSvc && typeof trackerSvc.startPlaytimeTrackerService === "function") {
+                await trackerSvc.startPlaytimeTrackerService(this);
+              }
+            } catch (e) {
+              console.warn("[Bangumi Manager] 游戏时长追踪与离线同步启动失败:", e);
+            }
+          }
+          if (this.unloaded) return;
           await yieldTick();
           try {
             await multiHallArchiveService.reconcileVoiceCollectionWithVault(this);
@@ -1529,6 +1559,9 @@ var BangumiManagerPlugin = class extends Plugin {
     this.unloaded = true;
     this._biliLiveUnloaded = true;
     bilibiliLiveService.stopBilibiliLiveMonitor(this);
+    if (_cachedGamePlaytimeTrackerService) {
+      _cachedGamePlaytimeTrackerService.stopPlaytimeTrackerService(this);
+    }
     if (_cachedGameCapsuleService) {
       _cachedGameCapsuleService.stopGameCapsuleService(this);
     }

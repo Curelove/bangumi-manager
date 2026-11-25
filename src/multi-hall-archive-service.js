@@ -5562,6 +5562,7 @@ async function syncGameMarkdownNote(plugin, game) {
       `play_hours: ${game.playHours ?? 0}`,
       `current_progress: "${(game.currentProgress || "").replace(/"/g, '\\"')}"`,
       `launch_mode: "${game.launchMode || "exe"}"`,
+      game.extraProcessNames ? `extra_process_names: "${String(game.extraProcessNames).replace(/"/g, '\\"')}"` : null,
       "tags: [game, 游戏典藏]",
       "---",
       "",
@@ -5717,6 +5718,7 @@ function parseGameNoteMarkdown(rawContent, fallbackTitle = "") {
     currentProgress: String(fm.current_progress || "").trim(),
     launchMode: String(fm.launch_mode || "exe").trim() || "exe",
     exePath,
+    extraProcessNames: String(fm.extra_process_names || "").trim(),
     coverUrl: isRemoteCover ? coverVal : "",
     coverLocalPath: !isRemoteCover && coverVal ? coverVal : "",
     strategyUrls,
@@ -5823,6 +5825,20 @@ async function reconcileGameCollectionWithNotes(plugin) {
         }
         if (!existing.developer && parsed.developer) {
           existing.developer = parsed.developer;
+          changed = true;
+        }
+        if (!existing.extraProcessNames && parsed.extraProcessNames) {
+          existing.extraProcessNames = parsed.extraProcessNames;
+          changed = true;
+        }
+        const existingHours = Number(existing.playHours) || 0;
+        if (parsed.playHours > existingHours + 0.05) {
+          try {
+            const tracker = require("./game-playtime-tracker-service.js");
+            tracker.recomputeGamePlaytimeSummary(existing, { explicitTotalHours: parsed.playHours });
+          } catch (_) {
+            existing.playHours = parsed.playHours;
+          }
           changed = true;
         }
         if ((!Array.isArray(existing.playNotes) || existing.playNotes.length === 0) && parsed.playNotes.length > 0) {
@@ -6171,6 +6187,15 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
       });
     }
     child.unref();
+    let launchReg = { handledByWatcher: false };
+    try {
+      const tracker = require("./game-playtime-tracker-service.js");
+      launchReg = tracker.registerInternalGameLaunch(plugin, game, {
+        startedAtMs: startTs,
+        mode,
+        onSessionEnd
+      });
+    } catch (_) {}
     try {
       const capSvc = require("./game-floating-capsule-service.js");
       capSvc.activateGameSideCapsule(plugin, game, { source: "internal" });
@@ -6183,29 +6208,61 @@ function launchLocalGameProcess(plugin, game, onSessionEnd) {
       );
     }
     const finalizeAutoSession = async () => {
-      const endIso = new Date().toISOString();
-      const elapsedMin = Math.max(1, Math.round((Date.now() - startTs) / 60000));
-      const elapsedHours = Number((elapsedMin / 60).toFixed(2));
-      if (!Array.isArray(game.playSessions)) game.playSessions = [];
-      game.playSessions.unshift({
-        id: `ses-${Date.now().toString(36)}`,
-        start: startIso,
-        startedAt: startIso,
-        endedAt: endIso,
-        minutes: elapsedMin,
-        durationHours: elapsedHours,
-        source: "auto",
-        mode: "auto",
-        note: mode === "emulator" ? "模拟器自动记录" : ""
-      });
-      game.playHours = Number(((Number(game.playHours) || 0) + elapsedHours).toFixed(2));
-      game.lastPlayedAt = endIso;
-      if (!game.firstPlayedAt) game.firstPlayedAt = startIso;
-      await syncGameMarkdownNote(plugin, game);
-      await plugin.saveSettings();
+      const endTs = Date.now();
+      const durSec = Math.max(1, Math.round((endTs - startTs) / 1000));
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        await tracker.commitGamePlaySession(
+          plugin,
+          game,
+          {
+            externalSessionId: `launch_${game.id}_${Math.floor(startTs / 1000)}`,
+            startedAtMs: startTs,
+            endedAtMs: endTs,
+            durationSeconds: durSec,
+            source: "auto",
+            mode: "auto",
+            note: mode === "emulator" ? "模拟器自动记录" : ""
+          },
+          { ignoreMinThreshold: durSec >= 45 }
+        );
+      } catch (_) {
+        const endIso = new Date(endTs).toISOString();
+        const elapsedMin = Math.max(1, Math.round(durSec / 60));
+        const elapsedHours = Number((durSec / 3600).toFixed(2));
+        if (!Array.isArray(game.playSessions)) game.playSessions = [];
+        game.playSessions.unshift({
+          id: `ses-${Date.now().toString(36)}`,
+          start: startIso,
+          startedAt: startIso,
+          endedAt: endIso,
+          durationSeconds: durSec,
+          minutes: elapsedMin,
+          durationHours: elapsedHours,
+          source: "auto",
+          mode: "auto",
+          note: mode === "emulator" ? "模拟器自动记录" : ""
+        });
+        game.playHours = Number(((Number(game.playHours) || 0) + elapsedHours).toFixed(2));
+        game.lastPlayedAt = endIso;
+        if (!game.firstPlayedAt) game.firstPlayedAt = startIso;
+        await syncGameMarkdownNote(plugin, game);
+        await plugin.saveSettings();
+      }
       if (typeof onSessionEnd === "function") onSessionEnd();
     };
     child.on("close", async () => {
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        // 若原生后台守卫正在运行且本游戏已被守卫识别，由守卫全权负责跨启动器接力与退出防抖结算（绝不重复记账）
+        if (launchReg.handledByWatcher || (tracker && tracker.isBackgroundWatcherRunning(plugin))) {
+          const desc = tracker.describeGameWatchTargets(plugin, game);
+          if (desc) {
+            await tracker.syncFromBackgroundLedger(plugin, { silentNotice: false }).catch(() => {});
+            return;
+          }
+        }
+      } catch (_) {}
       try {
         const capSvc = require("./game-floating-capsule-service.js");
         if (typeof capSvc.handleSpawnedProcessClosed === "function") {
@@ -6515,6 +6572,12 @@ function openGameEditMetadataModal(plugin, game, onRefresh) {
       cls: "curator-btn",
       text: "多数据源搜索词条与封面（Bangumi / VNDB / Steam / 月幕）"
     });
+    fetchBtn.style.whiteSpace = "normal";
+    fetchBtn.style.height = "auto";
+    fetchBtn.style.minHeight = "34px";
+    fetchBtn.style.lineHeight = "1.4";
+    fetchBtn.style.padding = "6px 12px";
+    fetchBtn.style.maxWidth = "100%";
     const pickerMount = contentEl.createDiv("curator-game-bgm-picker-mount bm7-root");
     pickerMount.style.display = "none";
 
@@ -6528,6 +6591,41 @@ function openGameEditMetadataModal(plugin, game, onRefresh) {
           ".exe / .lnk / steam://rungameid/...",
           game.exePath
         );
+    const extraProcField = mobileEdit
+      ? null
+      : makeField(
+          "额外监测进程名（可选，多进程/启动器游戏留空即自动识别）",
+          "例如：LeagueClient.exe, League of Legends.exe（多个用逗号隔开）",
+          game.extraProcessNames || ""
+        );
+    let detectHintEl = null;
+    const refreshDetectHint = () => {
+      if (!detectHintEl || mobileEdit) return;
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        const probe = Object.assign({}, game, {
+          exePath: exeField ? exeField.inp.value.trim() : game.exePath,
+          extraProcessNames: extraProcField ? extraProcField.inp.value.trim() : game.extraProcessNames
+        });
+        const desc = tracker.describeGameWatchTargets(plugin, probe);
+        if (desc && desc.displaySummary) {
+          detectHintEl.textContent = `自动识别监测目标：${desc.displaySummary}${desc.installRoot ? `（目录：${desc.installRoot}）` : ""}`;
+        } else {
+          detectHintEl.textContent = "填写有效启动路径或额外进程名后，即可自动记录该游戏的游玩时长。";
+        }
+      } catch (_) {}
+    };
+    if (!mobileEdit && extraProcField) {
+      detectHintEl = contentEl.createDiv("curator-game-detect-hint");
+      detectHintEl.style.fontSize = "12px";
+      detectHintEl.style.color = "var(--text-muted)";
+      detectHintEl.style.margin = "-4px 0 10px";
+      detectHintEl.style.lineHeight = "1.5";
+      detectHintEl.style.overflowWrap = "anywhere";
+      if (exeField) exeField.inp.addEventListener("input", refreshDetectHint);
+      extraProcField.inp.addEventListener("input", refreshDetectHint);
+      refreshDetectHint();
+    }
     const mobileLaunchField = mobileEdit
       ? renderMobileLaunchUrlField(contentEl, game.mobileLaunchUrl || "", () => titleField.inp.value || game.title)
       : null;
@@ -6588,11 +6686,18 @@ function openGameEditMetadataModal(plugin, game, onRefresh) {
       if (exeField) {
         game.exePath = exeField.inp.value.trim();
       }
+      if (extraProcField) {
+        game.extraProcessNames = extraProcField.inp.value.trim();
+      }
       if (mobileLaunchField) {
         game.mobileLaunchUrl = mobileLaunchField.urlIn.value.trim();
       }
       await plugin.saveSettings();
       await syncGameMarkdownNote(plugin, game);
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        tracker.writeVaultWatchConfig(plugin, true);
+      } catch (_) {}
       modal.close();
       if (typeof onRefresh === "function") onRefresh();
       if (Notice) new Notice(`已更新《${game.title}》的封面与游戏信息`);
@@ -6958,7 +7063,12 @@ function openGameDetailAndNotesModal(plugin, game, onRefresh, openOptions = {}) 
       const v = Math.max(0, Math.round((Number(hoursInput.value) || 0) * 100) / 100);
       hoursInput.value = String(v);
       if (v === Number(game.playHours || 0)) return;
-      game.playHours = v;
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        tracker.recomputeGamePlaytimeSummary(game, { explicitTotalHours: v });
+      } catch (_) {
+        game.playHours = v;
+      }
       updateComposerStamp();
       persist("时长已更新");
     };
@@ -7832,6 +7942,10 @@ function renderGameLibraryWorkspace(plugin, container, vaultAnimeItems = [], opt
       plugin.settings.gameCollection.unshift(record);
       await syncGameMarkdownNote(plugin, record);
       await plugin.saveSettings();
+      try {
+        const tracker = require("./game-playtime-tracker-service.js");
+        tracker.writeVaultWatchConfig(plugin, true);
+      } catch (_) {}
       uiState.showAddDrawer = false;
       syncBadge();
       if (Notice) new Notice(`已将《${title}》收入游戏典藏并同步本地笔记`);

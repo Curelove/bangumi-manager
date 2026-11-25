@@ -175,8 +175,32 @@ module.exports = String.raw`
 .bm7-gs-session-src{font-size:12px;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--bm7-ink) 6%,transparent);color:var(--bm7-ink-2);white-space:nowrap;}
 .bm7-gs-session-src[data-src="manual"]{color:var(--bm7-gold);background:color-mix(in srgb,var(--bm7-gold) 12%,transparent);}
 .bm7-gs-session-src[data-src="timer"]{color:var(--bm7-accent);background:var(--bm7-accent-soft);}
+.bm7-gs-session-src[data-src="watcher"],.bm7-gs-session-src[data-src="watcher_recovered"]{color:var(--bm7-ok);background:color-mix(in srgb,var(--bm7-ok) 12%,transparent);}
 .bm7-gs-session-note{color:var(--bm7-ink-3);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .bm7-gs-session .bm7-btn.is-icon{width:26px;height:26px;}
+.bm7-gs-session-del.is-armed{width:auto !important;padding:0 8px !important;font-size:12px !important;color:#fff !important;background:var(--bm7-live) !important;border-color:var(--bm7-live) !important;}
+.bm7-gs-more-btn{align-self:flex-start;margin-top:4px;font-size:12px;}
+
+/* 实时游玩状态与离线后台守卫胶囊 */
+.bm7-ghero .bm7-kicker,.bm7-gs .bm7-kicker{flex-wrap:wrap;row-gap:5px;column-gap:8px;align-items:center;}
+.bm7-ghero .bm7-kicker > span,.bm7-gs .bm7-kicker > span{white-space:nowrap;}
+.bm7-glive-pill{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:700;
+  color:var(--bm7-ok);background:color-mix(in srgb,var(--bm7-ok) 14%,transparent);border:1px solid color-mix(in srgb,var(--bm7-ok) 28%,transparent);white-space:nowrap;}
+.bm7-glive-dot{width:7px;height:7px;border-radius:50%;background:var(--bm7-ok);flex-shrink:0;}
+.bm7-root[data-bm7-motion="on"] .bm7-glive-dot{animation:bm7-live-pulse 1.8s ease-in-out infinite;}
+@keyframes bm7-live-pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.45;transform:scale(.82);}}
+.bm7-gcard-status.is-live{background:color-mix(in srgb,var(--bm7-ok) 92%,#000 0%);color:#fff;gap:5px;}
+.bm7-gcard-status.is-live .bm7-glive-dot{width:6px;height:6px;background:#fff;}
+.bm7-gs-live-banner{display:flex;align-items:center;gap:8px;margin:0 18px;padding:10px 12px;border-radius:10px;font-size:12.5px;line-height:1.45;
+  color:var(--bm7-ok);background:color-mix(in srgb,var(--bm7-ok) 10%,transparent);border:1px solid color-mix(in srgb,var(--bm7-ok) 24%,transparent);}
+.bm7-btn.is-tracker-on{border-color:color-mix(in srgb,var(--bm7-ok) 45%,var(--bm7-line)) !important;}
+.bm7-tracker-status{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--bm7-ink) 4%,transparent);border:1px solid var(--bm7-line);font-size:12px;line-height:1.5;color:var(--bm7-ink-2);}
+.bm7-tracker-status-head{display:flex;align-items:center;gap:7px;font-weight:700;color:var(--bm7-ink);}
+.bm7-tracker-dot{width:8px;height:8px;border-radius:50%;background:var(--bm7-ink-3);flex-shrink:0;}
+.bm7-tracker-dot.is-on{background:var(--bm7-ok);}
+.bm7-tracker-status-sub{color:var(--bm7-ink-3);font-size:12px;overflow-wrap:anywhere;}
+.bm7-tracker-live-list{display:flex;flex-direction:column;gap:3px;margin-top:2px;padding-top:6px;border-top:1px dashed var(--bm7-line);color:var(--bm7-ok);font-weight:600;}
+@media (prefers-reduced-motion: reduce){ .bm7-glive-dot{animation:none !important;} }
 .bm7-gs-add{padding-top:16px;border-top:1px dashed var(--bm7-line);margin:0 18px;padding-left:0;padding-right:0;}
 .bm7-gs-form{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,.6fr) minmax(0,.6fr);gap:10px;align-items:end;}
 .bm7-gs-field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--bm7-ink-2);min-width:0;}

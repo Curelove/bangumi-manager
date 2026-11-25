@@ -296,44 +296,91 @@ function recordGameSessionInternal(game, session) {
   if (!Array.isArray(game.playSessions)) {
     game.playSessions = [];
   }
-  const dur = Math.max(0.02, Number(Number(session.durationHours || 0).toFixed(2)));
+  const durSeconds = Number.isFinite(Number(session.durationSeconds)) && Number(session.durationSeconds) > 0
+    ? Math.round(Number(session.durationSeconds))
+    : Math.max(60, Math.round(Number(session.durationHours || 0) * 3600));
+  const mins = Math.max(1, Math.round(durSeconds / 60));
+  const dur = Number((durSeconds / 3600).toFixed(2));
+  const startedAt = session.startedAt || new Date(Date.now() - durSeconds * 1000).toISOString();
+  const endedAt = session.endedAt || new Date().toISOString();
   const entry = {
     id: `gsess_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    startedAt: session.startedAt || new Date(Date.now() - dur * 3600000).toISOString(),
-    endedAt: session.endedAt || new Date().toISOString(),
+    start: startedAt,
+    startedAt,
+    endedAt,
+    durationSeconds: durSeconds,
+    minutes: mins,
     durationHours: dur,
+    source: session.source || session.mode || "auto",
     mode: session.mode || "auto",
     note: String(session.note || "").trim()
   };
-  game.playSessions.unshift(entry);
-  if (game.playSessions.length > 360) {
-    game.playSessions.length = 360;
-  }
-  game.playHours = Number(((Number(game.playHours) || 0) + dur).toFixed(2));
-  if (entry.mode !== "backfill_legacy") {
-    game.lastPlayedAt = entry.endedAt;
-  }
-  if (!game.firstPlayedAt) {
-    game.firstPlayedAt = entry.startedAt;
+  try {
+    const tracker = require("./game-playtime-tracker-service.js");
+    tracker.recomputeGamePlaytimeSummary(game, { preserveExplicitLegacy: true });
+    game.playSessions.unshift(entry);
+    tracker.recomputeGamePlaytimeSummary(game, { preserveExplicitLegacy: false });
+  } catch (_) {
+    game.playSessions.unshift(entry);
+    game.playHours = Number(((Number(game.playHours) || 0) + dur).toFixed(2));
+    const endTs = parseTs(entry.endedAt);
+    const prevLast = parseTs(game.lastPlayedAt);
+    if (entry.mode !== "backfill_legacy" && (!prevLast || endTs >= prevLast)) {
+      game.lastPlayedAt = entry.endedAt;
+    }
+    const startTs = parseTs(entry.startedAt);
+    const prevFirst = parseTs(game.firstPlayedAt);
+    if (!prevFirst || (startTs > 0 && startTs < prevFirst)) {
+      game.firstPlayedAt = entry.startedAt;
+    }
   }
   return entry;
 }
 
-function startActiveGameTimer(plugin, game) {
-  if (!plugin || !game || !game.id) return null;
+function hydratePersistedTimers(plugin) {
+  if (!plugin) return null;
   if (!plugin._activeGameTimers) {
     plugin._activeGameTimers = new Map();
   }
-  if (plugin._activeGameTimers.has(game.id)) {
-    return plugin._activeGameTimers.get(game.id);
+  const persisted = plugin.settings && plugin.settings.activeGameTimers;
+  if (persisted && typeof persisted === "object") {
+    for (const [gid, st] of Object.entries(persisted)) {
+      if (st && st.startedAtMs && !plugin._activeGameTimers.has(gid)) {
+        plugin._activeGameTimers.set(gid, {
+          gameId: gid,
+          title: st.title || "",
+          startedAtMs: Number(st.startedAtMs),
+          startedAtIso: st.startedAtIso || new Date(Number(st.startedAtMs)).toISOString()
+        });
+      }
+    }
   }
+  return plugin._activeGameTimers;
+}
+
+function startActiveGameTimer(plugin, game) {
+  if (!plugin || !game || !game.id) return null;
+  const map = hydratePersistedTimers(plugin);
+  if (map.has(game.id)) {
+    return map.get(game.id);
+  }
+  const now = Date.now();
   const state = {
     gameId: game.id,
     title: game.title,
-    startedAtMs: Date.now(),
-    startedAtIso: new Date().toISOString()
+    startedAtMs: now,
+    startedAtIso: new Date(now).toISOString()
   };
-  plugin._activeGameTimers.set(game.id, state);
+  map.set(game.id, state);
+  if (plugin.settings) {
+    if (!plugin.settings.activeGameTimers || typeof plugin.settings.activeGameTimers !== "object") {
+      plugin.settings.activeGameTimers = {};
+    }
+    plugin.settings.activeGameTimers[game.id] = state;
+    if (typeof plugin.saveSettings === "function") {
+      plugin.saveSettings().catch(() => {});
+    }
+  }
   try {
     const capSvc = require("./game-floating-capsule-service.js");
     capSvc.activateGameSideCapsule(plugin, game, { source: "internal" });
@@ -342,26 +389,33 @@ function startActiveGameTimer(plugin, game) {
 }
 
 function getActiveGameTimer(plugin, gameId) {
-  if (!plugin || !plugin._activeGameTimers || !gameId) return null;
-  return plugin._activeGameTimers.get(gameId) || null;
+  if (!plugin || !gameId) return null;
+  const map = hydratePersistedTimers(plugin);
+  return map ? map.get(gameId) || null : null;
 }
 
 async function stopActiveGameTimer(plugin, game, syncCallback) {
-  if (!plugin || !game || !plugin._activeGameTimers) return null;
-  const active = plugin._activeGameTimers.get(game.id);
+  if (!plugin || !game) return null;
+  const map = hydratePersistedTimers(plugin);
+  const active = map ? map.get(game.id) : null;
   if (!active) return null;
-  plugin._activeGameTimers.delete(game.id);
+  map.delete(game.id);
+  if (plugin.settings && plugin.settings.activeGameTimers && plugin.settings.activeGameTimers[game.id]) {
+    delete plugin.settings.activeGameTimers[game.id];
+  }
   try {
     const capSvc = require("./game-floating-capsule-service.js");
     capSvc.deactivateGameSideCapsule(plugin, game.id);
   } catch (_) {}
-  const elapsedHours = Math.max(0.05, (Date.now() - active.startedAtMs) / 3600000);
+  const elapsedSec = Math.max(60, Math.round((Date.now() - active.startedAtMs) / 1000));
   const entry = recordGameSessionInternal(game, {
     startedAt: active.startedAtIso,
     endedAt: new Date().toISOString(),
-    durationHours: elapsedHours,
+    durationSeconds: elapsedSec,
+    durationHours: elapsedSec / 3600,
+    source: "timer",
     mode: "timer",
-    note: "手动 / Steam 计时结算"
+    note: "手动 / 平台计时结算"
   });
   if (typeof syncCallback === "function") {
     await syncCallback(plugin, game);

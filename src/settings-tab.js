@@ -44,6 +44,14 @@ function getSettingsCapsuleService() {
   }
   return _cachedSettingsCapsuleService;
 }
+let _cachedSettingsPlaytimeTrackerService = null;
+function getSettingsPlaytimeTrackerService() {
+  if (isMobileEnv()) return null;
+  if (!_cachedSettingsPlaytimeTrackerService) {
+    _cachedSettingsPlaytimeTrackerService = require("./game-playtime-tracker-service");
+  }
+  return _cachedSettingsPlaytimeTrackerService;
+}
 
 if (!Modal) {
   throw new Error("主插件没有传入 Modal。");
@@ -844,6 +852,7 @@ module.exports = function createSettingsTabClass({
     ["pixiv", "p站"],
     ["ffmpeg", "转码"],
     ["侧边胶囊", "手札胶囊", "桌面侧边手札胶囊", "capsule"],
+    ["游戏时长", "游玩时长", "后台守卫", "离线记录", "开机自启", "playtime"],
     ["b站", "bilibili", "哔哩哔哩"],
     ["直播", "直播间", "开播"]
   ];
@@ -899,7 +908,11 @@ module.exports = function createSettingsTabClass({
     "旧版": ["兼容升级", "旧版"],
     "快照": ["markdown 番剧档案馆"],
     "悬浮": ["桌面侧边手札胶囊", "侧边窄条"],
-    "悬浮窗": ["桌面侧边手札胶囊", "侧边窄条"]
+    "悬浮窗": ["桌面侧边手札胶囊", "侧边窄条"],
+    "后台": ["离线后台守卫", "游戏时长"],
+    "离线": ["离线后台守卫", "游戏时长"],
+    "自启": ["开机自动启动", "离线后台守卫"],
+    "时长": ["游戏时长", "离线后台守卫"]
   };
 
   // 按用户常见需求跨章汇总（不改动原始页面章节结构）
@@ -2758,6 +2771,7 @@ module.exports = function createSettingsTabClass({
       });
 
     if (!isMobile) {
+      this.addGamePlaytimeTrackerSettings(container, true);
       this.addGameCapsuleSettings(container, true);
     }
 
@@ -3769,6 +3783,8 @@ module.exports = function createSettingsTabClass({
     this.addAtelier3DPackSettings(container, false);
 
     if (!isMobileEnv()) {
+      this.addScoreSectionTitle(container, "游戏典藏 · 游玩时长与离线后台守卫");
+      this.addGamePlaytimeTrackerSettings(container, false, { skipHeading: true });
       this.addScoreSectionTitle(container, "游戏典藏 · 桌面侧边手札胶囊");
       this.addGameCapsuleSettings(container, false, { skipHeading: true });
     }
@@ -5350,6 +5366,167 @@ await this.saveAndSynchronizeNoteScores();
       });
     });
   }
+  addGamePlaytimeTrackerSettings(container, compact = false, opts = {}) {
+    const trackerSvc = getSettingsPlaytimeTrackerService();
+    if (!opts || !opts.skipHeading) {
+      container.createEl("h3", {
+        text: "游戏典藏 · 游玩时长与离线后台守卫"
+      });
+    }
+    if (!trackerSvc) return;
+
+    const cfg = trackerSvc.ensurePlaytimeTrackerSettings(this.plugin);
+    const st = trackerSvc.getWatcherRuntimeStatus(this.plugin);
+    const isWin = Boolean(st && st.supported);
+
+    const statusBox = container.createDiv({ cls: "setting-item-description" });
+    statusBox.style.padding = "10px 12px";
+    statusBox.style.marginBottom = "10px";
+    statusBox.style.borderRadius = "8px";
+    statusBox.style.background = "var(--background-secondary)";
+    statusBox.style.lineHeight = "1.6";
+    const activeNames = Array.isArray(st.activeGames) && st.activeGames.length
+      ? ` · 当前游玩中：${st.activeGames.map((g) => `《${g.title}》(${g.elapsedMinutes}m)`).join("、")}`
+      : "";
+    if (!isWin) {
+      statusBox.textContent = `当前系统为非 Windows 桌面端：Obsidian 开启期间可自动追踪已绑定路径的游戏，关闭时会自动保存进行中的时长（独立离线后台守卫目前仅支持 Windows）。`;
+    } else if (st.running) {
+      statusBox.textContent = `后台守卫运行中（PID ${st.pid} · 约 ${st.workingSetMB || 4} MB 内存 · 0 显存 · 监测 ${st.trackedGameCount} 款游戏 · 开机自启：${st.autoStartRegistered ? "已开启" : "未开启"}）${activeNames}`;
+    } else {
+      statusBox.textContent = `后台守卫未运行（已识别 ${st.trackedGameCount} 款绑定了路径的游戏）。如需在关闭 Obsidian 期间也自动记录游戏时长，请开启下方「脱离 Obsidian 后台守卫」。`;
+    }
+
+    new Setting(container)
+      .setName("自动记录桌面直接启动的游戏时长")
+      .setDesc(
+        "与侧边手札胶囊相互独立：即使关闭侧边浮窗，只要 Obsidian 处于打开状态，从桌面快捷方式、Steam 或 WeGame 启动已收录游戏都会自动计时并支持同时追踪多款游戏。"
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(cfg.autoTrackExternalGames !== false);
+        toggle.onChange(async (value) => {
+          cfg.autoTrackExternalGames = value;
+          await this.plugin.saveSettings();
+          trackerSvc.refreshPlaytimeTrackerLifecycle(this.plugin);
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("立即同步");
+        btn.onClick(async () => {
+          const res = await trackerSvc.syncFromBackgroundLedger(this.plugin, { silentNotice: false });
+          if (res && !res.syncedCount) {
+            new Notice(
+              res.liveCount > 0
+                ? `已完成对账，当前有 ${res.liveCount} 款游戏正在游玩并实时同步中。`
+                : "当前已是最新状态，没有待写入的离线游玩记录。"
+            );
+          }
+          this.display();
+        });
+      });
+
+    if (isWin) {
+      new Setting(container)
+        .setName("脱离 Obsidian 后台守卫（关闭 Obsidian 也能记录）")
+        .setDesc(
+          "公开版默认关闭。开启后将使用 Windows 内置 .NET 编译器在本地生成约 28 KB 的无窗口极轻守卫程序（0 显存、约 3–8 MB 内存、单实例互斥防残留），在关闭 Obsidian 期间照常记录游戏启停，并在重新打开 Obsidian 或切入游戏典藏时立即同步（含玩到一半实时接管）。"
+        )
+        .addToggle((toggle) => {
+          toggle.setValue(Boolean(cfg.backgroundWatcherEnabled || st.running));
+          toggle.onChange(async (value) => {
+            cfg.backgroundWatcherEnabled = value;
+            if (!value) cfg.autoStartWithWindows = false;
+            await this.plugin.saveSettings();
+            if (value) {
+              const res = await trackerSvc.startBackgroundWatcher(this.plugin, {
+                autoStart: cfg.autoStartWithWindows
+              });
+              if (!res.ok) {
+                cfg.backgroundWatcherEnabled = false;
+                await this.plugin.saveSettings();
+                new Notice(res.error || "启动后台守卫失败");
+              } else {
+                new Notice("已开启脱离 Obsidian 的轻量游戏时长后台守卫（0 显存）");
+              }
+            } else {
+              await trackerSvc.stopBackgroundWatcher(this.plugin, {
+                removeAutoStart: true,
+                removeBinary: false
+              });
+              new Notice("已停止后台守卫（并清理开机自启项）");
+            }
+            trackerSvc.refreshPlaytimeTrackerLifecycle(this.plugin);
+            this.display();
+          });
+        })
+        .addButton((btn) => {
+          btn.setButtonText("停用并清理守卫");
+          btn.setDisabled(!(st.running || st.installed || st.autoStartRegistered));
+          btn.onClick(async () => {
+            await trackerSvc.uninstallBackgroundWatcherCompletely(this.plugin);
+            new Notice("已停用后台守卫并移除本地守卫程序与开机自启项");
+            this.display();
+          });
+        });
+
+      if (cfg.backgroundWatcherEnabled || st.running) {
+        new Setting(container)
+          .setName("随 Windows 开机自动启动后台守卫")
+          .setDesc(
+            "仅写入当前用户的注册表启动项（HKCU\\...\\Run，无需管理员权限），确保重启电脑后即使尚未打开 Obsidian 也能完整记录游戏时长；关闭开关即刻移除启动项。"
+          )
+          .addToggle((toggle) => {
+            toggle.setValue(Boolean(st.autoStartRegistered));
+            toggle.onChange(async (value) => {
+              cfg.autoStartWithWindows = value;
+              await this.plugin.saveSettings();
+              const cur = trackerSvc.getWatcherRuntimeStatus(this.plugin);
+              const res = trackerSvc.setWindowsAutoStart(value, cur.exePath);
+              if (!res.ok) {
+                cfg.autoStartWithWindows = !value;
+                await this.plugin.saveSettings();
+                new Notice(res.error || "更新开机自启失败");
+              } else {
+                new Notice(value ? "已为后台守卫开启随 Windows 开机自启" : "已关闭并移除后台守卫开机自启");
+              }
+              this.display();
+            });
+          });
+      }
+    }
+
+    if (!compact) {
+      new Setting(container)
+        .setName("最短有效游玩时长过滤")
+        .setDesc(`当前：${cfg.minSessionSeconds} 秒。短于该时长的误点打开、更新器弹窗或闪退不会计入正式游玩记录（设为 0 秒表示全部保留）。`)
+        .addSlider((slider) => {
+          slider
+            .setLimits(0, 300, 10)
+            .setValue(cfg.minSessionSeconds)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              cfg.minSessionSeconds = Math.round(value);
+              await this.plugin.saveSettings();
+              trackerSvc.writeVaultWatchConfig(this.plugin, false);
+            });
+        });
+
+      new Setting(container)
+        .setName("退出宽限防抖时间")
+        .setDesc(`当前：${cfg.exitGraceSeconds} 秒。游戏进程短暂消失时等待该秒数再结算，避免启动器交接、Steam DRM 重启或《英雄联盟》切对局时把同一局切碎。`)
+        .addSlider((slider) => {
+          slider
+            .setLimits(5, 60, 5)
+            .setValue(cfg.exitGraceSeconds)
+            .setDynamicTooltip()
+            .onChange(async (value) => {
+              cfg.exitGraceSeconds = Math.round(value);
+              await this.plugin.saveSettings();
+              trackerSvc.writeVaultWatchConfig(this.plugin, false);
+            });
+        });
+    }
+  }
+
   addGameCapsuleSettings(container, compact = false, opts = {}) {
     const gameCapsuleService = getSettingsCapsuleService();
     if (!opts || !opts.skipHeading) {
@@ -5375,7 +5552,7 @@ await this.saveAndSynchronizeNoteScores();
     new Setting(container)
       .setName("游戏运行时启用桌面侧边手札胶囊")
       .setDesc(
-        "开启后，当启动已收录游戏（或开始计时）时，自动在显示器左右旁侧挂起窄窄的半透明竖条；光标移近时亮显浮起，点击即展开与档案馆实时镜像同步的「游戏手札」浮窗。平时未运行游戏时不占用屏幕。"
+        "开启后，当启动已收录游戏（或开始计时）时，自动在显示器左右旁侧挂起窄窄的半透明竖条；光标移近时亮显浮起，点击即展开与档案馆实时镜像同步的「游戏手札」浮窗。平时未运行游戏时不占用屏幕；关闭本浮窗不会影响上方的游戏游玩时长自动记录。"
       )
       .addToggle((toggle) => {
         toggle.setValue(Boolean(cfg.enabled));
@@ -5406,9 +5583,9 @@ await this.saveAndSynchronizeNoteScores();
     }
 
     new Setting(container)
-      .setName("自动识别桌面快捷方式或 Steam 直接启动的游戏")
+      .setName("外部启动游戏时自动唤出侧边手札胶囊")
       .setDesc(
-        "开启后，即使不从 Obsidian 内点启动，直接在电脑桌面双击已绑定路径的游戏（.exe / .lnk / Steam .url）运行时，也会自动唤出侧边手札胶囊并记录本次游玩时长。"
+        "开启后，即使不从 Obsidian 内点启动，直接在电脑桌面、Steam 或 WeGame 启动已收录游戏时，也会自动在屏幕边缘唤出侧边手札胶囊（游玩时长自动记录已在上方独立管理）。"
       )
       .addToggle((toggle) => {
         toggle.setValue(cfg.autoDetectExternalProcess !== false);
