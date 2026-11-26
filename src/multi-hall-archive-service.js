@@ -2836,38 +2836,7 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
     renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems, options);
   };
 
-  // 左置独立本地筛选栏（与右上操作按钮物理隔离）
-  const illustFilterRow = header.createDiv("bm-hall-filter-row");
-  const illustFilterWrap = illustFilterRow.createDiv("bm-hall-filter-wrap");
-  const illustFilterIcon = illustFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
-  illustFilterIcon.appendChild(v07Core.icon("search", 14));
-  const searchInput = illustFilterWrap.createEl("input", {
-    type: "search",
-    cls: "curator-input curator-char-search-input bm-hall-filter-input",
-    placeholder: "筛选已藏画册角色 / 作品 / 标签…"
-  });
-  searchInput.setAttribute("aria-label", "筛选画册角色、作品或标签");
-  searchInput.value = uiState.searchQuery || "";
-  const illustClearBtn = illustFilterWrap.createEl("button", {
-    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
-    text: "×",
-    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
-  });
-  searchInput.oninput = () => {
-    uiState.searchQuery = searchInput.value;
-    illustClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
-    renderMasonryStage();
-  };
-  illustClearBtn.onclick = (e) => {
-    e.preventDefault();
-    uiState.searchQuery = "";
-    searchInput.value = "";
-    illustClearBtn.classList.remove("is-visible");
-    searchInput.focus();
-    renderMasonryStage();
-  };
-
-  // 在线搜图与路径配置抽屉
+  // 在线搜图与路径配置抽屉（本地已藏画册筛选栏移至抽屉下方紧邻展厅区域，避免展开搜图时出现上下两个搜索框混淆）
   if (uiState.showOnlineDrawer) {
     const mobileIllust = isMobileEnv();
     const drawer = container.createDiv("curator-char-add-drawer");
@@ -3379,6 +3348,28 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
       : "salon";
   }
 
+  // 已藏画册本地筛选条（位于在线搜图抽屉下方、紧贴画册展厅上方，与「在线搜图」彻底解耦）
+  const illustBrowseFilterBar = container.createDiv("bm-hall-browse-filter-bar");
+  const illustFilterWrap = illustBrowseFilterBar.createDiv("bm-hall-filter-wrap");
+  const illustFilterIcon = illustFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+  illustFilterIcon.appendChild(v07Core.icon("search", 14));
+  const searchInput = illustFilterWrap.createEl("input", {
+    type: "search",
+    cls: "curator-input curator-char-search-input bm-hall-filter-input",
+    placeholder: "筛选已藏画册角色 / 作品 / 标签…"
+  });
+  searchInput.setAttribute("aria-label", "筛选画册角色、作品或标签");
+  searchInput.value = uiState.searchQuery || "";
+  const illustClearBtn = illustFilterWrap.createEl("button", {
+    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+    text: "×",
+    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+  });
+  const illustMatchCountEl = illustBrowseFilterBar.createSpan({
+    cls: "curator-char-filter-match-count curator-mono"
+  });
+  illustMatchCountEl.style.display = "none";
+
   const stageHost = container.createDiv("curator-illust-stage-host");
 
   const buildFoliosFromList = (items) => {
@@ -3445,6 +3436,19 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
           return hay.includes(q);
         })
       : allLatest;
+
+    if (illustBrowseFilterBar && illustBrowseFilterBar.isConnected) {
+      const showFilterBar = allLatest.length > 0 || Boolean(q);
+      illustBrowseFilterBar.style.display = showFilterBar ? "" : "none";
+      if (illustMatchCountEl) {
+        if (q) {
+          illustMatchCountEl.style.display = "";
+          illustMatchCountEl.textContent = `命中 ${searchFiltered.length} / ${allLatest.length} 幅`;
+        } else {
+          illustMatchCountEl.style.display = "none";
+        }
+      }
+    }
 
     const folios = buildFoliosFromList(searchFiltered);
     if (!folios.some((f) => f.key === uiState.activeFolio)) {
@@ -3600,6 +3604,20 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
     if (handle && typeof handle.destroy === "function") {
       container._bmgsStageCleanup = handle.destroy;
     }
+  };
+
+  searchInput.oninput = () => {
+    uiState.searchQuery = searchInput.value;
+    illustClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+    renderMasonryStage();
+  };
+  illustClearBtn.onclick = (e) => {
+    e.preventDefault();
+    uiState.searchQuery = "";
+    searchInput.value = "";
+    illustClearBtn.classList.remove("is-visible");
+    searchInput.focus();
+    renderMasonryStage();
   };
 
   // 注册全局活跃画册刷新钩子 + 本地画册目录实时监听（用户在资源管理器中手动增删改图片自动同步刷新）
@@ -4793,37 +4811,6 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     };
   }
 
-  // 左置独立本地筛选栏（与右上操作按钮物理隔离）
-  const voiceFilterRow = header.createDiv("bm-hall-filter-row");
-  const voiceFilterWrap = voiceFilterRow.createDiv("bm-hall-filter-wrap");
-  const voiceFilterIcon = voiceFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
-  voiceFilterIcon.appendChild(v07Core.icon("search", 14));
-  const searchInput = voiceFilterWrap.createEl("input", {
-    type: "search",
-    cls: "curator-input curator-char-search-input bm-hall-filter-input",
-    placeholder: "筛选已藏台词 / 角色 / 动画作品…"
-  });
-  searchInput.setAttribute("aria-label", "筛选已藏台词、角色或动画作品");
-  searchInput.value = uiState.searchQuery || "";
-  const voiceClearBtn = voiceFilterWrap.createEl("button", {
-    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
-    text: "×",
-    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
-  });
-  searchInput.oninput = () => {
-    uiState.searchQuery = searchInput.value;
-    voiceClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
-    renderVoiceCards();
-  };
-  voiceClearBtn.onclick = (e) => {
-    e.preventDefault();
-    uiState.searchQuery = "";
-    searchInput.value = "";
-    voiceClearBtn.classList.remove("is-visible");
-    searchInput.focus();
-    renderVoiceCards();
-  };
-
   // 智能视频+字幕音声截取工坊（仅桌面端）
   if (isDesktopNodeAvailable() && uiState.showSlicerDrawer) {
     const drawer = container.createDiv("curator-char-add-drawer curator-voice-slicer-drawer");
@@ -5168,7 +5155,30 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
   }
 
   if (!uiState.activeFilter) uiState.activeFilter = "all";
-  const voiceFilterStrip = container.createDiv("bm8-voice-filter-strip");
+  // 统一本地筛选面板：将关键词筛选框与「曲目单」收拢至截取抽屉下方、紧贴音声卡片区上方
+  const voiceFilterPanel = container.createDiv("bm-voice-filter-panel");
+  const voiceFilterSearchRow = voiceFilterPanel.createDiv("bm-voice-filter-search-row");
+  const voiceFilterWrap = voiceFilterSearchRow.createDiv("bm-hall-filter-wrap");
+  const voiceFilterIcon = voiceFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+  voiceFilterIcon.appendChild(v07Core.icon("search", 14));
+  const searchInput = voiceFilterWrap.createEl("input", {
+    type: "search",
+    cls: "curator-input curator-char-search-input bm-hall-filter-input",
+    placeholder: "筛选已藏台词 / 角色 / 动画作品…"
+  });
+  searchInput.setAttribute("aria-label", "筛选已藏台词、角色或动画作品");
+  searchInput.value = uiState.searchQuery || "";
+  const voiceClearBtn = voiceFilterWrap.createEl("button", {
+    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+    text: "×",
+    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+  });
+  const voiceMatchCountEl = voiceFilterSearchRow.createSpan({
+    cls: "curator-char-filter-match-count curator-mono"
+  });
+  voiceMatchCountEl.style.display = "none";
+
+  const voiceFilterStrip = voiceFilterPanel.createDiv("bm8-voice-filter-strip");
   const cardsHost = container.createDiv("curator-voice-cards-host");
 
   const fmtAudioClock = (sec) => {
@@ -5265,6 +5275,7 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
           el.textContent = String(allVoices.length);
         });
     }
+    const q = String(uiState.searchQuery || "").trim().toLowerCase();
     const list = allVoices.filter((vc) => {
       if (uiState.activeFilter && uiState.activeFilter !== "all") {
         if (uiState.activeFilter.startsWith("char::")) {
@@ -5277,7 +5288,6 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
           }
         }
       }
-      const q = String(uiState.searchQuery || "").trim().toLowerCase();
       if (!q) return true;
       const hay = [vc.quoteText, vc.characterName, vc.animeTitle, vc.timestamp]
         .filter(Boolean)
@@ -5285,6 +5295,19 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
         .toLowerCase();
       return hay.includes(q);
     });
+
+    if (voiceFilterPanel && voiceFilterPanel.isConnected) {
+      const showVoiceFilter = allVoices.length > 0 || Boolean(q);
+      voiceFilterPanel.style.display = showVoiceFilter ? "" : "none";
+      if (voiceMatchCountEl) {
+        if (q || (uiState.activeFilter && uiState.activeFilter !== "all")) {
+          voiceMatchCountEl.style.display = "";
+          voiceMatchCountEl.textContent = `命中 ${list.length} / ${allVoices.length} 条`;
+        } else {
+          voiceMatchCountEl.style.display = "none";
+        }
+      }
+    }
 
     if (list.length === 0) {
       cardsHost.createDiv({
@@ -5575,6 +5598,20 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
 
       bindMagicWandLongPress(card, openVoiceRelations);
     });
+  };
+
+  searchInput.oninput = () => {
+    uiState.searchQuery = searchInput.value;
+    voiceClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+    renderVoiceCards();
+  };
+  voiceClearBtn.onclick = (e) => {
+    e.preventDefault();
+    uiState.searchQuery = "";
+    searchInput.value = "";
+    voiceClearBtn.classList.remove("is-visible");
+    searchInput.focus();
+    renderVoiceCards();
   };
 
   renderVoiceCards();

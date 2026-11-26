@@ -896,7 +896,7 @@ a:hover .bm8-jump-cue {
 
 .curator-char-rank-bars-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)) !important;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)) !important;
   gap: 10px !important;
 }
 .curator-char-rank-bar-card {
@@ -1984,6 +1984,175 @@ button.bm-hall-filter-clear:hover {
   color: var(--bm7-text, var(--text-normal)) !important;
 }
 
+/* 角色典藏：统一「馆藏筛选与萌点偏好」整合面板 */
+.curator-char-filter-hub .curator-char-rank-head {
+  margin-bottom: 12px !important;
+  padding-bottom: 10px !important;
+  border-bottom: 1px dashed color-mix(in srgb, var(--bm7-border, var(--background-modifier-border)) 88%, transparent) !important;
+}
+.curator-char-unified-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px 0;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.curator-char-unified-filter-row .bm-hall-filter-wrap {
+  flex: 0 1 380px;
+  width: min(380px, 100%);
+}
+.curator-char-filter-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.curator-char-filter-status:empty {
+  display: none;
+}
+.curator-workspace-pane button.curator-char-active-filter-chip,
+button.curator-char-active-filter-chip {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  height: 28px !important;
+  min-height: 0 !important;
+  padding: 0 10px !important;
+  border-radius: 999px !important;
+  border: 1px solid color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 45%, transparent) !important;
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 12%, var(--bm7-surface, var(--background-primary))) !important;
+  box-shadow: none !important;
+  color: var(--bm7-accent, var(--interactive-accent)) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+  transition: background 140ms ease, border-color 140ms ease !important;
+}
+.curator-workspace-pane button.curator-char-active-filter-chip:hover,
+button.curator-char-active-filter-chip:hover {
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 19%, var(--bm7-surface, var(--background-primary))) !important;
+  border-color: var(--bm7-accent, var(--interactive-accent)) !important;
+}
+.curator-char-active-filter-x {
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.78;
+}
+.curator-char-filter-match-count {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bm7-ink, #888) 7%, transparent);
+  color: var(--bm7-text-dim, var(--text-muted));
+  font-size: 12px;
+  white-space: nowrap;
+}
+.curator-workspace-pane button.curator-char-filter-reset-btn,
+button.curator-char-filter-reset-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  height: 26px !important;
+  min-height: 0 !important;
+  padding: 0 9px !important;
+  border-radius: 7px !important;
+  border: 1px solid var(--bm7-border, var(--background-modifier-border)) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--bm7-text-dim, var(--text-muted)) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease !important;
+}
+.curator-workspace-pane button.curator-char-filter-reset-btn:hover,
+button.curator-char-filter-reset-btn:hover {
+  color: var(--bm7-text, var(--text-normal)) !important;
+  border-color: var(--bm7-border-strong, var(--background-modifier-border-hover)) !important;
+  background: color-mix(in srgb, var(--bm7-ink, #888) 7%, transparent) !important;
+}
+.curator-char-rank-body-slot {
+  min-width: 0;
+  max-width: 100%;
+}
+.curator-char-rank-bar-card.is-query-match:not(.is-selected) {
+  border-color: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 55%, var(--bm7-border, var(--background-modifier-border))) !important;
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 6%, var(--bm7-surface, var(--background-primary))) !important;
+}
+.curator-char-cloud-pill.is-query-match:not(.is-selected) {
+  border-color: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 58%, transparent) !important;
+  color: var(--bm7-accent, var(--interactive-accent)) !important;
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 8%, var(--bm7-surface, var(--background-primary))) !important;
+}
+
+/* 画册典藏：贴近展厅的独立本地筛选条（与在线搜图抽屉解耦） */
+.bm-hall-browse-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--bm7-panel-bg, var(--background-secondary));
+  border: 1px solid var(--bm7-border, var(--background-modifier-border));
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.bm-hall-browse-filter-bar .bm-hall-filter-wrap {
+  flex: 0 1 380px;
+  width: min(380px, 100%);
+}
+
+/* 音声典藏：整合关键词筛选 + 曲目单的统一本地筛选面板（消除双层边框） */
+.bm-voice-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background:
+    repeating-linear-gradient(0deg, rgba(127, 127, 127, 0.025) 0 1px, transparent 1px 4px),
+    var(--bm7-panel-bg, var(--background-secondary));
+  border: 1px solid var(--bm7-border, var(--background-modifier-border));
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.bm-voice-filter-search-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.bm-voice-filter-search-row .bm-hall-filter-wrap {
+  flex: 0 1 380px;
+  width: min(380px, 100%);
+}
+.bm-voice-filter-panel > .bm8-voice-filter-strip {
+  padding: 8px 0 0 0 !important;
+  border: none !important;
+  border-top: 1px dashed color-mix(in srgb, var(--bm7-border, var(--background-modifier-border)) 82%, transparent) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
 /* 角色收录台：多角色待收录队列栏 */
 .curator-char-queue-host:empty {
   display: none;
@@ -2117,6 +2286,16 @@ button.curator-char-queue-chip-remove:hover {
     flex: 1 1 100%;
     width: 100%;
     max-width: 100%;
+  }
+  .curator-char-unified-filter-row .bm-hall-filter-wrap,
+  .bm-hall-browse-filter-bar .bm-hall-filter-wrap,
+  .bm-voice-filter-search-row .bm-hall-filter-wrap {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .bm-hall-browse-filter-bar,
+  .bm-voice-filter-panel {
+    padding: 10px 12px;
   }
   .bm-hall-filter-wrap input.bm-hall-filter-input {
     height: 38px !important;

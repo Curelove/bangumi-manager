@@ -154,13 +154,33 @@ function htmlToPlainText(html) {
 }
 
 /**
- * 从输入文本中识别 Bangumi 角色 ID（支持纯数字 ID 或 bgm.tv/character/21021 URL）
+ * 从输入文本中识别 Bangumi 角色 ID（支持正整数 ID、#ID / id:ID 前缀或 bgm.tv/character/21021 URL）
+ * 注意：带前导零的数字（如 02、002、015、016）在二次元作品中几乎均为角色代号而非 Bangumi 编号，严禁误判为编号 2/15/16
  */
 function extractBgmCharacterId(input) {
   const raw = String(input || "").trim();
-  if (/^\d+$/.test(raw)) return raw;
-  const match = raw.match(/\/character\/(\d+)/i);
+  if (/^[1-9]\d*$/.test(raw)) return raw;
+  const prefixMatch = raw.match(/^(?:#|id\s*[:：]\s*|bgm\s*[:：]\s*)([1-9]\d*)$/i);
+  if (prefixMatch) return prefixMatch[1];
+  const match = raw.match(/\/character\/([1-9]\d*)/i);
   return match ? match[1] : "";
+}
+
+/**
+ * 在角色搜索入口区分用户输入意图：
+ * - explicit：明确的 Bangumi 角色链接或 #ID / id:ID 语法 → 直接精确查该编号
+ * - ambiguous：不带前导零的纯正整数（如 35615 / 10032 / 18 / 2）→ 并行执行编号直查与名称搜索，绝不跳过名称检索
+ * - none：普通角色名或带前导零的编号型角色名（如 02 / 002 / 015 / 016）→ 纯走多源名称检索
+ */
+function classifyCharacterIdInput(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return { mode: "none", id: "" };
+  const urlMatch = raw.match(/\/character\/([1-9]\d*)/i);
+  if (urlMatch) return { mode: "explicit", id: urlMatch[1] };
+  const prefixMatch = raw.match(/^(?:#|id\s*[:：]\s*|bgm\s*[:：]\s*)([1-9]\d*)$/i);
+  if (prefixMatch) return { mode: "explicit", id: prefixMatch[1] };
+  if (/^[1-9]\d*$/.test(raw)) return { mode: "ambiguous", id: raw };
+  return { mode: "none", id: "" };
 }
 
 /**
@@ -490,7 +510,10 @@ const CHARACTER_SEARCH_ALIAS_MAP = {
   "早坂": ["早坂爱"],
   "红莉栖": ["牧濑红莉栖", "牧瀬紅莉栖"],
   "助手": ["牧濑红莉栖", "牧瀬紅莉栖"],
-  "真由理": ["椎名真由理", "椎名まゆり"]
+  "真由理": ["椎名真由理", "椎名まゆり"],
+  "02": ["02", "ゼロツー"],
+  "002": ["02", "ゼロツー"],
+  "zerotwo": ["02", "ゼロツー"]
 };
 
 /**
@@ -507,7 +530,8 @@ function extractMoegirlQueryVariants(wikitext, pageTitle, rawQuery) {
       .replace(/<[^>]+>/g, "")
       .replace(/（[^）]*）|\([^)]*\)/g, "")
       .replace(/^(?:日语|日語|英语|英語|韩语|韓語|中文|假名|罗马音|羅馬音|本名|原名|别名|別名)\s*[:：]\s*/gi, "")
-      .replace(/^[「『《〈"'\s]+|[」』》〉"'\s]+$/g, "")
+      .replace(/[「」『』《》〈〉]/g, "")
+      .replace(/^["'\s]+|["'\s]+$/g, "")
       .trim();
     if (
       clean &&
@@ -515,6 +539,7 @@ function extractMoegirlQueryVariants(wikitext, pageTitle, rawQuery) {
       clean.length <= 24 &&
       clean !== rawQuery &&
       !out.includes(clean) &&
+      !/[<>{}|\[\]]/.test(clean) &&
       !/[。！？!?:：]$/.test(clean) &&
       !/^(?:Category|Template|File|Help|Special|萌娘百科|消歧义|现实人物|虚构角色|登场角色|日语|日語|英语|英語)/i.test(clean) &&
       !/(?:列表|模板|用语|歌曲|音乐|专辑|单曲|消歧义|登场角色|章节|系列|联动角色)$/.test(clean)
@@ -661,8 +686,8 @@ async function resolveExpandedCharacterSearchQueries(rawQuery) {
       }
     } catch (_) {}
 
-    // 仅对短单名/昵称（<= 4 字）且仍未扩展出同义/全名候选时，再补一次萌娘百科全文搜索反查
-    if (expanded.length <= 1 && q.length <= 4) {
+    // 仅对非纯数字的短单名/昵称（<= 4 字）且仍未扩展出同义/全名候选时，再补一次萌娘百科全文搜索反查（纯数字如 016/18 全文搜索易误拉年龄/年份无关条目）
+    if (expanded.length <= 1 && q.length <= 4 && !/^\d+$/.test(q)) {
       try {
         const srUrl = `https://moegirl.uk/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=6&format=json`;
         const srResp = await requestUrlWithTimeout(
@@ -1110,11 +1135,11 @@ async function searchBangumiCharacters(keyword) {
   const q = String(keyword || "").trim();
   if (!q) return [];
 
-  const directId = extractBgmCharacterId(q);
-  if (directId) {
+  const idIntent = classifyCharacterIdInput(q);
+  if (idIntent.mode === "explicit" && idIntent.id) {
     try {
-      const detail = await fetchBangumiCharacterDetail(directId);
-      if (detail) {
+      const detail = await fetchBangumiCharacterDetail(idIntent.id);
+      if (detail && (detail.nameCn || detail.nameJp)) {
         return [
           {
             id: String(detail.bgmId),
@@ -1123,7 +1148,9 @@ async function searchBangumiCharacters(keyword) {
             aliases: detail.aliases || [],
             avatar: detail.avatar || "",
             summary: detail.summary || "",
-            infoTip: [detail.gender, detail.birthday, detail.cv].filter(Boolean).join(" · ")
+            infoTip: [`Bangumi 编号 #${detail.bgmId}`, detail.gender, detail.birthday, detail.cv]
+              .filter(Boolean)
+              .join(" · ")
           }
         ];
       }
@@ -1272,7 +1299,7 @@ async function searchBangumiCharacters(keyword) {
       }
     }
 
-    // 3. 作品反查高置信度加分
+    // 3. 作品反查与模糊数字 ID 候选加分
     if (cand.source === "subject_cast") {
       score += 520;
     }
@@ -1285,6 +1312,17 @@ async function searchBangumiCharacters(keyword) {
       Math.log10(1 + estCollects) * 260 + Math.log10(1 + comments) * 140
     );
     score += popScore;
+
+    // 5. 纯正整数输入（无前导零）的编号直查候选分档：
+    //    - 4 位及以上（如 35615 / 10032）通常为显式 Bangumi 编号，置顶并保留同名角色（如御坂10032号）同屏展示
+    //    - 1~3 位短数字（如 2 / 18 / 707）大概率为角色代号而非早期小编号，若未命中角色名则严格压至名称匹配候选之下
+    if (cand.source === "direct_id") {
+      if (String(cand.id || "").length >= 4) {
+        score += 1450;
+      } else if (matchedLevel === 0) {
+        score = Math.min(score, 420);
+      }
+    }
 
     return score;
   };
@@ -1366,13 +1404,47 @@ async function searchBangumiCharacters(keyword) {
         .catch(() => [])
     : Promise.resolve([]);
 
-  const [v0Responses, monoPage1Results, castMatches] = await Promise.all([
+  const wave1DirectIdPromise =
+    idIntent.mode === "ambiguous" && idIntent.id
+      ? requestUrlWithTimeout(
+          {
+            url: `https://api.bgm.tv/v0/characters/${encodeURIComponent(idIntent.id)}`,
+            method: "GET",
+            headers: { "User-Agent": BGM_USER_AGENT },
+            throw: false
+          },
+          3600
+        )
+          .then((resp) => {
+            const reachable = Boolean(resp && resp.status >= 200 && resp.status < 500);
+            if (resp && resp.status >= 200 && resp.status < 300 && resp.json && resp.json.id) {
+              const parsed = parseV0CharacterItem(resp.json);
+              return {
+                reachable,
+                item: {
+                  ...parsed,
+                  source: "direct_id",
+                  infoTip: [`Bangumi 编号 #${parsed.id}`, parsed.infoTip].filter(Boolean).join(" · ")
+                }
+              };
+            }
+            return { reachable, item: null };
+          })
+          .catch(() => ({ reachable: false, item: null }))
+      : Promise.resolve({ reachable: false, item: null });
+
+  const [v0Responses, monoPage1Results, castMatches, directIdRes] = await Promise.all([
     wave1V0Promise,
     wave1MonoPromise,
-    wave1CastPromise
+    wave1CastPromise,
+    wave1DirectIdPromise
   ]);
 
   let bangumiResponded = false;
+  if (directIdRes && directIdRes.reachable) bangumiResponded = true;
+  if (directIdRes && directIdRes.item) {
+    upsertCandidate(directIdRes.item, 0, 0);
+  }
   for (const { qIdx, reachable, data } of v0Responses) {
     if (reachable) bangumiResponded = true;
     if (!Array.isArray(data)) continue;
@@ -4637,6 +4709,65 @@ function detectImageVerticalSubjectBounds(imgEl, targetPx = 280) {
   }
 }
 
+const IMAGE_INK_TOP_RATIO_CACHE = new Map();
+/**
+ * 轻量缓存立绘图片最顶端的有效前景像素比例（0~0.6），用于判断举手/帽子/呆毛是否伸出头顶身高线之上，
+ * 以便自动将身高徽标上移避让，同时保持水平虚线精准钉在真实头顶身高处。
+ */
+function detectImageInkTopRatio(imgEl) {
+  if (!imgEl || !imgEl.naturalWidth || !imgEl.naturalHeight || typeof document === "undefined") {
+    return null;
+  }
+  const cacheKey = `${imgEl.currentSrc || imgEl.src || ""}::${imgEl.naturalWidth}x${imgEl.naturalHeight}`;
+  if (cacheKey && IMAGE_INK_TOP_RATIO_CACHE.has(cacheKey)) {
+    return IMAGE_INK_TOP_RATIO_CACHE.get(cacheKey);
+  }
+  try {
+    const sampleW = 64;
+    const sampleH = 128;
+    const canvas = document.createElement("canvas");
+    canvas.width = sampleW;
+    canvas.height = sampleH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(imgEl, 0, 0, sampleW, sampleH);
+    const data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+    const cornerAlpha = data[(1 * sampleW + 1) * 4 + 3];
+    const bgR = data[(1 * sampleW + 1) * 4];
+    const bgG = data[(1 * sampleW + 1) * 4 + 1];
+    const bgB = data[(1 * sampleW + 1) * 4 + 2];
+    let topRow = 0;
+    for (let y = 0; y < sampleH; y++) {
+      let fg = 0;
+      for (let x = 2; x < sampleW - 2; x++) {
+        const idx = (y * sampleW + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const a = data[idx + 3];
+        if (a < 24) continue;
+        if (r > 246 && g > 246 && b > 246) continue;
+        if (cornerAlpha > 200 && Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) < 32) {
+          continue;
+        }
+        fg++;
+      }
+      if (fg >= 2) {
+        topRow = y;
+        break;
+      }
+    }
+    const ratio = Math.max(0, Math.min(0.55, topRow / sampleH));
+    if (cacheKey) {
+      if (IMAGE_INK_TOP_RATIO_CACHE.size > 200) IMAGE_INK_TOP_RATIO_CACHE.clear();
+      IMAGE_INK_TOP_RATIO_CACHE.set(cacheKey, ratio);
+    }
+    return ratio;
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * 将角色取景参数（位置、缩放、完整适应/聚焦取景）无内部裁切地应用到卡片或预览区的 <img> 与容器上
  * 核心修复：
@@ -6529,7 +6660,7 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
       });
   }
 
-  // 顶部栏：上排「标题 + 右侧操作按钮」，下排左置独立筛选栏（彻底隔离本地筛选与「+ 录入角色」，并在侧边栏任意拖拽宽度下零错位）
+  // 顶部栏：仅保留标题与「+ 录入角色」主入口；本地筛选整合进下方「馆藏筛选与萌点偏好」面板，彻底避免与收录台搜索框混淆
   const headerBar = container.createDiv("curator-char-header-bar bm-hall-header-stack");
   const headerTop = headerBar.createDiv("bm-hall-header-top");
   const titleSide = headerTop.createDiv("curator-char-header-left");
@@ -6562,38 +6693,6 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     }
     renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
   };
-
-  if (!options.compactAlmanacMode && (characters.length > 0 || uiState.searchQuery)) {
-    const filterRow = headerBar.createDiv("bm-hall-filter-row");
-    const filterWrap = filterRow.createDiv("bm-hall-filter-wrap");
-    const filterIcon = filterWrap.createSpan({ cls: "bm-hall-filter-icon" });
-    filterIcon.appendChild(v07Core.icon("search", 14));
-    const searchInput = filterWrap.createEl("input", {
-      type: "search",
-      cls: "curator-input curator-char-search-input bm-hall-filter-input",
-      placeholder: "筛选已藏角色 / 萌点 / 声优 / 作品…"
-    });
-    searchInput.setAttribute("aria-label", "筛选已藏角色、萌点、声优或出演作品");
-    searchInput.value = uiState.searchQuery || "";
-    const clearBtn = filterWrap.createEl("button", {
-      cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
-      text: "×",
-      attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
-    });
-    searchInput.oninput = () => {
-      uiState.searchQuery = searchInput.value;
-      clearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
-      renderGalleryOnly();
-    };
-    clearBtn.onclick = (e) => {
-      e.preventDefault();
-      uiState.searchQuery = "";
-      searchInput.value = "";
-      clearBtn.classList.remove("is-visible");
-      searchInput.focus();
-      renderGalleryOnly();
-    };
-  }
 
   // 角色寻访与档案收录台抽屉
   if (uiState.showAddDrawer) {
@@ -6655,10 +6754,195 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     return;
   }
 
-  // 第一部分：最喜爱的角色属性 / 萌点偏好排行榜面板（局部平滑翻页刷新）
+  // 第一部分：统一的「馆藏筛选与萌点偏好」面板（整合关键词筛选 + 属性/萌点标签筛选，持久顶栏防失焦 + 下方局部平滑刷新）
   const allRankedTraits = computeMoeAttributeRanking(characters);
   const rankHost = container.createDiv("curator-char-rank-host");
   const galleryHost = container.createDiv("curator-char-gallery-host");
+
+  const computeFilteredCount = () =>
+    characters.filter((ch) => {
+      if (uiState.activeTraitFilter) {
+        const tf = uiState.activeTraitFilter;
+        if (tf.category === "moe" && !(ch.moePoints || []).includes(tf.label)) return false;
+        if (tf.category === "hair" && !String(ch.hairColor || "").includes(tf.label.replace(/发$/, ""))) return false;
+        if (tf.category === "eye" && !String(ch.eyeColor || "").includes(tf.label.replace(/瞳$/, ""))) return false;
+        if (tf.category === "cv" && !String(ch.cv || "").includes(tf.label)) return false;
+      }
+      const q = String(uiState.searchQuery || "").trim().toLowerCase();
+      if (q) {
+        const hay = [
+          ch.name,
+          ch.nameJp,
+          ...(ch.aliases || []),
+          ...(ch.moePoints || []),
+          ch.hairColor,
+          ch.eyeColor,
+          ch.cv,
+          ...(ch.appearances || []),
+          ch.personalComment
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }).length;
+
+  const rankSection = rankHost.createDiv("curator-char-rank-section curator-char-filter-hub");
+  const rankHead = rankSection.createDiv("curator-char-rank-head");
+
+  const titleWrap = rankHead.createDiv("curator-char-rank-title-wrap");
+  titleWrap.createSpan({
+    cls: "curator-char-rank-title",
+    text: options.compactAlmanacMode
+      ? "最喜爱的角色属性与萌点偏好排行"
+      : "馆藏筛选与萌点偏好"
+  });
+  titleWrap.createSpan({
+    cls: "curator-char-rank-subtitle",
+    text: options.compactAlmanacMode
+      ? "点击任意萌点或外观标签即可筛选下方角色画廊"
+      : "输入关键词或点选下方萌点 / 外观 / 声优标签，均可联动筛选下方已藏角色"
+  });
+
+  const controlsWrap = rankHead.createDiv("curator-char-rank-controls");
+  const dossierTabs = controlsWrap.createDiv("bm8-dossier-tabs");
+  const catTabs = [
+    { id: "all", label: "全部属性" },
+    { id: "moe", label: "萌点特征" },
+    { id: "appearance", label: "发色·瞳色" },
+    { id: "cv", label: "声优" }
+  ];
+  const catTabBtns = [];
+  catTabs.forEach((tab, tabIdx) => {
+    const btn = dossierTabs.createEl("button", {
+      cls: `bm8-dossier-tab ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
+      text: tab.label,
+      attr: {
+        type: "button",
+        "aria-pressed": String(uiState.rankCategory === tab.id)
+      }
+    });
+    catTabBtns.push({ tab, btn });
+    btn.onclick = (e) => {
+      e.preventDefault();
+      if (uiState.rankCategory === tab.id) return;
+      const prevIdx = catTabs.findIndex((t) => t.id === uiState.rankCategory);
+      uiState.rankCategory = tab.id;
+      syncRankHeaderControls();
+      renderRankBody("rank", tabIdx >= prevIdx ? 1 : -1);
+    };
+  });
+
+  const sortToggle = controlsWrap.createEl("button", {
+    cls: "curator-dl-mini-btn bm8-dossier-meta-btn",
+    text: uiState.rankSortMode === "weighted" ? "按喜爱度加权 ▾" : "按出现频次 ▾",
+    attr: { type: "button" }
+  });
+  sortToggle.onclick = (e) => {
+    e.preventDefault();
+    uiState.rankSortMode = uiState.rankSortMode === "weighted" ? "count" : "weighted";
+    syncRankHeaderControls();
+    renderRankBody("rank", 1);
+  };
+
+  let searchInputEl = null;
+  let clearSearchBtnEl = null;
+  let filterStatusEl = null;
+
+  if (!options.compactAlmanacMode) {
+    const unifiedFilterRow = rankSection.createDiv("curator-char-unified-filter-row");
+    const filterWrap = unifiedFilterRow.createDiv("bm-hall-filter-wrap");
+    const filterIcon = filterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+    filterIcon.appendChild(v07Core.icon("search", 14));
+    searchInputEl = filterWrap.createEl("input", {
+      type: "search",
+      cls: "curator-input curator-char-search-input bm-hall-filter-input",
+      placeholder: "筛选已藏角色 / 萌点 / 声优 / 作品…"
+    });
+    searchInputEl.setAttribute("aria-label", "筛选已藏角色、萌点、声优或出演作品");
+    searchInputEl.value = uiState.searchQuery || "";
+    clearSearchBtnEl = filterWrap.createEl("button", {
+      cls: `bm-hall-filter-clear ${searchInputEl.value ? "is-visible" : ""}`,
+      text: "×",
+      attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+    });
+    filterStatusEl = unifiedFilterRow.createDiv("curator-char-filter-status");
+  } else {
+    filterStatusEl = controlsWrap.createDiv("curator-char-filter-status");
+  }
+
+  const rankBodyHost = rankSection.createDiv("curator-char-rank-body-slot");
+
+  const syncRankHeaderControls = () => {
+    catTabBtns.forEach(({ tab, btn }) => {
+      const act = uiState.rankCategory === tab.id;
+      btn.classList.toggle("is-active", act);
+      btn.setAttribute("aria-pressed", String(act));
+    });
+    sortToggle.textContent = uiState.rankSortMode === "weighted" ? "按喜爱度加权 ▾" : "按出现频次 ▾";
+  };
+
+  const syncQueryTraitHighlights = () => {
+    const q = String(uiState.searchQuery || "").trim().toLowerCase();
+    rankBodyHost.querySelectorAll("[data-trait-label]").forEach((el) => {
+      const lbl = String(el.getAttribute("data-trait-label") || "").toLowerCase();
+      el.classList.toggle("is-query-match", Boolean(q && lbl && (lbl.includes(q) || q.includes(lbl))));
+    });
+  };
+
+  const syncUnifiedFilterStatus = () => {
+    if (!filterStatusEl) return;
+    filterStatusEl.empty();
+    const hasQuery = Boolean(String(uiState.searchQuery || "").trim());
+    const hasTrait = Boolean(uiState.activeTraitFilter);
+
+    if (hasTrait) {
+      const traitChip = filterStatusEl.createEl("button", {
+        cls: "curator-char-active-filter-chip",
+        attr: {
+          type: "button",
+          title: `移除标签筛选：${uiState.activeTraitFilter.label}`
+        }
+      });
+      traitChip.createSpan({ text: `标签：${uiState.activeTraitFilter.label}` });
+      traitChip.createSpan({ cls: "curator-char-active-filter-x", text: "×" });
+      traitChip.onclick = (e) => {
+        e.preventDefault();
+        uiState.activeTraitFilter = null;
+        renderRankBody("none");
+        syncUnifiedFilterStatus();
+        renderGalleryOnly({ small: true, frameless: true, dir: -1 });
+      };
+    }
+
+    if (hasQuery || hasTrait) {
+      const hitCount = computeFilteredCount();
+      filterStatusEl.createSpan({
+        cls: "curator-char-filter-match-count curator-mono",
+        text: `命中 ${hitCount} / ${characters.length} 位`
+      });
+
+      if (hasQuery && hasTrait) {
+        const resetAllBtn = filterStatusEl.createEl("button", {
+          cls: "curator-char-filter-reset-btn",
+          text: "清空全部筛选",
+          attr: { type: "button" }
+        });
+        resetAllBtn.onclick = (e) => {
+          e.preventDefault();
+          uiState.searchQuery = "";
+          uiState.activeTraitFilter = null;
+          if (searchInputEl) searchInputEl.value = "";
+          if (clearSearchBtnEl) clearSearchBtnEl.classList.remove("is-visible");
+          renderRankBody("none");
+          syncUnifiedFilterStatus();
+          renderGalleryOnly({ small: true, frameless: true, dir: -1 });
+        };
+      }
+    }
+  };
 
   const renderGalleryOnly = (animOpts = null) => {
     renderCharacterGallerySection(
@@ -6673,33 +6957,58 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     );
   };
 
-  const renderRankAndSync = (animMode = "none", rankDir = 1) => {
-    const paintRank = () => {
-      rankHost.empty();
+  if (searchInputEl && clearSearchBtnEl) {
+    searchInputEl.oninput = () => {
+      uiState.searchQuery = searchInputEl.value;
+      clearSearchBtnEl.classList.toggle("is-visible", Boolean(searchInputEl.value));
+      syncUnifiedFilterStatus();
+      syncQueryTraitHighlights();
+      renderGalleryOnly();
+    };
+    clearSearchBtnEl.onclick = (e) => {
+      e.preventDefault();
+      uiState.searchQuery = "";
+      searchInputEl.value = "";
+      clearSearchBtnEl.classList.remove("is-visible");
+      searchInputEl.focus();
+      syncUnifiedFilterStatus();
+      syncQueryTraitHighlights();
+      renderGalleryOnly();
+    };
+  }
+
+  const renderRankBody = (animMode = "none", rankDir = 1) => {
+    const paintBody = () => {
+      rankBodyHost.empty();
       renderMoePreferenceRankingSection(
         plugin,
-        rankHost,
+        rankBodyHost,
         allRankedTraits,
         uiState,
         options,
         (triggerKind = "tab", dir = 1) => {
           if (triggerKind === "trait") {
-            renderRankAndSync("none");
+            renderRankBody("none");
+            syncUnifiedFilterStatus();
             renderGalleryOnly({ small: true, frameless: true, dir });
           } else {
-            renderRankAndSync("rank", dir);
+            renderRankBody("rank", dir);
           }
-        }
+        },
+        { bodyOnly: true }
       );
+      syncQueryTraitHighlights();
     };
     if (animMode === "rank") {
-      paperSlipSwap(rankHost, paintRank, { dir: rankDir, small: true, frameless: true });
+      paperSlipSwap(rankBodyHost, paintBody, { dir: rankDir, small: true, frameless: true });
     } else {
-      withPreservedScroll(rankHost, paintRank, { anchorScroll: false });
+      withPreservedScroll(rankBodyHost, paintBody, { anchorScroll: false });
     }
   };
 
-  renderRankAndSync("none");
+  syncRankHeaderControls();
+  syncUnifiedFilterStatus();
+  renderRankBody("none");
   renderGalleryOnly(null);
 }
 
@@ -6722,7 +7031,7 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
   const kwInput = searchBar.createEl("input", {
     type: "text",
     cls: "curator-input curator-char-kw-input",
-    placeholder: "输入角色名称（如：洛琪希 / 芙莉莲 / 千束 / 21021）…"
+    placeholder: "输入角色名称或编号（如：洛琪希 / 02 / #35615）…"
   });
   const searchBtn = searchBar.createEl("button", {
     cls: "curator-btn is-primary",
@@ -7806,67 +8115,79 @@ function createLabeledInput(parent, labelText, initialValue, type = "text") {
 /**
  * 渲染「最喜爱的角色属性 / 萌点偏好排行榜」
  */
-function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, uiState, options, onRefresh) {
-  const rankSection = container.createDiv("curator-char-rank-section");
-  const rankHead = rankSection.createDiv("curator-char-rank-head");
+function renderMoePreferenceRankingSection(
+  plugin,
+  container,
+  allRankedTraits,
+  uiState,
+  options,
+  onRefresh,
+  renderOpts = {}
+) {
+  const bodyOnly = Boolean(renderOpts && renderOpts.bodyOnly);
+  const rankSection = bodyOnly ? container : container.createDiv("curator-char-rank-section");
 
-  const titleWrap = rankHead.createDiv("curator-char-rank-title-wrap");
-  titleWrap.createSpan({
-    cls: "curator-char-rank-title",
-    text: "最喜爱的角色属性与萌点偏好排行"
-  });
-  titleWrap.createSpan({
-    cls: "curator-char-rank-subtitle",
-    text: "点击任意萌点或外观标签即可筛选下方角色画廊"
-  });
+  if (!bodyOnly) {
+    const rankHead = rankSection.createDiv("curator-char-rank-head");
 
-  const controlsWrap = rankHead.createDiv("curator-char-rank-controls");
-  const dossierTabs = controlsWrap.createDiv("bm8-dossier-tabs");
-  const catTabs = [
-    { id: "all", label: "全部属性" },
-    { id: "moe", label: "萌点特征" },
-    { id: "appearance", label: "发色·瞳色" },
-    { id: "cv", label: "声优" }
-  ];
-  catTabs.forEach((tab, tabIdx) => {
-    const btn = dossierTabs.createEl("button", {
-      cls: `bm8-dossier-tab ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
-      text: tab.label,
-      attr: {
-        type: "button",
-        "aria-pressed": String(uiState.rankCategory === tab.id)
-      }
+    const titleWrap = rankHead.createDiv("curator-char-rank-title-wrap");
+    titleWrap.createSpan({
+      cls: "curator-char-rank-title",
+      text: "最喜爱的角色属性与萌点偏好排行"
     });
-    btn.onclick = (e) => {
-      e.preventDefault();
-      if (uiState.rankCategory === tab.id) return;
-      const prevIdx = catTabs.findIndex((t) => t.id === uiState.rankCategory);
-      uiState.rankCategory = tab.id;
-      onRefresh("tab", tabIdx >= prevIdx ? 1 : -1);
-    };
-  });
-
-  const sortToggle = controlsWrap.createEl("button", {
-    cls: "curator-dl-mini-btn bm8-dossier-meta-btn",
-    text: uiState.rankSortMode === "weighted" ? "按喜爱度加权 ▾" : "按出现频次 ▾",
-    attr: { type: "button" }
-  });
-  sortToggle.onclick = (e) => {
-    e.preventDefault();
-    uiState.rankSortMode = uiState.rankSortMode === "weighted" ? "count" : "weighted";
-    onRefresh();
-  };
-
-  if (uiState.activeTraitFilter) {
-    const clearBtn = controlsWrap.createEl("button", {
-      cls: "curator-dl-mini-btn is-accent",
-      text: `清除筛选：${uiState.activeTraitFilter.label} ×`
+    titleWrap.createSpan({
+      cls: "curator-char-rank-subtitle",
+      text: "点击任意萌点或外观标签即可筛选下方角色画廊"
     });
-    clearBtn.onclick = (e) => {
+
+    const controlsWrap = rankHead.createDiv("curator-char-rank-controls");
+    const dossierTabs = controlsWrap.createDiv("bm8-dossier-tabs");
+    const catTabs = [
+      { id: "all", label: "全部属性" },
+      { id: "moe", label: "萌点特征" },
+      { id: "appearance", label: "发色·瞳色" },
+      { id: "cv", label: "声优" }
+    ];
+    catTabs.forEach((tab, tabIdx) => {
+      const btn = dossierTabs.createEl("button", {
+        cls: `bm8-dossier-tab ${uiState.rankCategory === tab.id ? "is-active" : ""}`,
+        text: tab.label,
+        attr: {
+          type: "button",
+          "aria-pressed": String(uiState.rankCategory === tab.id)
+        }
+      });
+      btn.onclick = (e) => {
+        e.preventDefault();
+        if (uiState.rankCategory === tab.id) return;
+        const prevIdx = catTabs.findIndex((t) => t.id === uiState.rankCategory);
+        uiState.rankCategory = tab.id;
+        onRefresh("tab", tabIdx >= prevIdx ? 1 : -1);
+      };
+    });
+
+    const sortToggle = controlsWrap.createEl("button", {
+      cls: "curator-dl-mini-btn bm8-dossier-meta-btn",
+      text: uiState.rankSortMode === "weighted" ? "按喜爱度加权 ▾" : "按出现频次 ▾",
+      attr: { type: "button" }
+    });
+    sortToggle.onclick = (e) => {
       e.preventDefault();
-      uiState.activeTraitFilter = null;
-      onRefresh("trait");
+      uiState.rankSortMode = uiState.rankSortMode === "weighted" ? "count" : "weighted";
+      onRefresh();
     };
+
+    if (uiState.activeTraitFilter) {
+      const clearBtn = controlsWrap.createEl("button", {
+        cls: "curator-dl-mini-btn is-accent",
+        text: `清除筛选：${uiState.activeTraitFilter.label} ×`
+      });
+      clearBtn.onclick = (e) => {
+        e.preventDefault();
+        uiState.activeTraitFilter = null;
+        onRefresh("trait");
+      };
+    }
   }
 
   let filteredTraits = allRankedTraits.filter((t) => {
@@ -7909,6 +8230,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
     const barCard = barsGrid.createDiv(
       `curator-char-rank-bar-card ${isSelected ? "is-selected" : ""}`
     );
+    barCard.setAttribute("data-trait-label", trait.label);
     barCard.onclick = (e) => {
       e.preventDefault();
       if (isSelected) {
@@ -7975,6 +8297,7 @@ function renderMoePreferenceRankingSection(plugin, container, allRankedTraits, u
         cls: `curator-char-cloud-pill ${isSelected ? "is-selected" : ""}`,
         text: `${trait.label} (${trait.count})`
       });
+      pill.setAttribute("data-trait-label", trait.label);
       pill.title = `平均喜爱度 ★${trait.avgScore.toFixed(1)} · 包含角色：${trait.characters.map((c) => c.name).join("、")}`;
       pill.onclick = (e) => {
         e.preventDefault();
@@ -8079,11 +8402,18 @@ function renderCharacterGallerySection(
   });
 
   const leftBarGroup = bar.createDiv("curator-char-gallery-toolbar-left");
+  const hasSearchQuery = Boolean(String(uiState.searchQuery || "").trim());
+  const galleryHeadingText =
+    hasSearchQuery && uiState.activeTraitFilter
+      ? `筛选结果（${filtered.length} / ${characters.length} 位）`
+      : uiState.activeTraitFilter
+      ? `筛选标签「${uiState.activeTraitFilter.label}」：共 ${filtered.length} / ${characters.length} 位`
+      : hasSearchQuery
+      ? `筛选结果：共 ${filtered.length} / ${characters.length} 位`
+      : `角色典藏画廊（共 ${filtered.length} 位）`;
   leftBarGroup.createSpan({
     cls: "curator-char-gallery-count curator-mono",
-    text: uiState.activeTraitFilter
-      ? `筛选属性「${uiState.activeTraitFilter.label}」：共 ${filtered.length} 位角色`
-      : `角色典藏画廊（共 ${filtered.length} 位）`
+    text: galleryHeadingText
   });
 
   // 画廊呈现模式切换器（档案卡片 / 等身标尺陈列架；原画报照片墙已独立升格为顶栏「画册典藏」）
@@ -9162,8 +9492,9 @@ function renderCharacterHeightLineupStage(
     line.style.bottom = `${bottomPct}%`;
   }
 
-  // 可交互拖拽的水平身高参考标尺线
-  const refLine = plotViewport.createDiv("curator-height-ref-line");
+  // 可交互拖拽的水平身高参考标尺线（挂在与 0cm~maxScaleCm 1:1 等高的 refOverlay 内，杜绝底部铭牌高度导致的 20cm 刻度漂移）
+  const refOverlay = plotViewport.createDiv("curator-height-ref-overlay");
+  const refLine = refOverlay.createDiv("curator-height-ref-line");
   const refLineTag = refLine.createSpan({
     cls: "curator-height-ref-line-tag curator-mono"
   });
@@ -9293,6 +9624,24 @@ function renderCharacterHeightLineupStage(
         const panX = Math.round((currFrame.standPanX - 50) * 1.1);
         figImg.style.transformOrigin = "50% 100%";
         figImg.style.transform = `translate(${panX}px, ${-currFrame.footOffsetPx}px) scale(${currFrame.heightScale})`;
+        // 若立绘有举手/帽子/呆毛等超出真实头顶身高线的有效前景，保留完整立绘并将身高徽标自动上移避让，水平虚线仍精准钉在真实头顶身高处
+        const inkTopRatio = detectImageInkTopRatio(figImg);
+        if (inkTopRatio !== null) {
+          const actualInkTopPx =
+            (1 - inkTopRatio) * targetPx * currFrame.heightScale + currFrame.footOffsetPx;
+          const protrudePx = Math.max(0, Math.round(actualInkTopPx - targetPx));
+          if (protrudePx > 6) {
+            const maxLift = Math.max(0, Math.round(stagePlotHeightPx - targetPx + 6));
+            const liftPx = Math.min(protrudePx + 4, maxLift);
+            headBadge.style.top = `${-(22 + liftPx)}px`;
+            headBadge.style.setProperty("--bm-head-lift", `${liftPx}px`);
+            headBadge.toggleClass("is-lifted", liftPx > 6);
+          } else {
+            headBadge.style.top = "";
+            headBadge.style.removeProperty("--bm-head-lift");
+            headBadge.removeClass("is-lifted");
+          }
+        }
       }
     };
 
@@ -9636,7 +9985,7 @@ function renderCharacterHeightLineupStage(
 
   wrap.createDiv({
     cls: "curator-height-stage-footnote",
-    text: "提示：单击任意角色即可选中并在上方快速调整其「真实身高 / 图片比例 / 基准点偏移」或点击「智能消除留白」；直接在立绘上按住上下拖拽也可实时对齐 0cm 地面基准线，再次点击已选中角色或底部铭牌可打开完整角色典藏档案。"
+    text: "提示：单击任意角色即可选中并在上方快速调整其「真实身高 / 图片比例 / 基准点偏移」或点击「智能消除留白」；若立绘有举手、帽子、呆毛等高出头顶的姿势，可直接放大「图片比例」让头顶对齐身高线，上方部位会自动完整保留不被裁切；直接在立绘上按住上下拖拽也可实时对齐 0cm 地面基准线。"
   });
 }
 
