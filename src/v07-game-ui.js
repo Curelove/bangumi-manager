@@ -604,6 +604,7 @@ function renderGameSourceSearch(host, opts) {
     allItems: [],
     pickedIndex: -1,
     pickedKind: "",
+    pickSeq: 0,
     folded: false
   };
   const input = h("input.bm7-input.bm7-gsrc-input", { attr: { type: "search", placeholder: "输入游戏名称，例如：千恋＊万花", "aria-label": "搜索游戏词条" } });
@@ -662,20 +663,22 @@ function renderGameSourceSearch(host, opts) {
               button(isPicked && state.pickedKind === "full" ? "已套用词条" : "套用词条", {
                 variant: "primary",
                 onClick: async () => {
+                  const myPickSeq = ++state.pickSeq;
                   state.pickedIndex = idx;
                   state.pickedKind = "full";
                   state.folded = all.length > 1 && opts.foldOnPick !== false;
                   paintResults();
-                  if (opts.onPickFull) await opts.onPickFull(c);
+                  if (opts.onPickFull) await opts.onPickFull(c, myPickSeq);
                 }
               }),
               button(isPicked && state.pickedKind === "cover" ? "已选用封面" : "只用封面", {
                 onClick: async () => {
+                  const myPickSeq = ++state.pickSeq;
                   state.pickedIndex = idx;
                   state.pickedKind = "cover";
                   state.folded = all.length > 1 && opts.foldOnPick !== false;
                   paintResults();
-                  if (opts.onPickCover) await opts.onPickCover(c);
+                  if (opts.onPickCover) await opts.onPickCover(c, myPickSeq);
                 }
               })
             ])

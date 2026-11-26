@@ -113,14 +113,17 @@ var SingleAnimeImportModal = class extends Modal {
         );
         return;
       }
+      const searchSeq = (this._searchSeq = (this._searchSeq || 0) + 1);
       searchButton.disabled = true;
       searchButton.textContent = "\u6B63\u5728\u641C\u7D22\u2026\u2026";
       resultList.empty();
       detailArea.empty();
       try {
-        this.results = await bangumiApi.searchBangumi(
+        const fetchedResults = await bangumiApi.searchBangumi(
           keyword
         );
+        if (searchSeq !== this._searchSeq) return;
+        this.results = fetchedResults;
         if (this.results.length === 0) {
           resultList.createEl(
             "p",
@@ -237,6 +240,7 @@ var SingleAnimeImportModal = class extends Modal {
     }
   }
   async selectResult(result, detailArea) {
+    const selectSeq = (this._selectSeq = (this._selectSeq || 0) + 1);
     detailArea.empty();
     detailArea.createEl(
       "p",
@@ -248,6 +252,9 @@ var SingleAnimeImportModal = class extends Modal {
       const info = await bangumiApi.getAnimeDetail(
         result.url
       );
+      if (selectSeq !== this._selectSeq) {
+        return;
+      }
       if (!info) {
         detailArea.empty();
         detailArea.createEl(
@@ -266,6 +273,9 @@ var SingleAnimeImportModal = class extends Modal {
       );
 
       await this.plugin.saveSettings();
+      if (selectSeq !== this._selectSeq) {
+        return;
+      }
 
       this.selectedInfo = info;
       this.renderDetail(
@@ -273,6 +283,9 @@ var SingleAnimeImportModal = class extends Modal {
         info
       );
     } catch (error) {
+      if (selectSeq !== this._selectSeq) {
+        return;
+      }
       console.error(
         "\u8BFB\u53D6\u52A8\u753B\u8BE6\u60C5\u5931\u8D25:",
         error

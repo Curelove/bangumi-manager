@@ -152,6 +152,14 @@ div.curator-desk-root,
   white-space: nowrap;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 100ms ease !important;
 }
+.curator-desk-root .curator-btn.is-hidden,
+.curator-workspace-pane .curator-btn.is-hidden,
+.curator-illust-lightbox-modal .curator-btn.is-hidden,
+.curator-desk-root .curator-btn[hidden],
+.curator-workspace-pane .curator-btn[hidden],
+.curator-illust-lightbox-modal .curator-btn[hidden] {
+  display: none !important;
+}
 .curator-desk-root .curator-btn:hover,
 .curator-workspace-pane .curator-btn:hover,
 .curator-illust-lightbox-modal .curator-btn:hover {
@@ -301,8 +309,10 @@ a:hover .bm8-jump-cue {
   gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
 }
-.curator-illust-workspace .curator-char-search-input {
+.curator-illust-workspace .curator-char-search-input:not(.bm-hall-filter-input) {
   width: 210px;
   max-width: 100%;
   height: 32px;
@@ -987,7 +997,7 @@ a:hover .bm8-jump-cue {
 
 .curator-char-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)) !important;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 290px), 1fr)) !important;
   gap: 14px !important;
 }
 
@@ -1819,6 +1829,277 @@ a:hover .bm8-jump-cue {
   }
 }
 
+/* ==========================================================================
+   6. 全馆统一左置筛选栏（物理隔离本地筛选与右侧主操作按钮，免疫侧边栏拖拽与第三方主题污染）
+      + 角色收录台多角色待收录队列栏
+   ========================================================================== */
+.curator-illust-workspace > .curator-char-header.bm-hall-header-stack,
+.curator-voice-workspace > .curator-char-header.bm-hall-header-stack,
+.curator-char-header-bar.bm-hall-header-stack,
+.curator-radar-status-strip.bm-hall-header-stack {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start !important;
+  gap: 10px !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+.bm-hall-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.bm-hall-header-top > .curator-char-header-left,
+.bm-hall-header-top > .curator-radar-status-text {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.bm-hall-header-top > .curator-char-header-actions,
+.bm-hall-header-top > .curator-char-header-right,
+.bm-hall-header-top > .curator-radar-controls-right {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bm-hall-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+  padding-top: 9px;
+  border-top: 1px dashed color-mix(in srgb, var(--bm7-border, var(--background-modifier-border)) 82%, transparent);
+  box-sizing: border-box;
+}
+
+.bm-hall-filter-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 360px;
+  width: min(360px, 100%);
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.bm-hall-filter-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bm7-text-faint, var(--text-faint));
+  pointer-events: none;
+  z-index: 2;
+}
+
+.bm-hall-filter-wrap input.bm-hall-filter-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  margin: 0 !important;
+  padding: 0 30px 0 32px !important;
+  border-radius: 9px !important;
+  border: 1px solid var(--bm7-border, var(--background-modifier-border)) !important;
+  background: var(--bm7-surface, var(--background-primary)) !important;
+  color: var(--bm7-text, var(--text-normal)) !important;
+  font-size: 13px !important;
+  line-height: 1.4 !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03) !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  box-sizing: border-box !important;
+  transition: border-color 140ms ease, box-shadow 140ms ease !important;
+}
+.bm-hall-filter-wrap input.bm-hall-filter-input::placeholder {
+  color: var(--bm7-text-faint, var(--text-faint)) !important;
+  opacity: 0.9;
+}
+.bm-hall-filter-wrap input.bm-hall-filter-input:focus {
+  outline: none !important;
+  border-color: var(--bm7-accent, var(--interactive-accent)) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 18%, transparent) !important;
+}
+.bm-hall-filter-wrap input.bm-hall-filter-input::-webkit-search-cancel-button,
+.bm-hall-filter-wrap input.bm-hall-filter-input::-webkit-search-decoration,
+.bm-hall-filter-wrap input.bm-hall-filter-input::-webkit-search-results-button,
+.bm-hall-filter-wrap input.bm-hall-filter-input::-webkit-search-results-decoration {
+  display: none !important;
+  -webkit-appearance: none !important;
+}
+
+.curator-workspace-pane button.bm-hall-filter-clear,
+button.bm-hall-filter-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 22px !important;
+  height: 22px !important;
+  min-width: 22px !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--bm7-text-dim, var(--text-muted)) !important;
+  font-size: 15px !important;
+  line-height: 1 !important;
+  cursor: pointer;
+  z-index: 2;
+}
+.curator-workspace-pane button.bm-hall-filter-clear.is-visible,
+button.bm-hall-filter-clear.is-visible {
+  display: inline-flex !important;
+}
+.curator-workspace-pane button.bm-hall-filter-clear:hover,
+button.bm-hall-filter-clear:hover {
+  background: color-mix(in srgb, var(--bm7-ink, #888) 12%, transparent) !important;
+  color: var(--bm7-text, var(--text-normal)) !important;
+}
+
+/* 角色收录台：多角色待收录队列栏 */
+.curator-char-queue-host:empty {
+  display: none;
+}
+.curator-char-queue-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding: 9px 12px;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 32%, var(--bm7-border, var(--background-modifier-border)));
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 7%, var(--bm7-surface, var(--background-primary)));
+  min-width: 0;
+  box-sizing: border-box;
+}
+.curator-char-queue-label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--bm7-accent, var(--interactive-accent));
+  white-space: nowrap;
+}
+.curator-char-queue-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.curator-char-queue-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--bm7-border, var(--background-modifier-border));
+  background: var(--bm7-surface, var(--background-primary));
+  max-width: 100%;
+  overflow: hidden;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+.curator-char-queue-chip.is-active {
+  border-color: var(--bm7-accent, var(--interactive-accent));
+  background: color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 14%, var(--bm7-surface, var(--background-primary)));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bm7-accent, var(--interactive-accent)) 22%, transparent);
+}
+.curator-char-queue-chip.is-loading {
+  border-style: dashed;
+}
+.curator-workspace-pane button.curator-char-queue-chip-btn,
+button.curator-char-queue-chip-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  height: 26px !important;
+  min-height: 0 !important;
+  padding: 0 8px 0 10px !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--bm7-text, var(--text-normal)) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.curator-char-queue-chip.is-active button.curator-char-queue-chip-btn {
+  color: var(--bm7-accent, var(--interactive-accent)) !important;
+}
+.curator-workspace-pane button.curator-char-queue-chip-remove,
+button.curator-char-queue-chip-remove {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 22px !important;
+  height: 26px !important;
+  min-width: 22px !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--bm7-text-faint, var(--text-faint)) !important;
+  font-size: 13px !important;
+  cursor: pointer;
+}
+.curator-workspace-pane button.curator-char-queue-chip-remove:hover,
+button.curator-char-queue-chip-remove:hover {
+  color: #c94440 !important;
+  background: rgba(201, 68, 64, 0.1) !important;
+}
+.curator-char-queue-batch-btn {
+  height: 28px !important;
+  padding: 0 11px !important;
+  font-size: 12px !important;
+  flex-shrink: 0;
+}
+.curator-char-draft-submit-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.curator-char-offline-banner {
+  margin: 0 0 10px 0;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px dashed color-mix(in srgb, var(--bm7-amber, #c6862a) 42%, var(--bm7-border, var(--background-modifier-border)));
+  background: color-mix(in srgb, var(--bm7-amber, #c6862a) 8%, var(--bm7-surface, var(--background-primary)));
+  color: var(--bm7-text-muted, var(--text-muted));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 @container bmhall (max-width: 600px) {
   .curator-illust-workspace > .curator-char-header,
   .curator-voice-workspace > .curator-char-header,
@@ -1826,9 +2107,42 @@ a:hover .bm8-jump-cue {
   .curator-catalog-header {
     padding: 12px !important;
   }
-  .curator-illust-workspace .curator-char-search-input,
-  .curator-voice-workspace .curator-char-search-input,
-  .curator-char-header-actions .curator-char-search-input {
+  .bm-hall-header-top > .curator-char-header-actions,
+  .bm-hall-header-top > .curator-char-header-right,
+  .bm-hall-header-top > .curator-radar-controls-right {
+    margin-left: 0;
+    width: 100%;
+  }
+  .bm-hall-filter-wrap {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+  }
+  .bm-hall-filter-wrap input.bm-hall-filter-input {
+    height: 38px !important;
+    min-height: 38px !important;
+    font-size: 14px !important;
+  }
+  .curator-char-add-searchbar > .curator-btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  .curator-char-queue-batch-btn {
+    margin-left: 0;
+    width: 100%;
+    height: 34px !important;
+    justify-content: center;
+  }
+  .curator-char-draft-submit-btns {
+    width: 100%;
+  }
+  .curator-char-draft-submit-btns > .curator-btn {
+    flex: 1 1 140px;
+    justify-content: center;
+  }
+  .curator-illust-workspace .curator-char-search-input:not(.bm-hall-filter-input),
+  .curator-voice-workspace .curator-char-search-input:not(.bm-hall-filter-input),
+  .curator-char-header-actions .curator-char-search-input:not(.bm-hall-filter-input) {
     width: 100% !important;
     flex: 1 1 100%;
   }

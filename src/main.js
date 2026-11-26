@@ -1639,11 +1639,20 @@ var BangumiManagerPlugin = class extends Plugin {
         ? this.settings.preferredEpisodeFiles
         : {};
     localMediaIndexService.ensureLocalMediaSettingsShape(this);
-    await this.saveData(this.settings);
-    const nextSeconds = Math.max(10, Number(this.settings.checkIntervalSeconds) || 60);
-    if (!this.statusTimer || this._activeStatusIntervalSec !== nextSeconds) {
-      this.startStatusTimer();
-    }
+
+    const runWrite = async () => {
+      if (this.unloaded) return;
+      await this.saveData(this.settings);
+      const nextSeconds = Math.max(10, Number(this.settings.checkIntervalSeconds) || 60);
+      if (!this.statusTimer || this._activeStatusIntervalSec !== nextSeconds) {
+        this.startStatusTimer();
+      }
+    };
+
+    const prev = this._saveSettingsChain || Promise.resolve();
+    const next = prev.catch(() => {}).then(runWrite);
+    this._saveSettingsChain = next;
+    await next;
   }
   startStatusTimer() {
     if (this.unloaded) {

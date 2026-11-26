@@ -65,7 +65,7 @@ const BUILTIN_CHARACTER_CANDIDATES = [
     summary: "迷宫篇后与鲁迪乌斯成婚的全名形态，拉诺亚魔法大学教头。"
   },
   {
-    id: "88440",
+    id: "46463",
     name: "希露菲叶特",
     nameJp: "シルフィエット",
     gender: "女",
@@ -80,7 +80,7 @@ const BUILTIN_CHARACTER_CANDIDATES = [
     summary: "鲁迪乌斯在布耶纳村的青梅竹马，拥有精灵血统，擅长无咏唱治愈与风魔术。"
   },
   {
-    id: "88441",
+    id: "46464",
     name: "艾莉丝·伯雷亚斯·格雷拉特",
     nameJp: "エリス・ボレアス・グレイラット",
     gender: "女",
@@ -95,7 +95,7 @@ const BUILTIN_CHARACTER_CANDIDATES = [
     summary: "阿斯拉王国上级贵族伯雷亚斯家的大小姐，剑神流剑王级剑士。"
   },
   {
-    id: "78993",
+    id: "86246",
     name: "芙莉莲",
     nameJp: "フリーレン",
     gender: "女",
@@ -445,13 +445,22 @@ const CHARACTER_SEARCH_ALIAS_MAP = {
   "希露菲": ["希露菲叶特", "シルフィエット"],
   "艾莉丝": ["艾莉丝·伯雷亚斯·格雷拉特", "エリス・ボレアス・グレイラット"],
   "鲁迪": ["鲁迪乌斯·格雷拉特", "ルーデウス・グレイラット"],
-  "爱蜜莉雅": ["爱蜜莉雅", "エミリア"],
-  "艾米莉亚": ["爱蜜莉雅", "エミリア"],
-  "emt": ["爱蜜莉雅", "エミリア"],
-  "雷姆": ["雷姆", "レム"],
+  "爱蜜莉雅": ["爱蜜莉雅", "艾米莉娅", "エミリア"],
+  "艾米莉亚": ["艾米莉娅", "爱蜜莉雅", "エミリア"],
+  "艾米莉娅": ["艾米莉娅", "爱蜜莉雅", "エミリア"],
+  "emt": ["艾米莉娅", "爱蜜莉雅", "エミリア"],
+  "雷姆": ["蕾姆", "雷姆", "レム"],
+  "蕾姆": ["蕾姆", "雷姆", "レム"],
+  "レム": ["レム", "蕾姆", "雷姆"],
   "拉姆": ["拉姆", "ラム"],
+  "ラム": ["ラム", "拉姆"],
   "碧翠丝": ["碧翠丝", "ベアトリス"],
   "贝蒂": ["碧翠丝", "ベアトリス"],
+  "セイバー": ["阿尔托莉雅·潘德拉贡", "アルトリア・ペンドラゴン", "Saber"],
+  "saber": ["阿尔托莉雅·潘德拉贡", "アルトリア・ペンドラゴン"],
+  "呆毛王": ["阿尔托莉雅·潘德拉贡", "アルトリア・ペンドラゴン"],
+  "明日香": ["惣流·明日香·兰格雷", "式波·明日香·兰格雷", "明日香"],
+  "绫波丽": ["绫波零", "綾波レイ"],
   "芙莉莲": ["芙莉莲", "フリーレン"],
   "费伦": ["费伦", "フェルン"],
   "菲伦": ["费伦", "フェルン"],
@@ -485,8 +494,105 @@ const CHARACTER_SEARCH_ALIAS_MAP = {
 };
 
 /**
+ * 从萌娘百科词条首段（重定向 / 信息栏 / 消歧义页）通用提取同角色异译名、原名与全名候选
+ * 无需手工硬编码，覆盖任意常见角色（如「雷姆」↔「蕾姆」/「レム」、「炮姐」→「御坂美琴」、「真寻」→「绪山真寻」）
+ */
+function extractMoegirlQueryVariants(wikitext, pageTitle, rawQuery) {
+  const out = [];
+  const push = (val) => {
+    const clean = String(val || "")
+      .replace(/\{\{[^{}]*\}\}/g, " ")
+      .replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, "$1")
+      .replace(/'''|''/g, "")
+      .replace(/<[^>]+>/g, "")
+      .replace(/（[^）]*）|\([^)]*\)/g, "")
+      .replace(/^(?:日语|日語|英语|英語|韩语|韓語|中文|假名|罗马音|羅馬音|本名|原名|别名|別名)\s*[:：]\s*/gi, "")
+      .replace(/^[「『《〈"'\s]+|[」』》〉"'\s]+$/g, "")
+      .trim();
+    if (
+      clean &&
+      clean.length >= 2 &&
+      clean.length <= 24 &&
+      clean !== rawQuery &&
+      !out.includes(clean) &&
+      !/[。！？!?:：]$/.test(clean) &&
+      !/^(?:Category|Template|File|Help|Special|萌娘百科|消歧义|现实人物|虚构角色|登场角色|日语|日語|英语|英語)/i.test(clean) &&
+      !/(?:列表|模板|用语|歌曲|音乐|专辑|单曲|消歧义|登场角色|章节|系列|联动角色)$/.test(clean)
+    ) {
+      out.push(clean);
+    }
+  };
+
+  if (pageTitle && pageTitle !== rawQuery) {
+    push(pageTitle);
+  }
+  const wt = String(wikitext || "");
+  if (!wt) return out;
+
+  // 1. 提取首行加粗异译名与括注外文原名，例如：'''雷姆/蕾姆'''（レム，レイム，Rem）
+  const firstPara = wt.split(/\n==/)[0] || wt.slice(0, 600);
+  const boldMatch = firstPara.match(/'''([^'\n]{2,40})'''/);
+  if (boldMatch) {
+    boldMatch[1].split(/[\/／、，,]+/).forEach(push);
+  }
+  const leadParenMatch = firstPara.match(/'''[^'\n]{1,40}'''\s*[（(]([^）)\n]{2,80})[）)]/);
+  if (leadParenMatch) {
+    const rawParen = leadParenMatch[1]
+      .replace(/\{\{(?:lj|lang\|ja|ruby)\|([^|}]+)[^}]*\}\}/gi, "$1")
+      .replace(/\{\{[^{}]*\}\}/g, " ");
+    for (const seg of rawParen.split(/[，,、\/／;；]+/)) {
+      const s = seg.trim();
+      if (/[\u3040-\u30ff\u4e00-\u9fff]/.test(s)) {
+        push(s);
+      }
+    }
+  }
+
+  // 2. 提取角色信息栏中的本名/原名/译名字段
+  const fieldRe = /\|\s*(?:本名|姓名|原名|译名|简体中文名|中文名)\s*=\s*([^\n|{}]{2,40})/g;
+  let fm;
+  while ((fm = fieldRe.exec(wt.slice(0, 2200))) !== null) {
+    fm[1]
+      .replace(/\{\{(?:lj|lang\|ja|ruby)\|([^|}]+)[^}]*\}\}/gi, "$1")
+      .split(/[\/／、，,]+/)
+      .forEach(push);
+  }
+
+  // 3. 若为消歧义页，仅从非「现实人物」分段中提取前若干个虚构角色词条名（如「真寻」→「绪山真寻」）
+  if (/可以是指|消歧义|disambig/i.test(wt.slice(0, 500))) {
+    const sections = wt.split(/\n(==+[^=\n]+==+)/);
+    let skipRealPeople = false;
+    for (let i = 0; i < sections.length; i++) {
+      const part = sections[i];
+      if (/^==+/.test(part)) {
+        skipRealPeople = /现实人物|声优|现实世界|地名|音乐|歌曲|专辑|组织/.test(part);
+        continue;
+      }
+      if (skipRealPeople) continue;
+      const lineRe = /^\*+\s*'''?\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]'''?([^\n]*)$/gm;
+      let lm;
+      while ((lm = lineRe.exec(part)) !== null) {
+        const target = String(lm[1] || "").trim();
+        const desc = String(lm[2] || "");
+        if (/现实|声优|歌手|插画家|漫画家|作者|乐队|神明|鱼神/.test(desc)) continue;
+        if (!/^(?:Category|Template|File|Help|Special|User|Talk|Module|MediaWiki|萌娘百科|分类|模板|文件):/i.test(target)) {
+          const baseName = target.replace(/（[^）]*）|\([^)]*\)/g, "").trim();
+          if (baseName && baseName !== rawQuery) {
+            push(baseName);
+          }
+        }
+        if (out.length >= 5) break;
+      }
+      if (out.length >= 5) break;
+    }
+  }
+
+  return out;
+}
+
+/**
  * 解析并扩展角色搜索关键词：
- * 结合内置别名/单名映射表与萌娘百科全文搜索 API（如「真寻」→「绪山真寻」），补全完整角色名供 Bangumi 并发检索
+ * 结合内置高频映射表 + 萌娘百科通用重定向/消歧义/全文反查（零硬编码覆盖异译名、假名原名与单名），补全检索词供多源并发检索
  */
 async function resolveExpandedCharacterSearchQueries(rawQuery) {
   const q = String(rawQuery || "").trim();
@@ -518,16 +624,353 @@ async function resolveExpandedCharacterSearchQueries(rawQuery) {
   }
 
   for (const [aliasKey, targets] of Object.entries(CHARACTER_SEARCH_ALIAS_MAP)) {
-    if (aliasKey.length >= 2 && (aliasKey.includes(q) || targets.some((t) => t.includes(q)))) {
+    if (
+      aliasKey.length >= 2 &&
+      (aliasKey.toLowerCase() === qLower ||
+        aliasKey.includes(q) ||
+        targets.some((t) => t.toLowerCase() === qLower))
+    ) {
       targets.forEach(pushUnique);
     }
   }
 
-  // 若输入的是短单名或昵称且尚未扩展出足够候选，通过萌娘百科全文搜索快速反查含该名/别名的角色全名
-  if (expanded.length <= 2 && q.length >= 1 && q.length <= 8) {
+  // 通用萌娘百科词条重定向 & 消歧义异译名解析（对未列入内置表的任意角色均生效）
+  if (q.length >= 1 && q.length <= 12 && !/\s/.test(q) && expanded.length <= 2) {
+    const cleanUa = getCleanBrowserUserAgent();
     try {
-      const cleanUa = getCleanBrowserUserAgent();
-      const srUrl = `https://moegirl.uk/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=6&format=json`;
+      const titleUrl = `https://moegirl.uk/api.php?action=query&titles=${encodeURIComponent(q)}&redirects=1&prop=revisions&rvprop=content&rvslots=main&format=json`;
+      const titleResp = await requestUrlWithTimeout(
+        {
+          url: titleUrl,
+          method: "GET",
+          headers: {
+            "User-Agent": cleanUa,
+            "Accept": "application/json,text/plain,*/*"
+          },
+          throw: false
+        },
+        1600
+      );
+      const qData = titleResp?.json?.query;
+      const pages = qData?.pages ? Object.values(qData.pages) : [];
+      const p0 = pages[0];
+      if (p0 && !("missing" in p0) && Number(p0.pageid) > 0) {
+        const wt = p0.revisions?.[0]?.slots?.main?.["*"] || "";
+        const variants = extractMoegirlQueryVariants(wt, p0.title, q);
+        variants.forEach(pushUnique);
+      }
+    } catch (_) {}
+
+    // 仅对短单名/昵称（<= 4 字）且仍未扩展出同义/全名候选时，再补一次萌娘百科全文搜索反查
+    if (expanded.length <= 1 && q.length <= 4) {
+      try {
+        const srUrl = `https://moegirl.uk/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=6&format=json`;
+        const srResp = await requestUrlWithTimeout(
+          {
+            url: srUrl,
+            method: "GET",
+            headers: {
+              "User-Agent": cleanUa,
+              "Accept": "application/json,text/plain,*/*"
+            },
+            throw: false
+          },
+          1500
+        );
+        const searchItems = srResp?.json?.query?.search;
+        if (Array.isArray(searchItems)) {
+          for (const item of searchItems) {
+            if (item && item.title && item.title !== q) {
+              pushUnique(item.title);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  return expanded.slice(0, 5);
+}
+
+/**
+ * 抓取并解析 Bangumi 网页版角色检索（mono_search?cat=crt）单页结果（含讨论数热度信号与总页数）
+ * 自动支持 bgm.tv -> bangumi.tv 镜像回退，弥补 api.bgm.tv/v0/search/characters 服务端索引缺失漏洞（如 #35615 レム/蕾姆、#61406 中野三玖等）
+ */
+async function fetchBangumiMonoSearchPage(kw, page = 1, preferredHost = "") {
+  const hosts = preferredHost ? [preferredHost] : ["https://bgm.tv", "https://bangumi.tv"];
+  const pageParam = page > 1 ? `&page=${page}` : "";
+  const cookie = `chii_searchDateLine=${Math.floor(Date.now() / 1000) - 10}`;
+  const cleanUa = getCleanBrowserUserAgent();
+  let reachable = false;
+
+  for (let hIdx = 0; hIdx < hosts.length; hIdx++) {
+    const host = hosts[hIdx];
+    try {
+      const searchUrl = `${host}/mono_search/${encodeURIComponent(kw)}?cat=crt${pageParam}`;
+      const resp = await requestUrlWithTimeout(
+        {
+          url: searchUrl,
+          method: "GET",
+          headers: {
+            "User-Agent": cleanUa,
+            "Accept": "text/html,application/xhtml+xml,*/*",
+            "Cookie": cookie
+          },
+          throw: false
+        },
+        hIdx === 0 ? 3400 : 2200
+      );
+      if (resp && resp.status >= 200 && resp.status < 500) {
+        reachable = true;
+      }
+      const html = resp?.text || "";
+      if (!html || html.includes("秒内只能进行一次搜索")) continue;
+
+      const items = [];
+      const blockRegex = /<div class="light_(?:odd|even)[^"]*"[\s\S]*?(?=<div class="light_(?:odd|even)|<div class="section_line|<div id="multipage"|$)/gi;
+      let m;
+      while ((m = blockRegex.exec(html)) !== null) {
+        const block = m[0];
+        const linkMatch = block.match(/<a\s+href="\/character\/(\d+)"[^>]*class="l"[^>]*>([\s\S]*?)<\/a>/i);
+        if (!linkMatch) continue;
+        const id = linkMatch[1];
+        const rawTitle = htmlToPlainText(linkMatch[2]);
+        const imgMatch = block.match(/<img[^>]+src="([^"]+)"/i);
+        let avatar = imgMatch ? imgMatch[1].trim() : "";
+        if (avatar.startsWith("//")) avatar = "https:" + avatar;
+        avatar = avatar.replace(/\/g\/|\/s\//, "/m/");
+        const tipMatch = block.match(/<div class="prsn_info"[^>]*>([\s\S]*?)<\/div>/i);
+        const infoTip = tipMatch ? htmlToPlainText(tipMatch[1]) : "";
+        const cmtMatch = block.match(/\(\+(\d+)\)/);
+        const comments = cmtMatch ? Number(cmtMatch[1]) || 0 : 0;
+        const parts = rawTitle.split("/").map((s) => s.trim()).filter(Boolean);
+        items.push({
+          id,
+          name: parts.length > 1 ? parts[parts.length - 1] : rawTitle,
+          nameJp: parts[0] || rawTitle,
+          aliases: [],
+          avatar,
+          summary: "",
+          infoTip,
+          collects: 0,
+          comments,
+          source: "mono"
+        });
+      }
+
+      const pageNums = [];
+      const pageRe = /page=(\d+)/gi;
+      let pm;
+      while ((pm = pageRe.exec(html)) !== null) {
+        const num = Number(pm[1]);
+        if (Number.isFinite(num) && num > 0) pageNums.push(num);
+      }
+      const maxPage = pageNums.length > 0 ? Math.max(...pageNums) : 1;
+      return { items, maxPage, host, reachable: true };
+    } catch (_) {}
+  }
+  return { items: [], maxPage: 1, host: "", reachable };
+}
+
+/**
+ * 萌娘百科直连角色检索兜底：
+ * 当移动端或无代理网络下 Bangumi 接口暂不可达时，自动通过国内直连可用的 moegirl.uk 检索角色词条与消歧义列表，
+ * 返回带头像、简介与精确词条名的候选卡片，确保用户搜「レム」「雷姆」「晓美焰」等依然能即搜即录。
+ */
+async function searchMoegirlCharacterFallback(rawQuery, expandedQueries = []) {
+  const q = String(rawQuery || "").trim();
+  if (!q) return [];
+  const cleanUa = getCleanBrowserUserAgent();
+  const titleSet = Array.from(
+    new Set([q, ...(Array.isArray(expandedQueries) ? expandedQueries : [])].map((s) => String(s || "").trim()).filter(Boolean))
+  ).slice(0, 5);
+  if (titleSet.length === 0) return [];
+
+  const isWikiNamespace = (t) =>
+    /^(?:Category|Template|File|Help|Special|User|Talk|Module|MediaWiki|萌娘百科|分类|模板|文件):/i.test(t);
+  const cleanWikiExtract = (raw) =>
+    String(raw || "")
+      .replace(/<sm2>[\s\S]*?<\/sm2>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const extractLeadSummaryFromWikitext = (wt) => {
+    const firstSection = String(wt || "").split(/\n==/)[0] || "";
+    const lines = firstSection
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(
+        (l) =>
+          l &&
+          !l.startsWith("{{") &&
+          !l.startsWith("|") &&
+          !l.startsWith("}}") &&
+          !l.startsWith("[[File:") &&
+          !l.startsWith("[[Category:") &&
+          !l.includes("Category:")
+      );
+    const prose = lines.filter((l) => l.startsWith("'''") || /[。，、是登场角色作品]/.test(l));
+    return (prose.length > 0 ? prose : lines)
+      .join(" ")
+      .replace(/\{\{(?:lj|lang\|ja|ruby|heimu|黑幕)\|([^|}]+)[^}]*\}\}/gi, "$1")
+      .replace(/\{\{[^{}]*\}\}/g, " ")
+      .replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, "$1")
+      .replace(/'''|''/g, "")
+      .replace(/<sm2>[\s\S]*?<\/sm2>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  const candidateMetaMap = new Map();
+  const disambigTargets = [];
+  const pushDisambigTarget = (title, desc) => {
+    const t = String(title || "").trim();
+    if (!t || isWikiNamespace(t) || candidateMetaMap.has(t) || disambigTargets.some((d) => d.title === t)) return;
+    if (/(?:列表|模板|用语|歌曲|音乐|专辑|单曲|消歧义|登场角色|章节|系列)$/.test(t)) return;
+    disambigTargets.push({ title: t, desc: String(desc || "").trim() });
+  };
+
+  // 优先放中文译名（如「蕾姆 / 雷姆」），避免在萌娘百科只查询无词条的日文原名
+  const orderedProbeTitles = [...titleSet].sort((a, b) => {
+    const ca = /[\u4e00-\u9fff]/.test(a) ? 1 : 0;
+    const cb = /[\u4e00-\u9fff]/.test(b) ? 1 : 0;
+    return cb - ca;
+  });
+
+  try {
+    const batchUrl = `https://moegirl.uk/api.php?action=query&titles=${encodeURIComponent(
+      orderedProbeTitles.join("|")
+    )}&redirects=1&prop=revisions|pageimages&rvprop=content&rvslots=main&piprop=thumbnail&pithumbsize=200&format=json`;
+    const resp = await requestUrlWithTimeout(
+      {
+        url: batchUrl,
+        method: "GET",
+        headers: {
+          "User-Agent": cleanUa,
+          "Accept": "application/json,text/plain,*/*"
+        },
+        throw: false
+      },
+      5200
+    );
+    const pages = Object.values(resp?.json?.query?.pages || {}).filter(
+      (p) => p && !("missing" in p) && Number(p.pageid) > 0
+    );
+    for (const p of pages) {
+      const title = String(p.title || "").trim();
+      const wt = p.revisions?.[0]?.slots?.main?.["*"] || "";
+      const ext = extractLeadSummaryFromWikitext(wt);
+      const thumb = p.thumbnail?.source || "";
+      if (/可以是指|消歧义|\{\{disambig/i.test(wt.slice(0, 600)) || /可以是指/.test(ext)) {
+        const sections = wt.split(/\n(==+[^=\n]+==+)/);
+        let skipSection = false;
+        for (const part of sections) {
+          if (/^==+/.test(part)) {
+            skipSection = /现实人物|声优|现实世界|地名|音乐|歌曲|专辑|作品|组织/.test(part);
+            continue;
+          }
+          if (skipSection) continue;
+          const lineRe = /^\*+\s*'''?\[\[([^\]|#]+)(?:\|[^\]]+)?\]\]'''?([^\n]*)$/gm;
+          let lm;
+          while ((lm = lineRe.exec(part)) !== null) {
+            const target = String(lm[1] || "").trim();
+            const rawDesc = String(lm[2] || "")
+              .replace(/\[\[(?:[^\]|]+\|)?([^\]]+)\]\]/g, "$1")
+              .replace(/\{\{[^{}]*\}\}/g, "")
+              .replace(/'''|''/g, "")
+              .replace(/^[—\-–:：\s]+/, "")
+              .trim();
+            if (/现实|声优|歌手|插画家|漫画家|作者|乐队|神明|鱼神|单曲|歌曲|专辑/.test(rawDesc)) continue;
+            pushDisambigTarget(target, rawDesc);
+            if (disambigTargets.length >= 8) break;
+          }
+          if (disambigTargets.length >= 8) break;
+        }
+      } else if (title) {
+        const displayName = title.replace(/\s*[（(][^）)]+[）)]\s*$/, "").trim() || title;
+        const parenWork = (title.match(/[（(]([^）)]+)[）)]/) || [])[1] || "";
+        candidateMetaMap.set(title, {
+          id: "",
+          moegirlTitle: title,
+          name: displayName,
+          nameJp: "",
+          aliases: [],
+          avatar: thumb,
+          summary: ext.slice(0, 90),
+          infoTip: ["萌娘百科直连候选", parenWork ? `《${parenWork}》` : ""].filter(Boolean).join(" · "),
+          collects: 0,
+          comments: 0,
+          source: "moegirl"
+        });
+      }
+    }
+  } catch (_) {}
+
+  // 若命中消歧义页（如「雷姆」→「雷姆(Re:从零开始的异世界生活)」等），一次批量补拉缩略图（若超时仍保留消歧义角色候选）
+  if (disambigTargets.length > 0) {
+    const subPages = new Map();
+    try {
+      const subTitles = disambigTargets.slice(0, 8).map((d) => d.title);
+      const subUrl = `https://moegirl.uk/api.php?action=query&titles=${encodeURIComponent(
+        subTitles.join("|")
+      )}&redirects=1&prop=pageimages&piprop=thumbnail&pithumbsize=200&format=json`;
+      const subResp = await requestUrlWithTimeout(
+        {
+          url: subUrl,
+          method: "GET",
+          headers: {
+            "User-Agent": cleanUa,
+            "Accept": "application/json,text/plain,*/*"
+          },
+          throw: false
+        },
+        4200
+      );
+      for (const p of Object.values(subResp?.json?.query?.pages || {})) {
+        if (p && !("missing" in p) && Number(p.pageid) > 0 && p.title) subPages.set(p.title, p);
+      }
+    } catch (_) {}
+
+    const baseList = subPages.size > 0
+      ? disambigTargets.filter((d) => subPages.has(d.title))
+      : disambigTargets;
+    const ordered = [...baseList].sort((a, b) => {
+      const pa = subPages.get(a.title);
+      const pb = subPages.get(b.title);
+      const sa = (pa?.thumbnail?.source ? 40 : 0) - (/联动|公主连结|非人学园/.test(a.title + a.desc) ? 35 : 0) + (/Re:|从零开始|异世界生活|死亡笔记|命运|新世纪福音战士/.test(a.title + a.desc) ? 30 : 0);
+      const sb = (pb?.thumbnail?.source ? 40 : 0) - (/联动|公主连结|非人学园/.test(b.title + b.desc) ? 35 : 0) + (/Re:|从零开始|异世界生活|死亡笔记|命运|新世纪福音战士/.test(b.title + b.desc) ? 30 : 0);
+      return sb - sa;
+    });
+    for (const d of ordered) {
+      const p = subPages.get(d.title);
+      const cleanTitle = d.title;
+      const displayName = cleanTitle.replace(/\s*[（(][^）)]+[）)]\s*$/, "").trim() || cleanTitle;
+      const parenWork = (cleanTitle.match(/[（(]([^）)]+)[）)]/) || [])[1] || "";
+      candidateMetaMap.set(cleanTitle, {
+        id: "",
+        moegirlTitle: cleanTitle,
+        name: displayName,
+        nameJp: "",
+        aliases: [],
+        avatar: p?.thumbnail?.source || "",
+        summary: (d.desc || "").slice(0, 90),
+        infoTip: ["萌娘百科直连候选", parenWork ? `《${parenWork}》` : ""].filter(Boolean).join(" · "),
+        collects: 0,
+        comments: 0,
+        source: "moegirl"
+      });
+    }
+  }
+
+  // 若仍无直接命中，走萌娘百科全文搜索兜底（优先使用中文译名）
+  if (candidateMetaMap.size === 0) {
+    try {
+      const srKw = orderedProbeTitles[0] || q;
+      const srUrl = `https://moegirl.uk/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+        srKw
+      )}&srlimit=6&format=json`;
       const srResp = await requestUrlWithTimeout(
         {
           url: srUrl,
@@ -538,25 +981,130 @@ async function resolveExpandedCharacterSearchQueries(rawQuery) {
           },
           throw: false
         },
-        2200
+        3600
       );
-      const searchItems = srResp?.json?.query?.search;
-      if (Array.isArray(searchItems)) {
-        for (const item of searchItems) {
-          if (item && item.title && item.title !== q) {
-            pushUnique(item.title);
-          }
-        }
+      const srItems = Array.isArray(srResp?.json?.query?.search) ? srResp.json.query.search : [];
+      for (const item of srItems) {
+        const t = String(item?.title || "").trim();
+        const snippet = htmlToPlainText(item?.snippet || "");
+        if (!t || t.includes(":") || /(?:列表|模板|用语|歌曲|专辑|单曲|消歧义)$/.test(t)) continue;
+        if (/配音演员|日本女性声优|日本男性声优|声优|漫画家|插画家|轻小说作家|动画制作公司/.test(snippet)) continue;
+        const displayName = t.replace(/\s*[（(][^）)]+[）)]\s*$/, "").trim() || t;
+        candidateMetaMap.set(t, {
+          id: "",
+          moegirlTitle: t,
+          name: displayName,
+          nameJp: "",
+          aliases: [],
+          avatar: "",
+          summary: snippet.slice(0, 90),
+          infoTip: "萌娘百科直连候选",
+          collects: 0,
+          comments: 0,
+          source: "moegirl"
+        });
+        if (candidateMetaMap.size >= 6) break;
       }
     } catch (_) {}
   }
 
-  return expanded.slice(0, 4);
+  return Array.from(candidateMetaMap.values()).slice(0, 10);
 }
 
 /**
- * 搜索 Bangumi 角色
- * 支持按单名（如「真寻」→「绪山真寻」）、简体中文名、日文原名、别名与昵称多维并发检索与相关性重排
+ * 当用户输入「作品名 角色名」（如「Re0 雷姆」「EVA 明日香」「Fate Saber」）时，通过作品检索反查出场角色
+ */
+async function searchCharactersByWorkAndName(workToken, charToken) {
+  const wq = String(workToken || "").trim();
+  const cq = String(charToken || "").trim();
+  if (!wq || !cq) return [];
+  const cqNorm = normalizeCharacterNameForCompare(cq);
+  const cqVariants = [cqNorm];
+  const aliasHits = CHARACTER_SEARCH_ALIAS_MAP[cq] || CHARACTER_SEARCH_ALIAS_MAP[cq.toLowerCase()];
+  if (Array.isArray(aliasHits)) {
+    aliasHits.forEach((a) => {
+      const na = normalizeCharacterNameForCompare(a);
+      if (na && !cqVariants.includes(na)) cqVariants.push(na);
+    });
+  }
+
+  try {
+    const subResp = await requestUrlWithTimeout(
+      {
+        url: "https://api.bgm.tv/v0/search/subjects?limit=4",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": BGM_USER_AGENT
+        },
+        body: JSON.stringify({ keyword: wq, filter: { type: [2, 4, 1] } }),
+        throw: false
+      },
+      3800
+    );
+    const subjects = Array.isArray(subResp?.json?.data) ? subResp.json.data.slice(0, 3) : [];
+    if (subjects.length === 0) return [];
+
+    const castLists = await Promise.all(
+      subjects.map((sub) =>
+        requestUrlWithTimeout(
+          {
+            url: `https://api.bgm.tv/v0/subjects/${sub.id}/characters`,
+            method: "GET",
+            headers: { "User-Agent": BGM_USER_AGENT },
+            throw: false
+          },
+          3500
+        )
+          .then((r) => ({ sub, chars: Array.isArray(r?.json) ? r.json : [] }))
+          .catch(() => ({ sub, chars: [] }))
+      )
+    );
+
+    const matched = [];
+    const seen = new Set();
+    for (const { sub, chars } of castLists) {
+      const subTitle = sub.name_cn || sub.name || "";
+      for (const ch of chars) {
+        if (!ch || !ch.id || seen.has(String(ch.id))) continue;
+        const nJp = normalizeCharacterNameForCompare(ch.name);
+        const rawActors = Array.isArray(ch.actors)
+          ? ch.actors.map((a) => a?.name).filter(Boolean).slice(0, 2).join(" / ")
+          : "";
+        // /subjects/{id}/characters 返回日文原名，若原名命中或作品匹配度高且需中文名匹配则纳入候选
+        const directHit = cqVariants.some((v) => v && (nJp === v || nJp.includes(v) || v.includes(nJp)));
+        if (directHit) {
+          seen.add(String(ch.id));
+          const avatar = ch.images?.large || ch.images?.medium || ch.images?.grid || "";
+          matched.push({
+            id: String(ch.id),
+            name: ch.name || "",
+            nameJp: ch.name || "",
+            aliases: [],
+            avatar: avatar.startsWith("//") ? "https:" + avatar : avatar,
+            summary: "",
+            infoTip: [subTitle ? `作品：《${subTitle}》` : "", rawActors ? `CV：${rawActors}` : "", ch.relation || ""]
+              .filter(Boolean)
+              .join(" · "),
+            collects: ch.relation === "主角" ? 800 : 200,
+            comments: ch.relation === "主角" ? 120 : 30,
+            source: "subject_cast"
+          });
+        }
+      }
+    }
+    return matched;
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * 搜索 Bangumi 角色（多源融合引擎）
+ * 1. 并发融合 Bangumi v0 Search API 与网页版 mono_search（含自动多页翻扫 + bgm.tv/bangumi.tv 双镜回退），
+ *    彻底解决 v0 API 索引遗漏大量热门角色（如 #35615 レム/蕾姆、#61406 中野三玖、#304 惣流明日香）的痛点；
+ * 2. 结合萌娘百科重定向/消歧义异译名通用扩展与「作品名 角色名」反查；
+ * 3. 引入收藏数/讨论数对数人气加权，确保热门本体角色稳居前排，不被冷门同名路人淹没。
  */
 async function searchBangumiCharacters(keyword) {
   const q = String(keyword || "").trim();
@@ -582,9 +1130,16 @@ async function searchBangumiCharacters(keyword) {
     } catch (e) {}
   }
 
-  const expandedQueries = await resolveExpandedCharacterSearchQueries(q);
+  const spaceTokens = q.split(/\s+/).filter(Boolean);
+  const hasTwoPartHint = spaceTokens.length === 2 && spaceTokens[0].length >= 2 && spaceTokens[1].length >= 1;
+  const expandedQueries = await resolveExpandedCharacterSearchQueries(
+    hasTwoPartHint ? spaceTokens[1] : q
+  );
+  if (hasTwoPartHint && !expandedQueries.includes(q)) {
+    expandedQueries.unshift(q);
+  }
   const queryNorms = expandedQueries.map((s) => normalizeCharacterNameForCompare(s)).filter(Boolean);
-  const qNorm = normalizeCharacterNameForCompare(q);
+  const qNorm = normalizeCharacterNameForCompare(hasTwoPartHint ? spaceTokens[1] : q);
 
   const parseV0CharacterItem = (item) => {
     let nameCn = "";
@@ -621,9 +1176,9 @@ async function searchBangumiCharacters(keyword) {
       }
     }
     const avatar =
-      item.images?.large ||
       item.images?.medium ||
       item.images?.grid ||
+      item.images?.large ||
       "";
     const gMap = { male: "男", female: "女" };
     const topGender = item.gender ? gMap[String(item.gender).toLowerCase()] || String(item.gender) : "";
@@ -631,6 +1186,8 @@ async function searchBangumiCharacters(keyword) {
     const topBirth =
       item.birth_mon && item.birth_day ? `${item.birth_mon}月${item.birth_day}日` : "";
     const finalBirth = birthday || topBirth;
+    const collects = Number(item.stat?.collects) || 0;
+    const comments = Number(item.stat?.comments) || 0;
 
     const aliasHint =
       aliases.length > 0
@@ -653,7 +1210,10 @@ async function searchBangumiCharacters(keyword) {
         aliasHint ? `别名：${aliasHint}` : ""
       ]
         .filter(Boolean)
-        .join(" · ")
+        .join(" · "),
+      collects,
+      comments,
+      source: "v0"
     };
   };
 
@@ -663,46 +1223,113 @@ async function searchBangumiCharacters(keyword) {
     const nAliases = (cand.aliases || []).map((a) => normalizeCharacterNameForCompare(a)).filter(Boolean);
     const allNorms = [nCn, nJp, ...nAliases].filter(Boolean);
 
-    let score = Math.max(0, 120 - queryIdx * 18 - itemIdx * 4);
+    let score = Math.max(0, 90 - queryIdx * 12 - Math.min(itemIdx, 20) * 2);
     if (cand.avatar) score += 35;
     if (cand.summary) score += 15;
 
     // 1. 与用户原始输入词直接比对
+    let matchedLevel = 0;
     if (qNorm) {
       if (nCn === qNorm || nJp === qNorm || nAliases.includes(qNorm)) {
         score += 1200;
+        matchedLevel = 3;
       } else if (
         nCn.endsWith(qNorm) ||
         nCn.startsWith(qNorm) ||
+        nJp.endsWith(qNorm) ||
+        nJp.startsWith(qNorm) ||
         nAliases.some((a) => a.endsWith(qNorm) || a.startsWith(qNorm))
       ) {
-        score += 860;
+        score += 800;
+        matchedLevel = 2;
       } else if (nCn.includes(qNorm) || nAliases.some((a) => a.includes(qNorm))) {
-        score += 560;
+        score += 500;
+        matchedLevel = 1;
       } else if (nJp.includes(qNorm)) {
-        score += 320;
+        score += 360;
+        matchedLevel = 1;
       }
     }
 
-    // 2. 与扩展出的全名/原名（如「真寻」扩展出的「绪山真寻」「緒山まひろ」）比对
-    for (let i = 1; i < queryNorms.length; i++) {
-      const expNorm = queryNorms[i];
-      if (!expNorm) continue;
-      if (allNorms.includes(expNorm)) {
-        score += Math.max(450, 920 - i * 80);
-        break;
+    // 2. 与扩展出的全名/异译名/原名（如「雷姆」→「蕾姆」「レム」，「真寻」→「绪山真寻」）比对（不重复叠加已精确命中的分值）
+    if (matchedLevel < 3) {
+      for (let i = 0; i < queryNorms.length; i++) {
+        const expNorm = queryNorms[i];
+        if (!expNorm || expNorm === qNorm) continue;
+        if (allNorms.includes(expNorm)) {
+          const bonus = Math.max(960, 1160 - i * 30);
+          score += matchedLevel === 0 ? bonus : Math.max(0, bonus - (matchedLevel === 2 ? 800 : 480));
+          matchedLevel = 3;
+          break;
+        } else if (
+          matchedLevel < 2 &&
+          allNorms.some((a) => a.startsWith(expNorm) || a.endsWith(expNorm))
+        ) {
+          score += Math.max(420, 720 - i * 40);
+          matchedLevel = 2;
+          break;
+        }
       }
     }
+
+    // 3. 作品反查高置信度加分
+    if (cand.source === "subject_cast") {
+      score += 520;
+    }
+
+    // 4. 收藏数/讨论数对数人气加权（让 v0 与 mono_search 处于同一人气标尺，彻底杜绝冷门路人压过热门角色）
+    const collects = Number(cand.collects) || 0;
+    const comments = Number(cand.comments) || 0;
+    const estCollects = collects > 0 ? collects : comments * 6;
+    const popScore = Math.round(
+      Math.log10(1 + estCollects) * 260 + Math.log10(1 + comments) * 140
+    );
+    score += popScore;
 
     return score;
   };
 
-  // 1. 并发调用 Bangumi v0 API 检索原始词与扩展全名词
-  try {
-    const searchPromises = expandedQueries.map((kw, qIdx) =>
+  const mergedMap = new Map();
+  const upsertCandidate = (cand, qIdx, itemIdx) => {
+    if (!cand || !cand.id) return;
+    const existing = mergedMap.get(cand.id);
+    let mergedItem = cand;
+    if (existing) {
+      const prev = existing.item;
+      mergedItem = {
+        ...prev,
+        ...cand,
+        name:
+          (prev.source === "v0" && prev.name && prev.name !== prev.nameJp)
+            ? prev.name
+            : (cand.name && cand.name !== cand.nameJp ? cand.name : prev.name || cand.name),
+        nameJp: prev.nameJp || cand.nameJp || "",
+        aliases: Array.from(new Set([...(prev.aliases || []), ...(cand.aliases || [])])),
+        avatar: prev.avatar || cand.avatar || "",
+        summary: prev.summary || cand.summary || "",
+        infoTip: (prev.infoTip || "").length >= (cand.infoTip || "").length ? prev.infoTip : cand.infoTip,
+        collects: Math.max(Number(prev.collects) || 0, Number(cand.collects) || 0),
+        comments: Math.max(Number(prev.comments) || 0, Number(cand.comments) || 0),
+        source: prev.source === "v0" || cand.source === "v0" ? "v0" : cand.source
+      };
+    }
+    const sc = scoreCandidate(mergedItem, qIdx, itemIdx);
+    if (!existing || sc > existing.score) {
+      mergedMap.set(mergedItem.id, { item: mergedItem, score: sc });
+    } else {
+      mergedMap.set(mergedItem.id, { item: mergedItem, score: existing.score });
+    }
+  };
+
+  const v0Queries = expandedQueries.slice(0, 3);
+  const monoQueries = expandedQueries.slice(0, 2);
+
+  // Wave 1: 并发执行 Bangumi v0 Search API + 网页版 mono_search 第 1 页 + （如适用）作品出场角色反查
+  const wave1V0Promise = Promise.all(
+    v0Queries.map((kw, qIdx) =>
       requestUrlWithTimeout(
         {
-          url: `https://api.bgm.tv/v0/search/characters?limit=${qIdx === 0 ? 16 : 8}`,
+          url: `https://api.bgm.tv/v0/search/characters?limit=${qIdx === 0 ? 20 : 10}`,
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -711,90 +1338,150 @@ async function searchBangumiCharacters(keyword) {
           body: JSON.stringify({ keyword: kw }),
           throw: false
         },
-        5000
+        4200
       )
-        .then((resp) => ({ qIdx, data: resp?.json?.data }))
-        .catch(() => ({ qIdx, data: null }))
-    );
+        .then((resp) => ({
+          qIdx,
+          reachable: Boolean(resp && resp.status >= 200 && resp.status < 500),
+          data: resp?.json?.data
+        }))
+        .catch(() => ({ qIdx, reachable: false, data: null }))
+    )
+  );
 
-    const responses = await Promise.all(searchPromises);
-    const mergedMap = new Map();
+  const wave1MonoPromise = Promise.all(
+    monoQueries.map((kw, qIdx) =>
+      fetchBangumiMonoSearchPage(kw, 1)
+        .then((res) => ({ kw, qIdx, ...res }))
+        .catch(() => ({ kw, qIdx, items: [], maxPage: 1, host: "", reachable: false }))
+    )
+  );
 
-    for (const { qIdx, data } of responses) {
-      if (!Array.isArray(data)) continue;
-      data.forEach((rawItem, itemIdx) => {
-        if (!rawItem || !rawItem.id) return;
-        const parsed = parseV0CharacterItem(rawItem);
-        const sc = scoreCandidate(parsed, qIdx, itemIdx);
-        const existing = mergedMap.get(parsed.id);
-        if (!existing || sc > existing.score) {
-          mergedMap.set(parsed.id, { item: parsed, score: sc });
-        }
-      });
-    }
+  const wave1CastPromise = hasTwoPartHint
+    ? Promise.all([
+        searchCharactersByWorkAndName(spaceTokens[0], spaceTokens[1]),
+        searchCharactersByWorkAndName(spaceTokens[1], spaceTokens[0])
+      ])
+        .then(([a, b]) => [...a, ...b])
+        .catch(() => [])
+    : Promise.resolve([]);
 
-    if (mergedMap.size > 0) {
-      return Array.from(mergedMap.values())
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 20)
-        .map((entry) => entry.item);
-    }
-  } catch (err) {
-    console.warn("[BangumiManager] v0 character search fallback:", err);
+  const [v0Responses, monoPage1Results, castMatches] = await Promise.all([
+    wave1V0Promise,
+    wave1MonoPromise,
+    wave1CastPromise
+  ]);
+
+  let bangumiResponded = false;
+  for (const { qIdx, reachable, data } of v0Responses) {
+    if (reachable) bangumiResponded = true;
+    if (!Array.isArray(data)) continue;
+    data.forEach((rawItem, itemIdx) => {
+      if (!rawItem || !rawItem.id) return;
+      upsertCandidate(parseV0CharacterItem(rawItem), qIdx, itemIdx);
+    });
   }
 
-  // 2. 网页搜索回退：https://bgm.tv/mono_search/{keyword}?cat=crt
-  try {
-    const htmlQueries = expandedQueries.slice(0, 2);
-    const htmlResults = [];
-    const seenIds = new Set();
-    for (const kw of htmlQueries) {
-      const searchUrl = `https://bgm.tv/mono_search/${encodeURIComponent(kw)}?cat=crt`;
-      const resp = await requestUrlWithTimeout(
-        {
-          url: searchUrl,
-          method: "GET",
-          headers: {
-            "User-Agent": BGM_USER_AGENT,
-            "Cookie": "chii_searchDateLine=" + Math.floor(Date.now() / 1000)
-          },
-          throw: false
-        },
-        4500
-      );
-      const html = resp?.text || "";
-      const blockRegex = /<div class="light_odd[\s\S]*?<a href="\/character\/(\d+)"[^>]*class="l"[^>]*>([\s\S]*?)<\/a>[\s\S]*?(?=<div class="light_odd|<div class="section_line|$)/gi;
-      let m;
-      while ((m = blockRegex.exec(html)) !== null) {
-        const id = m[1];
-        if (seenIds.has(id)) continue;
-        seenIds.add(id);
-        const rawTitle = htmlToPlainText(m[2]);
-        const block = m[0];
-        const imgMatch = block.match(/<img[^>]+src="([^"]+)"/i);
-        let avatar = imgMatch ? imgMatch[1].trim() : "";
-        if (avatar.startsWith("//")) avatar = "https:" + avatar;
-        avatar = avatar.replace(/\/g\/|\/s\/|\/m\//, "/l/");
-        const tipMatch = block.match(/<div class="prsn_info"[^>]*>([\s\S]*?)<\/div>/i);
-        const infoTip = tipMatch ? htmlToPlainText(tipMatch[1]) : "";
-        const parts = rawTitle.split("/").map((s) => s.trim()).filter(Boolean);
-        htmlResults.push({
-          id,
-          name: parts[parts.length - 1] || rawTitle,
-          nameJp: parts[0] || rawTitle,
-          aliases: [],
-          avatar,
-          summary: "",
-          infoTip
-        });
+  for (const mRes of monoPage1Results) {
+    if (mRes.reachable) bangumiResponded = true;
+    (mRes.items || []).forEach((it, itemIdx) => {
+      upsertCandidate(it, mRes.qIdx, itemIdx);
+    });
+  }
+
+  if (castMatches.length > 0) bangumiResponded = true;
+  castMatches.forEach((it, idx) => {
+    upsertCandidate(it, 0, idx);
+  });
+
+  // Wave 2: 若 mono_search 存在多页（Bangumi 网页版按 ID 升序分页，2015 年后大量热门角色位于第 2~8 页），并发补扫后续页
+  const hasHighPopExactHit = () => {
+    for (const { item } of mergedMap.values()) {
+      const nCn = normalizeCharacterNameForCompare(item.name);
+      const nJp = normalizeCharacterNameForCompare(item.nameJp);
+      const exact = queryNorms.some((qn) => qn && (nCn === qn || nJp === qn));
+      if (exact && ((Number(item.collects) || 0) >= 120 || (Number(item.comments) || 0) >= 50)) {
+        return true;
       }
     }
-    if (htmlResults.length > 0) return htmlResults;
-  } catch (err) {
-    console.warn("[BangumiManager] HTML character search failed:", err);
+    return false;
+  };
+
+  const primaryMono = monoPage1Results[0];
+  if (primaryMono && primaryMono.maxPage > 1 && !hasHighPopExactHit()) {
+    const wave2End = Math.min(primaryMono.maxPage, 6);
+    const wave2Pages = [];
+    for (let p = 2; p <= wave2End; p++) wave2Pages.push(p);
+    const wave2Res = await Promise.all(
+      wave2Pages.map((p) =>
+        fetchBangumiMonoSearchPage(primaryMono.kw, p, primaryMono.host || "")
+          .then((res) => ({ p, items: res.items || [] }))
+          .catch(() => ({ p, items: [] }))
+      )
+    );
+    for (const { p, items } of wave2Res) {
+      items.forEach((it, itemIdx) => upsertCandidate(it, 0, (p - 1) * 10 + itemIdx));
+    }
+
+    // 针对高重名短词（如 10+ 页的「レム」「明日香」），若前 6 页仍未扫到高人气精确命中，再补扫第 7~10 页
+    if (primaryMono.maxPage > 6 && !hasHighPopExactHit()) {
+      const wave3End = Math.min(primaryMono.maxPage, 10);
+      const wave3Pages = [];
+      for (let p = 7; p <= wave3End; p++) wave3Pages.push(p);
+      const wave3Res = await Promise.all(
+        wave3Pages.map((p) =>
+          fetchBangumiMonoSearchPage(primaryMono.kw, p, primaryMono.host || "")
+            .then((res) => ({ p, items: res.items || [] }))
+            .catch(() => ({ p, items: [] }))
+        )
+      );
+      for (const { p, items } of wave3Res) {
+        items.forEach((it, itemIdx) => upsertCandidate(it, 0, (p - 1) * 10 + itemIdx));
+      }
+    }
   }
 
-  // 3. 内置高频角色索引兜底（当外部网络不可达时依然返回匹配角色卡片）
+  // 若第二个扩展关键词也有第 2~3 页且尚未高人气命中，补充翻扫
+  const secondaryMono = monoPage1Results[1];
+  if (secondaryMono && secondaryMono.maxPage > 1 && !hasHighPopExactHit()) {
+    const secEnd = Math.min(secondaryMono.maxPage, 3);
+    const secPages = [];
+    for (let p = 2; p <= secEnd; p++) secPages.push(p);
+    const secRes = await Promise.all(
+      secPages.map((p) =>
+        fetchBangumiMonoSearchPage(secondaryMono.kw, p, secondaryMono.host || "")
+          .then((res) => ({ p, items: res.items || [] }))
+          .catch(() => ({ p, items: [] }))
+      )
+    );
+    for (const { p, items } of secRes) {
+      items.forEach((it, itemIdx) => upsertCandidate(it, 1, (p - 1) * 10 + itemIdx));
+    }
+  }
+
+  if (mergedMap.size > 0) {
+    return Array.from(mergedMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20)
+      .map(({ item }) => {
+        // 在 infoTip 中温和附带收藏/讨论热度标识，帮助用户在同名角色中一眼认出目标
+        const popTag =
+          item.collects >= 10
+            ? `收藏 ${item.collects}`
+            : item.comments >= 10
+            ? `讨论 ${item.comments}`
+            : "";
+        const finalTip = [popTag, item.infoTip].filter(Boolean).join(" · ");
+        return {
+          ...item,
+          infoTip: finalTip
+        };
+      });
+  }
+
+  // 3. 兜底融合：内置高频角色 + 萌娘百科直连候选（当移动端/无代理网络下 Bangumi 暂不可达时，依然能直接搜出「レム / 雷姆 / 晓美焰」等任意角色）
+  const fallbackList = [];
+  const seenFallback = new Set();
   const builtinMatches = BUILTIN_CHARACTER_CANDIDATES.filter((c) => {
     const nCn = normalizeCharacterNameForCompare(c.name);
     const nJp = normalizeCharacterNameForCompare(c.nameJp);
@@ -805,7 +1492,27 @@ async function searchBangumiCharacters(keyword) {
       String(c.id) === q
     );
   });
-  return builtinMatches;
+  for (const b of builtinMatches) {
+    const key = normalizeCharacterNameForCompare(b.name);
+    if (key && !seenFallback.has(key)) {
+      seenFallback.add(key);
+      fallbackList.push({ ...b, source: "builtin" });
+    }
+  }
+
+  const moegirlFallback = await searchMoegirlCharacterFallback(q, expandedQueries);
+  for (const mc of moegirlFallback) {
+    const key = normalizeCharacterNameForCompare(mc.moegirlTitle || mc.name);
+    if (key && !seenFallback.has(key)) {
+      seenFallback.add(key);
+      fallbackList.push(mc);
+    }
+  }
+
+  if (!bangumiResponded) {
+    fallbackList._bangumiUnreachable = true;
+  }
+  return fallbackList;
 }
 
 /**
@@ -2417,6 +3124,7 @@ async function fetchDualSourceCharacterProfile(bgmIdOrInput, manualNameHint = ""
   }
 
   const candidateNames = [
+    options?.moegirlTitle,
     manualNameHint,
     bgmData?.nameCn,
     ...(bgmData?.aliases || []),
@@ -5523,8 +6231,13 @@ function openDuplicateCharacterConfirmModal(plugin, matchInfo, incomingDraft, ca
         text: "✦ 合并更新至既有角色"
       });
       mergeBtn.dataset.dupeAction = "merge";
+      let actionCommitted = false;
       mergeBtn.onclick = async (e) => {
         e.preventDefault();
+        if (actionCommitted) return;
+        actionCommitted = true;
+        mergeBtn.disabled = true;
+        addNewBtn.disabled = true;
         this.close();
         if (typeof callbacks.onMerge === "function") {
           await callbacks.onMerge(existingChar, incomingDraft);
@@ -5538,6 +6251,10 @@ function openDuplicateCharacterConfirmModal(plugin, matchInfo, incomingDraft, ca
       addNewBtn.dataset.dupeAction = "add-new";
       addNewBtn.onclick = async (e) => {
         e.preventDefault();
+        if (actionCommitted) return;
+        actionCommitted = true;
+        mergeBtn.disabled = true;
+        addNewBtn.disabled = true;
         this.close();
         if (typeof callbacks.onAddAsNew === "function") {
           await callbacks.onAddAsNew(incomingDraft);
@@ -5551,6 +6268,8 @@ function openDuplicateCharacterConfirmModal(plugin, matchInfo, incomingDraft, ca
       cancelBtn.dataset.dupeAction = "cancel";
       cancelBtn.onclick = (e) => {
         e.preventDefault();
+        if (actionCommitted) return;
+        actionCommitted = true;
         this.close();
         if (typeof callbacks.onCancel === "function") {
           callbacks.onCancel();
@@ -5810,9 +6529,10 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
       });
   }
 
-  // 顶部栏：典藏统计 + 搜索 + 收录新角色按钮
-  const headerBar = container.createDiv("curator-char-header-bar");
-  const titleSide = headerBar.createDiv("curator-char-header-left");
+  // 顶部栏：上排「标题 + 右侧操作按钮」，下排左置独立筛选栏（彻底隔离本地筛选与「+ 录入角色」，并在侧边栏任意拖拽宽度下零错位）
+  const headerBar = container.createDiv("curator-char-header-bar bm-hall-header-stack");
+  const headerTop = headerBar.createDiv("bm-hall-header-top");
+  const titleSide = headerTop.createDiv("curator-char-header-left");
   titleSide.createSpan({
     cls: "curator-char-header-title",
     text: options.compactAlmanacMode
@@ -5824,20 +6544,7 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     text: `已收录 ${characters.length} 位角色 · 汇总 Bangumi 角色履历与萌娘百科萌点标签`
   });
 
-  const actionSide = headerBar.createDiv("curator-char-header-actions");
-  if (!options.compactAlmanacMode) {
-    const searchInput = actionSide.createEl("input", {
-      type: "search",
-      cls: "curator-input curator-char-search-input",
-      placeholder: "筛选已藏角色 / 萌点 / 声优 / 出演作品…"
-    });
-    searchInput.value = uiState.searchQuery || "";
-    searchInput.oninput = () => {
-      uiState.searchQuery = searchInput.value;
-      renderGalleryOnly();
-    };
-  }
-
+  const actionSide = headerTop.createDiv("curator-char-header-actions");
   const addCharBtn = actionSide.createEl("button", {
     cls: `curator-btn ${uiState.showAddDrawer ? "is-active" : "is-primary"}`
   });
@@ -5850,8 +6557,43 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
   addCharBtn.onclick = (e) => {
     e.preventDefault();
     uiState.showAddDrawer = !uiState.showAddDrawer;
+    if (!uiState.showAddDrawer) {
+      uiState.addDrawer = null;
+    }
     renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
   };
+
+  if (!options.compactAlmanacMode && (characters.length > 0 || uiState.searchQuery)) {
+    const filterRow = headerBar.createDiv("bm-hall-filter-row");
+    const filterWrap = filterRow.createDiv("bm-hall-filter-wrap");
+    const filterIcon = filterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+    filterIcon.appendChild(v07Core.icon("search", 14));
+    const searchInput = filterWrap.createEl("input", {
+      type: "search",
+      cls: "curator-input curator-char-search-input bm-hall-filter-input",
+      placeholder: "筛选已藏角色 / 萌点 / 声优 / 作品…"
+    });
+    searchInput.setAttribute("aria-label", "筛选已藏角色、萌点、声优或出演作品");
+    searchInput.value = uiState.searchQuery || "";
+    const clearBtn = filterWrap.createEl("button", {
+      cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+      text: "×",
+      attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+    });
+    searchInput.oninput = () => {
+      uiState.searchQuery = searchInput.value;
+      clearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+      renderGalleryOnly();
+    };
+    clearBtn.onclick = (e) => {
+      e.preventDefault();
+      uiState.searchQuery = "";
+      searchInput.value = "";
+      clearBtn.classList.remove("is-visible");
+      searchInput.focus();
+      renderGalleryOnly();
+    };
+  }
 
   // 角色寻访与档案收录台抽屉
   if (uiState.showAddDrawer) {
@@ -5876,18 +6618,29 @@ function _renderCharacterArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     v07Core.setBtnIconLabel(presetRoxyBtn, "sparkles", "一键收录示例：洛琪希·米格路迪亚", 14);
     presetRoxyBtn.onclick = async (e) => {
       e.preventDefault();
-      const roxy = createPresetRoxyCharacterRecord();
-      roxy.localAvatar = await saveCharacterAvatarLocally(
-        plugin.app,
-        plugin.settings.characterImageFolder || plugin.settings.coverFolder,
-        roxy.bgmId,
-        roxy.avatar
-      );
-      plugin.settings.characterCollection.push(roxy);
-      await plugin.saveSettings();
-      if (Notice) new Notice("已将「洛琪希·米格路迪亚」收入角色典藏！");
-      renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
-      await plugin.refreshOpenDashboardViews();
+      if (presetRoxyBtn.disabled) return;
+      presetRoxyBtn.disabled = true;
+      v07Core.setBtnIconLabel(presetRoxyBtn, "sparkles", "正在收录洛琪希…", 14);
+      try {
+        const roxy = createPresetRoxyCharacterRecord();
+        roxy.localAvatar = await saveCharacterAvatarLocally(
+          plugin.app,
+          plugin.settings.characterImageFolder || plugin.settings.coverFolder,
+          roxy.bgmId,
+          roxy.avatar
+        );
+        if (!findSimilarCharactersInCollection(roxy, plugin.settings.characterCollection || []).length) {
+          plugin.settings.characterCollection.push(roxy);
+          await plugin.saveSettings();
+        }
+        if (Notice) new Notice("已将「洛琪希·米格路迪亚」收入角色典藏！");
+        renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
+        await plugin.refreshOpenDashboardViews();
+      } catch (err) {
+        presetRoxyBtn.disabled = false;
+        v07Core.setBtnIconLabel(presetRoxyBtn, "sparkles", "一键收录示例：洛琪希·米格路迪亚", 14);
+        if (Notice) new Notice(`收录示例失败：${err?.message || err}`);
+      }
     };
 
     const openSearchBtn = quickRow.createEl("button", {
@@ -5982,9 +6735,64 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
 
   const resultsArea = drawer.createDiv("curator-char-search-results");
   const previewArea = drawer.createDiv("curator-char-preview-area");
+  const queueHost = previewArea.createDiv("curator-char-queue-host");
+  const editorHost = previewArea.createDiv("curator-char-editor-host");
 
-  // 持久化保存（合并或新增）角色的统一落盘助手
-  const commitSaveCharacterRecord = async (finalRecord, mergeTargetChar = null, shouldCreateNote = true) => {
+  // 持久化收录台会话状态：防止后台同步/移动端启动对账刷新整页时意外清空正在输入的检索词、搜索结果或待收录队列
+  const uiState = plugin.__characterArchiveUiState || (plugin.__characterArchiveUiState = {});
+  if (!uiState.addDrawer || typeof uiState.addDrawer !== "object") {
+    uiState.addDrawer = {
+      query: "",
+      results: null,
+      bangumiUnreachable: false,
+      isResultsFolded: false,
+      isSearching: false,
+      draftQueue: [],
+      activeQueueKey: "",
+      searchSeq: 0
+    };
+  }
+  const drawerState = uiState.addDrawer;
+  if (!Array.isArray(drawerState.draftQueue)) drawerState.draftQueue = [];
+
+  kwInput.value = drawerState.query || "";
+  kwInput.oninput = () => {
+    drawerState.query = kwInput.value;
+  };
+
+  // 多角色待收录队列：彻底根治快速连点多个候选角色「+ 收录」时后者覆盖前者导致漏收的问题
+  const draftQueue = drawerState.draftQueue;
+  let flushActiveFormToDraft = null;
+  let syncActiveEditorSubmitButtons = null;
+  let syncCurrentSearchCardsUi = null;
+  let triggerBatchSaveAll = null;
+
+  const getActiveQueueEntry = () =>
+    draftQueue.find((e) => e.key === drawerState.activeQueueKey) || null;
+
+  const clearDrawerSessionState = () => {
+    uiState.showAddDrawer = false;
+    uiState.addDrawer = null;
+  };
+
+  const syncAllQueueChrome = () => {
+    renderQueueStrip();
+    if (typeof syncActiveEditorSubmitButtons === "function") {
+      syncActiveEditorSubmitButtons();
+    }
+    if (typeof syncCurrentSearchCardsUi === "function") {
+      syncCurrentSearchCardsUi();
+    }
+  };
+
+  // 持久化保存（合并或新增）角色的统一落盘助手（支持批量保存时延迟整页刷新）
+  const commitSaveCharacterRecord = async (
+    finalRecord,
+    mergeTargetChar = null,
+    shouldCreateNote = true,
+    saveOpts = {}
+  ) => {
+    const { deferRefresh = false, keepDrawerOpen = false, silent = false } = saveOpts;
     if (finalRecord.avatar && !finalRecord.localAvatar) {
       const savedAvatar = await saveCharacterAvatarLocally(
         plugin.app,
@@ -6031,23 +6839,144 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
     plugin.settings.characterCollection = list;
     await plugin.saveSettings();
 
-    if (plugin.__characterArchiveUiState) {
-      plugin.__characterArchiveUiState.showAddDrawer = false;
-    }
-    if (Notice) {
+    if (!silent && Notice) {
       new Notice(
         mergeTargetChar
           ? `已将新数据合并更新至角色「${savedRecord.name}」！`
           : `已将《${savedRecord.name}》收入角色典藏！`
       );
     }
-    renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
-    await plugin.refreshOpenDashboardViews();
+
+    if (!deferRefresh) {
+      if (!keepDrawerOpen) {
+        clearDrawerSessionState();
+      }
+      renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
+      await plugin.refreshOpenDashboardViews();
+    }
+    return savedRecord;
   };
 
-  const openDraftEditor = (profileDraft, forceNewMode = false) => {
-    previewArea.empty();
-    const editorCard = previewArea.createDiv("curator-char-draft-editor");
+  const removeQueueEntry = (key, opts = {}) => {
+    const idx = draftQueue.findIndex((e) => e.key === key);
+    if (idx < 0) return;
+    draftQueue.splice(idx, 1);
+    if (drawerState.activeQueueKey === key) {
+      const nextReady = draftQueue.find((e) => e.status === "ready");
+      const nextAny = draftQueue[Math.min(idx, draftQueue.length - 1)] || draftQueue[0] || null;
+      drawerState.activeQueueKey = (nextReady || nextAny)?.key || "";
+      if (!opts.skipRender) {
+        renderActiveEditorArea({ scrollIntoView: false });
+      }
+    }
+    if (!opts.skipRender) {
+      syncAllQueueChrome();
+    }
+  };
+
+  const renderQueueStrip = () => {
+    queueHost.empty();
+    if (draftQueue.length <= 1) return;
+
+    const strip = queueHost.createDiv("curator-char-queue-bar");
+    const readyCount = draftQueue.filter((e) => e.status === "ready").length;
+    const loadingCount = draftQueue.filter((e) => e.status === "loading").length;
+
+    strip.createSpan({
+      cls: "curator-char-queue-label",
+      text:
+        loadingCount > 0
+          ? `待收录队列（${readyCount} 位就绪 · ${loadingCount} 位寻访中）`
+          : `待收录队列（共 ${draftQueue.length} 位 · 点名可切换核对）`
+    });
+
+    const tabsWrap = strip.createDiv("curator-char-queue-chips");
+    draftQueue.forEach((entry) => {
+      const isAct = entry.key === drawerState.activeQueueKey;
+      const chip = tabsWrap.createDiv(
+        `curator-char-queue-chip ${isAct ? "is-active" : ""} is-${entry.status}`
+      );
+      const mainBtn = chip.createEl("button", {
+        cls: "curator-char-queue-chip-btn",
+        attr: { type: "button" }
+      });
+      const labelName = entry.draft?.name || entry.displayName || "角色";
+      const statusSuffix =
+        entry.status === "loading"
+          ? " · 寻访中…"
+          : entry.status === "error"
+          ? " · 获取失败"
+          : "";
+      mainBtn.textContent = `${labelName}${statusSuffix}`;
+      mainBtn.onclick = (e) => {
+        e.preventDefault();
+        if (drawerState.activeQueueKey === entry.key) return;
+        if (typeof flushActiveFormToDraft === "function") {
+          flushActiveFormToDraft();
+        }
+        drawerState.activeQueueKey = entry.key;
+        renderActiveEditorArea({ scrollIntoView: false });
+        syncAllQueueChrome();
+      };
+
+      const closeBtn = chip.createEl("button", {
+        cls: "curator-char-queue-chip-remove",
+        text: "×",
+        attr: { type: "button", title: `从待收录队列移出「${labelName}」` }
+      });
+      closeBtn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        removeQueueEntry(entry.key);
+      };
+    });
+
+    if (readyCount >= 2) {
+      const quickBatchBtn = strip.createEl("button", {
+        cls: "curator-btn is-primary curator-char-queue-batch-btn",
+        text: `✦ 全部收入典藏（${readyCount} 位）`,
+        attr: { type: "button" }
+      });
+      quickBatchBtn.onclick = async (e) => {
+        e.preventDefault();
+        if (typeof triggerBatchSaveAll === "function") {
+          quickBatchBtn.disabled = true;
+          quickBatchBtn.textContent = "正在批量收录…";
+          await triggerBatchSaveAll();
+        }
+      };
+    }
+  };
+
+  const renderActiveEditorArea = (renderOpts = {}) => {
+    flushActiveFormToDraft = null;
+    syncActiveEditorSubmitButtons = null;
+    editorHost.empty();
+    const entry = getActiveQueueEntry();
+    if (!entry) return;
+
+    if (entry.status === "loading") {
+      const waitBox = editorHost.createDiv("curator-char-draft-editor curator-char-draft-loading");
+      waitBox.createDiv({
+        cls: "curator-char-draft-heading",
+        text: `正在寻访角色档案与萌娘百科词条：《${entry.displayName}》…`
+      });
+      return;
+    }
+    if (entry.status === "error" || !entry.draft) {
+      const errBox = editorHost.createDiv("curator-char-draft-editor");
+      errBox.createDiv({
+        cls: "curator-char-draft-heading",
+        text: `未能获取《${entry.displayName}》的完整档案（${entry.errorMsg || "网络异常"}）`
+      });
+      return;
+    }
+    openDraftEditor(entry.draft, entry.forceNewMode, entry, renderOpts);
+  };
+
+  const openDraftEditor = (profileDraft, forceNewMode = false, queueEntry = null, renderOpts = {}) => {
+    editorHost.empty();
+    const editorCard = editorHost.createDiv("curator-char-draft-editor");
     editorCard.createDiv({
       cls: "curator-char-draft-heading",
       text: `✦ 确认角色档案与萌点标签：《${profileDraft.name}》`
@@ -6293,6 +7222,55 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
     });
     commentInput.value = profileDraft.personalComment || "";
 
+    const collectRecordFromForm = () => {
+      const finalName = nameInput.value.trim() || profileDraft.name || "未命名角色";
+      let rawMoeText = moeInput.value;
+      if (rawMoeText.includes("<div") || rawMoeText.includes("<table") || rawMoeText.includes("moe-infobox")) {
+        const parsedInline = parseMoegirlInfoboxHtml(rawMoeText);
+        if (parsedInline.moePoints.length > 0) {
+          rawMoeText = parsedInline.moePoints.join("、");
+        }
+      }
+      const finalMoePoints = Array.from(
+        new Set(
+          rawMoeText
+            .split(/[、，,\/；;|\n]+/)
+            .map((s) => s.trim())
+            .filter((s) => s && !s.includes("<") && !s.includes(">"))
+        )
+      );
+      const favNum = Number(scoreInput.value);
+      return {
+        ...profileDraft,
+        name: finalName,
+        nameJp: jpInput.value.trim(),
+        favoriteScore: Number.isFinite(favNum)
+          ? Math.max(1, Math.min(10, Math.round(favNum * 10) / 10))
+          : 9.0,
+        height: heightInput.value.trim() || profileDraft.height || "",
+        hairColor: hairInput.value.trim(),
+        eyeColor: eyeInput.value.trim(),
+        cv: cvInput.value.trim(),
+        birthday: bdayInput.value.trim(),
+        appearances: appInput.value
+          .split("/")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        avatar: avatarInput.value.trim(),
+        moePoints: finalMoePoints,
+        personalComment: commentInput.value.trim(),
+        moegirlUrl:
+          profileDraft.moegirlUrl && profileDraft.moegirlUrl.includes("moegirl.uk")
+            ? profileDraft.moegirlUrl
+            : `https://moegirl.uk/${encodeURIComponent(finalName)}`
+      };
+    };
+
+    flushActiveFormToDraft = () => {
+      if (!queueEntry || !editorCard.isConnected) return;
+      queueEntry.draft = collectRecordFromForm();
+    };
+
     const submitRow = editorCard.createDiv("curator-char-draft-actions");
     const autoCreateNoteCheckLabel = submitRow.createEl("label", {
       cls: "curator-rs-enter-toggle"
@@ -6305,108 +7283,449 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
       text: "同时生成角色典藏 Markdown 笔记"
     });
 
-    const saveBtn = submitRow.createEl("button", {
+    const submitBtnsWrap = submitRow.createDiv("curator-char-draft-submit-btns");
+    const saveBtn = submitBtnsWrap.createEl("button", {
       cls: "curator-btn is-primary is-save-ready-pulse",
       text: "✦ 收入角色典藏"
     });
-    requestAnimationFrame(() => {
-      if (editorCard.isConnected && typeof editorCard.scrollIntoView === "function") {
-        editorCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }
+    const batchSaveBtn = submitBtnsWrap.createEl("button", {
+      cls: "curator-btn is-primary is-save-ready-pulse is-hidden",
+      text: "✦ 全部收入典藏"
     });
+    batchSaveBtn.hidden = true;
+
+    const updateSubmitButtonsLayout = () => {
+      if (!submitBtnsWrap.isConnected) return;
+      const readyList = draftQueue.filter((e) => e.status === "ready");
+      const hasMulti = draftQueue.length > 1 && readyList.length >= 2;
+      batchSaveBtn.hidden = !hasMulti;
+      batchSaveBtn.classList.toggle("is-hidden", !hasMulti);
+      if (hasMulti) {
+        batchSaveBtn.textContent = `✦ 全部收入典藏（${readyList.length} 位）`;
+        saveBtn.className = "curator-btn";
+        saveBtn.textContent = "仅收录当前这位";
+      } else {
+        saveBtn.className = "curator-btn is-primary is-save-ready-pulse";
+        saveBtn.textContent = "✦ 收入角色典藏";
+      }
+    };
+    syncActiveEditorSubmitButtons = updateSubmitButtonsLayout;
+    updateSubmitButtonsLayout();
+
+    if (renderOpts.scrollIntoView !== false) {
+      requestAnimationFrame(() => {
+        if (editorCard.isConnected && typeof editorCard.scrollIntoView === "function") {
+          editorCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    }
+
+    const afterSingleSaved = async (savedEntryKey) => {
+      if (savedEntryKey) {
+        removeQueueEntry(savedEntryKey, { skipRender: true });
+      }
+      if (draftQueue.length > 0) {
+        renderActiveEditorArea({ scrollIntoView: false });
+        syncAllQueueChrome();
+        return;
+      }
+      clearDrawerSessionState();
+      renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
+      await plugin.refreshOpenDashboardViews();
+    };
+
     saveBtn.onclick = async (ev) => {
       ev.preventDefault();
+      if (saveBtn.disabled) return;
       saveBtn.disabled = true;
+      batchSaveBtn.disabled = true;
       saveBtn.textContent = "正在保存…";
       try {
-        const finalName = nameInput.value.trim() || profileDraft.name || "未命名角色";
-        let rawMoeText = moeInput.value;
-        if (rawMoeText.includes("<div") || rawMoeText.includes("<table") || rawMoeText.includes("moe-infobox")) {
-          const parsedInline = parseMoegirlInfoboxHtml(rawMoeText);
-          if (parsedInline.moePoints.length > 0) {
-            rawMoeText = parsedInline.moePoints.join("、");
-          }
-        }
-        const finalMoePoints = Array.from(
-          new Set(
-            rawMoeText
-              .split(/[、，,\/；;|\n]+/)
-              .map((s) => s.trim())
-              .filter((s) => s && !s.includes("<") && !s.includes(">"))
-          )
-        );
-        const favNum = Number(scoreInput.value);
-        const finalRecord = {
-          ...profileDraft,
-          name: finalName,
-          nameJp: jpInput.value.trim(),
-          favoriteScore: Number.isFinite(favNum)
-            ? Math.max(1, Math.min(10, Math.round(favNum * 10) / 10))
-            : 9.0,
-          height: heightInput.value.trim() || profileDraft.height || "",
-          hairColor: hairInput.value.trim(),
-          eyeColor: eyeInput.value.trim(),
-          cv: cvInput.value.trim(),
-          birthday: bdayInput.value.trim(),
-          appearances: appInput.value
-            .split("/")
-            .map((s) => s.trim())
-            .filter(Boolean),
-          avatar: avatarInput.value.trim(),
-          moePoints: finalMoePoints,
-          personalComment: commentInput.value.trim(),
-          moegirlUrl:
-            profileDraft.moegirlUrl && profileDraft.moegirlUrl.includes("moegirl.uk")
-              ? profileDraft.moegirlUrl
-              : `https://moegirl.uk/${encodeURIComponent(finalName)}`
-        };
-
-        // 执行多维查重检测
+        const finalRecord = collectRecordFromForm();
         const dupes = findSimilarCharactersInCollection(
           finalRecord,
           plugin.settings.characterCollection || []
         );
         if (dupes.length > 0 && !forceNewMode) {
           saveBtn.disabled = false;
-          saveBtn.textContent = "✦ 收入角色典藏";
+          batchSaveBtn.disabled = false;
+          updateSubmitButtonsLayout();
           openDuplicateCharacterConfirmModal(plugin, dupes[0], finalRecord, {
             onMerge: async (existingChar, incoming) => {
-              await commitSaveCharacterRecord(incoming, existingChar, autoNoteCheckbox.checked);
+              await commitSaveCharacterRecord(incoming, existingChar, autoNoteCheckbox.checked, {
+                deferRefresh: true
+              });
+              await afterSingleSaved(queueEntry?.key);
             },
             onAddAsNew: async (incoming) => {
-              await commitSaveCharacterRecord(incoming, null, autoNoteCheckbox.checked);
+              await commitSaveCharacterRecord(incoming, null, autoNoteCheckbox.checked, {
+                deferRefresh: true
+              });
+              await afterSingleSaved(queueEntry?.key);
             }
           });
           return;
         }
 
-        await commitSaveCharacterRecord(finalRecord, null, autoNoteCheckbox.checked);
+        await commitSaveCharacterRecord(finalRecord, null, autoNoteCheckbox.checked, {
+          deferRefresh: true
+        });
+        await afterSingleSaved(queueEntry?.key);
       } catch (err) {
         saveBtn.disabled = false;
-        saveBtn.textContent = "✦ 收入角色典藏";
+        batchSaveBtn.disabled = false;
+        updateSubmitButtonsLayout();
         if (Notice) new Notice(`保存角色失败：${err.message}`);
       }
     };
+
+    const runBatchSaveAll = async () => {
+      if (batchSaveBtn.disabled) return;
+      if (typeof flushActiveFormToDraft === "function") {
+        flushActiveFormToDraft();
+      }
+      const readyEntries = draftQueue.filter((e) => e.status === "ready" && e.draft);
+      if (readyEntries.length === 0) return;
+
+      batchSaveBtn.disabled = true;
+      saveBtn.disabled = true;
+      const shouldCreateNote = autoNoteCheckbox.checked;
+      const savedNames = [];
+      const skippedDupeEntries = [];
+
+      try {
+        for (let i = 0; i < readyEntries.length; i++) {
+          const ent = readyEntries[i];
+          batchSaveBtn.textContent = `正在批量收录 (${i + 1}/${readyEntries.length})…`;
+          const rec = { ...ent.draft };
+          const dupes = findSimilarCharactersInCollection(
+            rec,
+            plugin.settings.characterCollection || []
+          );
+          if (dupes.length > 0 && !ent.forceNewMode) {
+            skippedDupeEntries.push(ent);
+            continue;
+          }
+          const savedRec = await commitSaveCharacterRecord(rec, null, shouldCreateNote, {
+            deferRefresh: true,
+            keepDrawerOpen: true,
+            silent: true
+          });
+          savedNames.push(savedRec.name);
+          removeQueueEntry(ent.key, { skipRender: true });
+        }
+
+        if (savedNames.length > 0 && Notice) {
+          new Notice(`已批量收入角色典藏（${savedNames.length} 位）：${savedNames.join("、")}！`, 4800);
+        }
+        if (skippedDupeEntries.length > 0 && Notice) {
+          new Notice(
+            `另有 ${skippedDupeEntries.length} 位角色与馆藏重名，已留在待收录队列供你确认是否合并。`,
+            4800
+          );
+        }
+
+        if (draftQueue.length > 0) {
+          drawerState.activeQueueKey = (skippedDupeEntries[0] || draftQueue[0]).key;
+          renderActiveEditorArea({ scrollIntoView: false });
+          syncAllQueueChrome();
+          await plugin.refreshOpenDashboardViews();
+        } else {
+          clearDrawerSessionState();
+          renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
+          await plugin.refreshOpenDashboardViews();
+        }
+      } catch (err) {
+        batchSaveBtn.disabled = false;
+        saveBtn.disabled = false;
+        updateSubmitButtonsLayout();
+        if (Notice) new Notice(`批量收录失败：${err.message}`);
+      }
+    };
+
+    triggerBatchSaveAll = runBatchSaveAll;
+    batchSaveBtn.onclick = async (ev) => {
+      ev.preventDefault();
+      await runBatchSaveAll();
+    };
   };
 
-  // 处理点击「+ 收录」或「✦ 按名称直接收录」时的预查重与编辑器开启流
-  const handleCandidatePickWithDupeCheck = async (draft) => {
-    const dupes = findSimilarCharactersInCollection(
-      draft,
-      plugin.settings.characterCollection || []
-    );
-    if (dupes.length > 0) {
-      openDuplicateCharacterConfirmModal(plugin, dupes[0], draft, {
-        onMerge: async (existingChar, incoming) => {
-          await commitSaveCharacterRecord(incoming, existingChar, true);
-        },
-        onAddAsNew: async (incoming) => {
-          openDraftEditor(incoming, true);
-        },
-        onCancel: () => {}
+  const notifyMountedDrawer = (kind, scrollIntoView = false) => {
+    if (kind === "queue" && typeof drawerState._onQueueUpdate === "function") {
+      drawerState._onQueueUpdate(scrollIntoView);
+    } else if (kind === "search" && typeof drawerState._onSearchUpdate === "function") {
+      drawerState._onSearchUpdate();
+    }
+  };
+
+  // 将选中的候选角色加入待收录队列（多选连点绝不互相覆盖）
+  const enqueueCharacterPick = async ({
+    key,
+    bgmId = "",
+    displayName = "",
+    moegirlTitle = "",
+    cardIdx = -1
+  }) => {
+    const existing = draftQueue.find((e) => e.key === key);
+    if (existing) {
+      if (typeof flushActiveFormToDraft === "function") {
+        flushActiveFormToDraft();
+      }
+      drawerState.activeQueueKey = existing.key;
+      renderActiveEditorArea({ scrollIntoView: true });
+      syncAllQueueChrome();
+      return;
+    }
+
+    const entry = {
+      key,
+      bgmId,
+      moegirlTitle: moegirlTitle || "",
+      displayName: displayName || "新角色",
+      cardIdx,
+      status: "loading",
+      draft: null,
+      errorMsg: "",
+      forceNewMode: false
+    };
+    draftQueue.push(entry);
+
+    // 仅当当前没有已就绪的可编辑表单时，才把焦点切到新入队项；已有正在编辑的角色时绝不打断/覆盖！
+    const curActive = getActiveQueueEntry();
+    const shouldFocusNew = !curActive || curActive.status !== "ready";
+    if (shouldFocusNew) {
+      drawerState.activeQueueKey = entry.key;
+      renderActiveEditorArea({ scrollIntoView: draftQueue.length === 1 });
+    }
+    syncAllQueueChrome();
+
+    try {
+      const draft = await fetchDualSourceCharacterProfile(
+        bgmId,
+        displayName,
+        moegirlTitle ? { moegirlTitle } : {}
+      );
+      if (!draftQueue.includes(entry)) return;
+      entry.draft = draft;
+      entry.displayName = draft.name || entry.displayName;
+      entry.status = "ready";
+
+      // 仅当队列中只有这 1 位角色且与馆藏重名时，沿用温和弹窗提示；多角色连点时直接在队列表单内展示温和横幅，避免叠加弹出多个阻塞窗口
+      const dupes = findSimilarCharactersInCollection(
+        draft,
+        plugin.settings.characterCollection || []
+      );
+      if (draftQueue.length === 1 && dupes.length > 0) {
+        notifyMountedDrawer("queue", false);
+        openDuplicateCharacterConfirmModal(plugin, dupes[0], draft, {
+          onMerge: async (existingChar, incoming) => {
+            await commitSaveCharacterRecord(incoming, existingChar, true, { deferRefresh: true });
+            removeQueueEntry(entry.key, { skipRender: true });
+            if (draftQueue.length > 0) {
+              notifyMountedDrawer("queue", false);
+            } else {
+              clearDrawerSessionState();
+              renderCharacterArchiveWorkspace(plugin, container, vaultAnimeItems, options);
+              await plugin.refreshOpenDashboardViews();
+            }
+          },
+          onAddAsNew: async (incoming) => {
+            entry.forceNewMode = true;
+            entry.draft = incoming;
+            drawerState.activeQueueKey = entry.key;
+            notifyMountedDrawer("queue", true);
+          },
+          onCancel: () => {
+            removeQueueEntry(entry.key);
+          }
+        });
+        return;
+      }
+
+      if (drawerState.activeQueueKey === entry.key || !getActiveQueueEntry()) {
+        drawerState.activeQueueKey = entry.key;
+        notifyMountedDrawer("queue", draftQueue.length === 1);
+      } else {
+        notifyMountedDrawer("queue", false);
+      }
+    } catch (err) {
+      if (!draftQueue.includes(entry)) return;
+      entry.status = "error";
+      entry.errorMsg = err?.message || "网络异常";
+      notifyMountedDrawer("queue", false);
+    }
+  };
+
+  const renderSearchResultsList = (list, bangumiUnreachable = false) => {
+    resultsArea.empty();
+    syncCurrentSearchCardsUi = null;
+    if (!Array.isArray(list)) return;
+    if (list.length === 0) {
+      resultsArea.createDiv({
+        cls: "curator-rs-empty",
+        text: bangumiUnreachable
+          ? "当前设备暂未连上 Bangumi（请检查网络或代理），可稍后重试或点击右侧「✦ 按名称直接收录」。"
+          : "未在 Bangumi 检索到同名角色，可点击右侧「✦ 按名称直接收录」。"
       });
-    } else {
-      openDraftEditor(draft, false);
+      return;
+    }
+
+    if (bangumiUnreachable) {
+      resultsArea.createDiv({
+        cls: "curator-char-offline-banner",
+        text: "当前设备暂未连通 Bangumi，已自动从萌娘百科拉取直连候选；开启代理后可同时检索 Bangumi 编号与人气排序。"
+      });
+    }
+
+    const grid = resultsArea.createDiv("curator-char-search-grid");
+    const foldHost = resultsArea.createDiv("curator-char-search-fold-host");
+    const searchCards = [];
+
+    const syncCharFoldView = () => {
+      foldHost.empty();
+      const queuedKeys = new Set(draftQueue.map((e) => e.key));
+      const hasAnyLoading = draftQueue.some((e) => e.status === "loading");
+      const activeInThisGridCount = searchCards.filter((c) => queuedKeys.has(c.key)).length;
+      // 只要存在其他角色仍在寻访中，绝不折叠列表，方便用户继续连点；且折叠后始终保留所有已选入队列的卡片
+      const effectiveFold = Boolean(drawerState.isResultsFolded) && !hasAnyLoading && activeInThisGridCount > 0;
+
+      searchCards.forEach(({ card, btn, key, item }) => {
+        const qEntry = draftQueue.find((e) => e.key === key);
+        const nowInVault = findSimilarCharactersInCollection(
+          { bgmId: item.id, name: item.name, nameJp: item.nameJp },
+          plugin.settings.characterCollection || []
+        ).length > 0;
+        const isPicked = Boolean(qEntry);
+        card.classList.toggle("is-picked", isPicked);
+        card.classList.toggle("is-already-collected", nowInVault);
+        card.style.display = effectiveFold && !isPicked ? "none" : "";
+
+        if (qEntry) {
+          if (qEntry.status === "loading") {
+            btn.disabled = true;
+            btn.textContent = "寻访中…";
+          } else if (qEntry.status === "ready") {
+            btn.disabled = false;
+            btn.textContent = qEntry.key === drawerState.activeQueueKey ? "✓ 核对中" : "✓ 待收录";
+          } else {
+            btn.disabled = false;
+            btn.textContent = "重试收录";
+          }
+        } else {
+          btn.disabled = false;
+          btn.textContent = nowInVault ? "+ 再次收录" : "+ 收录";
+        }
+      });
+
+      grid.classList.toggle("is-folded", effectiveFold && activeInThisGridCount === 1);
+      const hiddenCount = searchCards.length - activeInThisGridCount;
+      if (activeInThisGridCount > 0 && hiddenCount > 0 && !hasAnyLoading) {
+        const toggleBtn = foldHost.createEl("button", {
+          cls: "bm7-gsrc-stack-handle",
+          text: effectiveFold
+            ? `已选 ${activeInThisGridCount} 位 · 折叠其余 ${hiddenCount} 位候选角色 · 展开继续选 ▾`
+            : `收起其余 ${hiddenCount} 位候选角色 ▴`
+        });
+        toggleBtn.type = "button";
+        toggleBtn.onclick = () => {
+          drawerState.isResultsFolded = !drawerState.isResultsFolded;
+          syncCharFoldView();
+        };
+      }
+    };
+
+    syncCurrentSearchCardsUi = syncCharFoldView;
+
+    list.forEach((item, idx) => {
+      const cardKey = item.id
+        ? `bgm:${item.id}`
+        : `moe:${String(item.moegirlTitle || item.name || idx).toLowerCase()}`;
+      const similarInVault = findSimilarCharactersInCollection(
+        { bgmId: item.id, name: item.name, nameJp: item.nameJp },
+        plugin.settings.characterCollection || []
+      );
+      const card = grid.createDiv(
+        `curator-char-search-card ${similarInVault.length > 0 ? "is-already-collected" : ""}`
+      );
+
+      const ava = card.createDiv("curator-char-search-ava");
+      const candAvaSrc = resolveCharacterAvatarSrc(plugin, {
+        bgmId: item.id,
+        name: item.name,
+        nameJp: item.nameJp,
+        avatar: item.avatar
+      });
+      if (candAvaSrc) {
+        const img = ava.createEl("img", {
+          attr: { src: candAvaSrc, alt: item.name }
+        });
+        img.src = candAvaSrc;
+        img.alt = item.name;
+        img.loading = "lazy";
+        img.onerror = () => {
+          img.remove();
+          ava.setText((item.name || "角").slice(0, 1));
+        };
+      } else {
+        ava.setText((item.name || "角").slice(0, 1));
+      }
+
+      const meta = card.createDiv("curator-char-search-meta");
+      const nameRow = meta.createDiv("curator-char-search-name-row");
+      nameRow.createSpan({
+        cls: "curator-char-search-name",
+        text: item.name
+      });
+      if (similarInVault.length > 0) {
+        nameRow.createSpan({
+          cls: "curator-char-search-dupe-tag",
+          text: "已在馆藏"
+        });
+      }
+      if (item.nameJp && item.nameJp !== item.name) {
+        meta.createDiv({ cls: "curator-char-search-jp", text: item.nameJp });
+      }
+      const subTip = [item.infoTip, item.summary].filter(Boolean).join(" · ");
+      if (subTip) {
+        meta.createDiv({
+          cls: "curator-char-search-tip",
+          text: subTip
+        });
+      }
+
+      const pickBtn = card.createEl("button", {
+        cls: "curator-dl-mini-btn is-accent curator-char-pick-btn",
+        text: "+ 收录"
+      });
+      pickBtn.title = `收录「${item.name}」并同步萌娘百科萌点档案（支持连续点选多位角色一起收录）`;
+      searchCards.push({ card, btn: pickBtn, key: cardKey, item });
+
+      pickBtn.onclick = async (ev) => {
+        ev.preventDefault();
+        await enqueueCharacterPick({
+          key: cardKey,
+          bgmId: item.id || "",
+          displayName: item.name,
+          moegirlTitle: item.moegirlTitle || "",
+          cardIdx: idx
+        });
+      };
+    });
+
+    syncCharFoldView();
+  };
+
+  drawerState._onQueueUpdate = (scrollIntoView = false) => {
+    if (!drawer.isConnected) return;
+    renderActiveEditorArea({ scrollIntoView });
+    syncAllQueueChrome();
+  };
+  drawerState._onSearchUpdate = () => {
+    if (!drawer.isConnected) return;
+    searchBtn.disabled = Boolean(drawerState.isSearching);
+    searchBtn.textContent = drawerState.isSearching ? "正在搜索…" : "搜索 Bangumi 角色";
+    if (!drawerState.isSearching && drawerState.results !== null) {
+      renderSearchResultsList(drawerState.results, Boolean(drawerState.bangumiUnreachable));
     }
   };
 
@@ -6416,128 +7735,26 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
       if (Notice) new Notice("请输入角色名称或 Bangumi 角色 ID");
       return;
     }
+    drawerState.query = q;
+    const mySeq = ++drawerState.searchSeq;
+    drawerState.isSearching = true;
+    drawerState.isResultsFolded = false;
     searchBtn.disabled = true;
     searchBtn.textContent = "正在搜索…";
     resultsArea.empty();
-    previewArea.empty();
+    syncCurrentSearchCardsUi = null;
     try {
       const list = await searchBangumiCharacters(q);
-      if (list.length === 0) {
-        resultsArea.createDiv({
-          cls: "curator-rs-empty",
-          text: "未在 Bangumi 检索到同名角色，可点击右侧「✦ 按名称直接收录」。"
-        });
-        return;
-      }
-      const grid = resultsArea.createDiv("curator-char-search-grid");
-      const foldHost = resultsArea.createDiv("curator-char-search-fold-host");
-      const searchCards = [];
-      let pickedCardIdx = -1;
-      let isResultsFolded = false;
-
-      const syncCharFoldView = () => {
-        foldHost.empty();
-        searchCards.forEach((cardEl, i) => {
-          const isPicked = i === pickedCardIdx;
-          cardEl.classList.toggle("is-picked", isPicked);
-          cardEl.style.display = isResultsFolded && pickedCardIdx >= 0 && !isPicked ? "none" : "";
-        });
-        grid.classList.toggle("is-folded", isResultsFolded && pickedCardIdx >= 0);
-        if (pickedCardIdx >= 0 && searchCards.length > 1) {
-          const restN = searchCards.length - 1;
-          const toggleBtn = foldHost.createEl("button", {
-            cls: "bm7-gsrc-stack-handle",
-            text: isResultsFolded
-              ? `已折叠其余 ${restN} 位候选角色 · 展开重选 ▾`
-              : `收起其余 ${restN} 位候选角色 ▴`
-          });
-          toggleBtn.type = "button";
-          toggleBtn.onclick = () => {
-            isResultsFolded = !isResultsFolded;
-            syncCharFoldView();
-          };
-        }
-      };
-
-      list.forEach((item, idx) => {
-        const similarInVault = findSimilarCharactersInCollection(
-          { bgmId: item.id, name: item.name, nameJp: item.nameJp },
-          plugin.settings.characterCollection || []
-        );
-        const card = grid.createDiv(
-          `curator-char-search-card ${similarInVault.length > 0 ? "is-already-collected" : ""}`
-        );
-        searchCards.push(card);
-
-        const ava = card.createDiv("curator-char-search-ava");
-        const candAvaSrc = resolveCharacterAvatarSrc(plugin, {
-          bgmId: item.id,
-          name: item.name,
-          nameJp: item.nameJp,
-          avatar: item.avatar
-        });
-        if (candAvaSrc) {
-          const img = ava.createEl("img", {
-            attr: { src: candAvaSrc, alt: item.name }
-          });
-          img.src = candAvaSrc;
-          img.alt = item.name;
-          img.loading = "lazy";
-          img.onerror = () => {
-            img.remove();
-            ava.setText((item.name || "角").slice(0, 1));
-          };
-        } else {
-          ava.setText((item.name || "角").slice(0, 1));
-        }
-
-        const meta = card.createDiv("curator-char-search-meta");
-        const nameRow = meta.createDiv("curator-char-search-name-row");
-        nameRow.createSpan({
-          cls: "curator-char-search-name",
-          text: item.name
-        });
-        if (similarInVault.length > 0) {
-          nameRow.createSpan({
-            cls: "curator-char-search-dupe-tag",
-            text: "已在馆藏"
-          });
-        }
-        if (item.nameJp && item.nameJp !== item.name) {
-          meta.createDiv({ cls: "curator-char-search-jp", text: item.nameJp });
-        }
-        const subTip = [item.infoTip, item.summary].filter(Boolean).join(" · ");
-        if (subTip) {
-          meta.createDiv({
-            cls: "curator-char-search-tip",
-            text: subTip
-          });
-        }
-
-        const pickBtn = card.createEl("button", {
-          cls: "curator-dl-mini-btn is-accent curator-char-pick-btn",
-          text: "+ 收录"
-        });
-        pickBtn.title = `收录「${item.name}」并同步萌娘百科萌点档案`;
-        pickBtn.onclick = async (ev) => {
-          ev.preventDefault();
-          pickBtn.disabled = true;
-          pickBtn.textContent = "寻访中…";
-          try {
-            const draft = await fetchDualSourceCharacterProfile(item.id, item.name);
-            pickedCardIdx = idx;
-            isResultsFolded = searchCards.length > 1;
-            syncCharFoldView();
-            await handleCandidatePickWithDupeCheck(draft);
-          } finally {
-            pickBtn.disabled = false;
-            pickBtn.textContent = "+ 收录";
-          }
-        };
-      });
+      if (mySeq !== drawerState.searchSeq) return;
+      drawerState.results = list;
+      drawerState.bangumiUnreachable = Boolean(list?._bangumiUnreachable);
+      drawerState.isSearching = false;
+      notifyMountedDrawer("search");
     } finally {
-      searchBtn.disabled = false;
-      searchBtn.textContent = "搜索 Bangumi 角色";
+      if (mySeq === drawerState.searchSeq) {
+        drawerState.isSearching = false;
+        notifyMountedDrawer("search");
+      }
     }
   };
 
@@ -6554,16 +7771,25 @@ function renderCharacterAddDrawer(plugin, container, vaultAnimeItems, options) {
   manualBtn.onclick = async (e) => {
     e.preventDefault();
     const nameHint = kwInput.value.trim() || "新角色";
-    manualBtn.disabled = true;
-    manualBtn.textContent = "寻访档案中…";
-    try {
-      const draft = await fetchDualSourceCharacterProfile("", nameHint);
-      await handleCandidatePickWithDupeCheck(draft);
-    } finally {
-      manualBtn.disabled = false;
-      manualBtn.textContent = "✦ 按名称直接收录";
-    }
+    drawerState.query = kwInput.value;
+    await enqueueCharacterPick({
+      key: `manual:${nameHint.toLowerCase()}`,
+      bgmId: "",
+      displayName: nameHint
+    });
   };
+
+  // 若因后台视图刷新重挂载收录台，立即无损恢复搜索状态、候选列表与待收录队列
+  if (drawerState.isSearching) {
+    searchBtn.disabled = true;
+    searchBtn.textContent = "正在搜索…";
+  } else if (drawerState.results !== null) {
+    renderSearchResultsList(drawerState.results, Boolean(drawerState.bangumiUnreachable));
+  }
+  if (draftQueue.length > 0) {
+    renderActiveEditorArea({ scrollIntoView: false });
+    syncAllQueueChrome();
+  }
 }
 
 function createLabeledInput(parent, labelText, initialValue, type = "text") {

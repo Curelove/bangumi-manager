@@ -2206,7 +2206,7 @@ async function saveIllustrationToVaultFolder(plugin, itemMeta) {
     throw new Error("未能获取到有效的图片文件数据");
   }
 
-  const fileName = `illust_${safeTitle}_${Date.now().toString().slice(-6)}${ext}`;
+  const fileName = `illust_${safeTitle}_${Date.now().toString().slice(-6)}_${Math.random().toString(36).slice(2, 5)}${ext}`;
   let storedPath = "";
   if (isDesktopNodeAvailable() && absDir) {
     const absTarget = path.join(absDir, fileName);
@@ -2744,9 +2744,10 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
 
   const initialIllusts = collectAllGalleryIllustrations(plugin);
 
-  // 顶栏
-  const header = container.createDiv("curator-char-header");
-  const titleSide = header.createDiv("curator-char-header-left");
+  // 顶栏：上排标题与操作按钮，下排左置独立筛选栏（避免与右侧「本地目录 / 导入图片 / 在线搜图」混淆）
+  const header = container.createDiv("curator-char-header bm-hall-header-stack");
+  const headerTop = header.createDiv("bm-hall-header-top");
+  const titleSide = headerTop.createDiv("curator-char-header-left");
   const hRow = titleSide.createDiv("curator-char-title-row");
   hRow.createEl("h2", { cls: "curator-char-title", text: "画册典藏" });
   const countBadgeEl = hRow.createSpan({
@@ -2754,17 +2755,7 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
     text: `共收录 ${initialIllusts.length} 幅画作`
   });
 
-  const actionSide = header.createDiv("curator-char-header-right");
-  const searchInput = actionSide.createEl("input", {
-    type: "text",
-    cls: "curator-input curator-char-search-input",
-    placeholder: "筛选画册角色 / 作品 / 标签..."
-  });
-  searchInput.value = uiState.searchQuery || "";
-  searchInput.oninput = () => {
-    uiState.searchQuery = searchInput.value;
-    renderMasonryStage();
-  };
+  const actionSide = headerTop.createDiv("curator-char-header-right");
 
   // 本地保存目录快速打开按钮（轻量次级入口，仅桌面端）
   if (isDesktopNodeAvailable()) {
@@ -2843,6 +2834,37 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
   onlineSearchBtn.onclick = () => {
     uiState.showOnlineDrawer = !uiState.showOnlineDrawer;
     renderIllustrationGalleryWorkspace(plugin, container, vaultAnimeItems, options);
+  };
+
+  // 左置独立本地筛选栏（与右上操作按钮物理隔离）
+  const illustFilterRow = header.createDiv("bm-hall-filter-row");
+  const illustFilterWrap = illustFilterRow.createDiv("bm-hall-filter-wrap");
+  const illustFilterIcon = illustFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+  illustFilterIcon.appendChild(v07Core.icon("search", 14));
+  const searchInput = illustFilterWrap.createEl("input", {
+    type: "search",
+    cls: "curator-input curator-char-search-input bm-hall-filter-input",
+    placeholder: "筛选已藏画册角色 / 作品 / 标签…"
+  });
+  searchInput.setAttribute("aria-label", "筛选画册角色、作品或标签");
+  searchInput.value = uiState.searchQuery || "";
+  const illustClearBtn = illustFilterWrap.createEl("button", {
+    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+    text: "×",
+    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+  });
+  searchInput.oninput = () => {
+    uiState.searchQuery = searchInput.value;
+    illustClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+    renderMasonryStage();
+  };
+  illustClearBtn.onclick = (e) => {
+    e.preventDefault();
+    uiState.searchQuery = "";
+    searchInput.value = "";
+    illustClearBtn.classList.remove("is-visible");
+    searchInput.focus();
+    renderMasonryStage();
   };
 
   // 在线搜图与路径配置抽屉
@@ -3243,12 +3265,26 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
 
         updateCardSizeDisplay(true);
 
+        if (!uiState._savingIllustKeys) {
+          uiState._savingIllustKeys = new Set();
+        }
+        const illustSaveKey = String(item.sourceLabel || item.pid || item.regularUrl || item.title || "");
         const alreadyInGallery = item.sourceLabel && savedSourceLabels.has(item.sourceLabel);
+        const isSavingNow = illustSaveKey && uiState._savingIllustKeys.has(illustSaveKey);
         const saveBtn = info.createEl("button", {
           cls: `curator-btn ${alreadyInGallery ? "" : "is-primary"} curator-illust-save-btn`,
-          text: alreadyInGallery ? "已在画册中（点击可另存）" : "保存到本地画册"
+          text: isSavingNow
+            ? "下载中..."
+            : alreadyInGallery
+            ? "已在画册中（点击可另存）"
+            : "保存到本地画册"
         });
+        if (isSavingNow) {
+          saveBtn.disabled = true;
+        }
         saveBtn.onclick = async () => {
+          if (saveBtn.disabled || (illustSaveKey && uiState._savingIllustKeys.has(illustSaveKey))) return;
+          if (illustSaveKey) uiState._savingIllustKeys.add(illustSaveKey);
           const chosenTier = item._selectedTier || uiState.downloadSizeTier || "regular";
           const estBytes = item.tierBytes?.[chosenTier] || estimateTierBytes(item.width, item.height, chosenTier);
           saveBtn.disabled = true;
@@ -3270,9 +3306,11 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
               sourceLabel: item.sourceLabel
             });
             savedSourceLabels.add(item.sourceLabel);
-            saveBtn.disabled = false;
-            saveBtn.removeClass("is-primary");
-            saveBtn.textContent = `已入库 (${formatByteSize(savedRec.fileSizeBytes, true)})`;
+            if (saveBtn.isConnected) {
+              saveBtn.disabled = false;
+              saveBtn.removeClass("is-primary");
+              saveBtn.textContent = `已入库 (${formatByteSize(savedRec.fileSizeBytes, true)})`;
+            }
             if (Notice) {
               new Notice(
                 `已将《${item.title}》(${tierLabels[chosenTier]} · ${formatByteSize(savedRec.fileSizeBytes, true)}) 保存至「${plugin.settings.illustrationGalleryFolder || "附件/画册典藏"}」`
@@ -3280,9 +3318,13 @@ function _renderIllustrationGalleryWorkspaceInner(plugin, container, vaultAnimeI
             }
             renderMasonryStage();
           } catch (err) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = "重试保存";
+            if (saveBtn.isConnected) {
+              saveBtn.disabled = false;
+              saveBtn.textContent = "重试保存";
+            }
             if (Notice) new Notice(`保存失败：${err.message}`);
+          } finally {
+            if (illustSaveKey) uiState._savingIllustKeys.delete(illustSaveKey);
           }
         };
       });
@@ -4177,7 +4219,7 @@ async function sliceAudioFromVideoWithFfmpeg(plugin, options) {
   const safePrefix = String(characterName || animeTitle || "voice")
     .replace(/[\\/:*?"<>|]/g, "_")
     .slice(0, 24);
-  const fileName = `${safePrefix}_ep${episode || "1"}_${Date.now().toString().slice(-6)}.mp3`;
+  const fileName = `${safePrefix}_ep${episode || "1"}_${Date.now().toString().slice(-6)}_${Math.random().toString(36).slice(2, 5)}.mp3`;
   const absOut = path.join(absDir, fileName);
   const ffmpegBin = resolveFfmpegExecutable(plugin);
 
@@ -4678,9 +4720,10 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
 
   const voices = Array.isArray(plugin.settings?.voiceCollection) ? plugin.settings.voiceCollection : [];
 
-  // 顶栏
-  const header = container.createDiv("curator-char-header");
-  const titleSide = header.createDiv("curator-char-header-left");
+  // 顶栏：上排标题与操作按钮，下排左置独立筛选栏（避免与右侧「本地目录 / 抽取名台词 / 截取剧集音声」混淆）
+  const header = container.createDiv("curator-char-header bm-hall-header-stack");
+  const headerTop = header.createDiv("bm-hall-header-top");
+  const titleSide = headerTop.createDiv("curator-char-header-left");
   const hRow = titleSide.createDiv("curator-char-title-row");
   hRow.createEl("h2", { cls: "curator-char-title", text: "音声典藏" });
   const voiceCountBadgeEl = hRow.createSpan({
@@ -4688,17 +4731,7 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
     text: `共收录 ${voices.length} 条音声`
   });
 
-  const actionSide = header.createDiv("curator-char-header-right");
-  const searchInput = actionSide.createEl("input", {
-    type: "text",
-    cls: "curator-input curator-char-search-input",
-    placeholder: "检索台词 / 角色 / 动画作品..."
-  });
-  searchInput.value = uiState.searchQuery || "";
-  searchInput.oninput = () => {
-    uiState.searchQuery = searchInput.value;
-    renderVoiceCards();
-  };
+  const actionSide = headerTop.createDiv("curator-char-header-right");
 
   if (isDesktopNodeAvailable()) {
     const openDirBtn = actionSide.createEl("button", {
@@ -4759,6 +4792,37 @@ function _renderVoiceLineArchiveWorkspaceInner(plugin, container, vaultAnimeItem
       renderVoiceLineArchiveWorkspace(plugin, container, vaultAnimeItems, options);
     };
   }
+
+  // 左置独立本地筛选栏（与右上操作按钮物理隔离）
+  const voiceFilterRow = header.createDiv("bm-hall-filter-row");
+  const voiceFilterWrap = voiceFilterRow.createDiv("bm-hall-filter-wrap");
+  const voiceFilterIcon = voiceFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+  voiceFilterIcon.appendChild(v07Core.icon("search", 14));
+  const searchInput = voiceFilterWrap.createEl("input", {
+    type: "search",
+    cls: "curator-input curator-char-search-input bm-hall-filter-input",
+    placeholder: "筛选已藏台词 / 角色 / 动画作品…"
+  });
+  searchInput.setAttribute("aria-label", "筛选已藏台词、角色或动画作品");
+  searchInput.value = uiState.searchQuery || "";
+  const voiceClearBtn = voiceFilterWrap.createEl("button", {
+    cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+    text: "×",
+    attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+  });
+  searchInput.oninput = () => {
+    uiState.searchQuery = searchInput.value;
+    voiceClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+    renderVoiceCards();
+  };
+  voiceClearBtn.onclick = (e) => {
+    e.preventDefault();
+    uiState.searchQuery = "";
+    searchInput.value = "";
+    voiceClearBtn.classList.remove("is-visible");
+    searchInput.focus();
+    renderVoiceCards();
+  };
 
   // 智能视频+字幕音声截取工坊（仅桌面端）
   if (isDesktopNodeAvailable() && uiState.showSlicerDrawer) {
@@ -8131,9 +8195,12 @@ function getMultiHallStyles() {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
 }
 .curator-char-search-input {
-  min-width: 210px;
+  min-width: 0;
 }
 .curator-char-add-drawer {
   padding: 12px 14px;
@@ -8141,16 +8208,20 @@ function getMultiHallStyles() {
   border: 1px solid color-mix(in srgb, #8f683d 30%, var(--background-modifier-border));
   background: color-mix(in srgb, var(--background-primary) 92%, #f6efe3 8%);
   box-shadow: 0 4px 14px rgba(28, 20, 12, 0.05);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .curator-char-add-searchbar {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 .curator-char-kw-input {
-  flex: 1 1 240px;
-  min-width: 200px;
+  flex: 1 1 220px;
+  min-width: 0;
 }
 .curator-photowall-ctrls .curator-dl-mini-btn.is-active {
   background: color-mix(in srgb, #8f683d 20%, var(--background-secondary)) !important;

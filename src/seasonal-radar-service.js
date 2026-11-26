@@ -1563,15 +1563,16 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
     let enriched = buildEnrichedList();
     const uncachedWithRemote = enriched.filter((e) => !e.localCover.hasLocal && e.sub.cover);
 
-    // 3. 统一底色边框的筛选工具条（.curator-radar-toolbar）
-    const statusStrip = bodyHost.createDiv("curator-radar-status-strip curator-radar-toolbar");
+    // 3. 统一底色边框的筛选工具条（上排状态与操作按钮，下排左置独立筛选框，避免与右侧「刷新最新定档」混淆）
+    const statusStrip = bodyHost.createDiv("curator-radar-status-strip curator-radar-toolbar bm-hall-header-stack");
+    const statusTopRow = statusStrip.createDiv("bm-hall-header-top");
     const statusText = isDyn
       ? `${uiState.radarYear}年${uiState.radarSeasonMonth}月排期 · 目前已确定动画 ${confirmedTotal} 部（展示热度前 ${subjects.length} 部）`
       : `${uiState.radarYear}年${uiState.radarSeasonMonth}月档案 · 全网共收录动画 ${confirmedTotal} 部（展示代表作前 ${subjects.length} 部）`;
 
-    statusStrip.createSpan({ cls: "curator-radar-status-text", text: statusText });
+    statusTopRow.createSpan({ cls: "curator-radar-status-text", text: statusText });
 
-    const controlsRight = statusStrip.createDiv("curator-radar-controls-right");
+    const controlsRight = statusTopRow.createDiv("curator-radar-controls-right");
 
     const matchFilterBtn = controlsRight.createEl("button", {
       cls: `curator-dl-mini-btn ${uiState.radarOnlyMatched ? "is-active-filter" : ""}`,
@@ -1636,17 +1637,6 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
       }
     };
 
-    const searchInput = controlsRight.createEl("input", {
-      type: "search",
-      cls: "curator-radar-search-input",
-      placeholder: "搜索新番名或标签…",
-      value: uiState.radarSearch || ""
-    });
-    searchInput.oninput = () => {
-      uiState.radarSearch = searchInput.value;
-      renderGridCards();
-    };
-
     const refreshBtn = controlsRight.createEl("button", {
       cls: "curator-dl-mini-btn",
       text: "刷新最新定档"
@@ -1667,6 +1657,37 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
           `已更新 ${uiState.radarYear}年${uiState.radarSeasonMonth}月排期：目前已确定 ${fresh.total || 0} 部动画`
         );
       }
+    };
+
+    const radarFilterRow = statusStrip.createDiv("bm-hall-filter-row");
+    const radarFilterWrap = radarFilterRow.createDiv("bm-hall-filter-wrap");
+    const radarFilterIcon = radarFilterWrap.createSpan({ cls: "bm-hall-filter-icon" });
+    radarFilterIcon.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>';
+    const searchInput = radarFilterWrap.createEl("input", {
+      type: "search",
+      cls: "curator-radar-search-input bm-hall-filter-input",
+      placeholder: "筛选本季新番名或标签…",
+      value: uiState.radarSearch || ""
+    });
+    searchInput.setAttribute("aria-label", "筛选本季新番名或标签");
+    const radarClearBtn = radarFilterWrap.createEl("button", {
+      cls: `bm-hall-filter-clear ${searchInput.value ? "is-visible" : ""}`,
+      text: "×",
+      attr: { type: "button", title: "清空筛选词", "aria-label": "清空筛选词" }
+    });
+    searchInput.oninput = () => {
+      uiState.radarSearch = searchInput.value;
+      radarClearBtn.classList.toggle("is-visible", Boolean(searchInput.value));
+      renderGridCards();
+    };
+    radarClearBtn.onclick = (e) => {
+      e.preventDefault();
+      uiState.radarSearch = "";
+      searchInput.value = "";
+      radarClearBtn.classList.remove("is-visible");
+      searchInput.focus();
+      renderGridCards();
     };
 
     const cardsContainer = bodyHost.createDiv("curator-radar-cards-grid");
@@ -1765,12 +1786,22 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
             await leaf.openFile(vaultItem.file);
           };
         } else {
+          if (!plugin.__pendingRadarImportIds) {
+            plugin.__pendingRadarImportIds = new Set();
+          }
+          const subIdStr = String(sub.id);
+          const isImportingNow = plugin.__pendingRadarImportIds.has(subIdStr);
           const importBtn = actionRow.createEl("button", {
             cls: "curator-dl-mini-btn is-accent",
-            text: "+ 加入想看"
+            text: isImportingNow ? "正在导入…" : "+ 加入想看"
           });
+          if (isImportingNow) {
+            importBtn.disabled = true;
+          }
           importBtn.onclick = async (ev) => {
             ev.preventDefault();
+            if (importBtn.disabled || plugin.__pendingRadarImportIds.has(subIdStr)) return;
+            plugin.__pendingRadarImportIds.add(subIdStr);
             importBtn.disabled = true;
             importBtn.textContent = "正在导入…";
             try {
@@ -1806,18 +1837,29 @@ function renderSeasonalDiscoveryRadarDrawer(plugin, parentContainer, items, uiSt
                 showPersonalScore: plugin.settings.showPersonalScore,
                 useBangumiPreciseScore: plugin.settings.showBangumiPreciseScore === true
               });
-              importBtn.textContent = "✓ 已导入想看";
-              importBtn.classList.remove("is-accent");
-              importBtn.classList.add("is-in-vault-btn");
+              existingSubjectIds.add(subIdStr);
+              if (sub.name) existingNames.add(sub.name.toLowerCase());
+              if (importBtn.isConnected) {
+                importBtn.textContent = "✓ 已导入想看";
+                importBtn.classList.remove("is-accent");
+                importBtn.classList.add("is-in-vault-btn");
+              }
               if (Notice) {
                 new Notice(`已将《${sub.name || sub.originalName}》导入为「想看」动画笔记！`);
               }
-              await plugin.refreshOpenDashboardViews();
             } catch (err) {
-              importBtn.disabled = false;
-              importBtn.textContent = "+ 重试导入";
+              if (importBtn.isConnected) {
+                importBtn.disabled = false;
+                importBtn.textContent = "+ 重试导入";
+              }
               if (Notice) {
                 new Notice(`导入失败：${err.message}`);
+              }
+            } finally {
+              plugin.__pendingRadarImportIds.delete(subIdStr);
+              // 等待所有快速连点的导入任务全部落盘后再统一刷新面板，避免中途冲掉其余正在导入的卡片按钮状态
+              if (plugin.__pendingRadarImportIds.size === 0) {
+                await plugin.refreshOpenDashboardViews();
               }
             }
           };
